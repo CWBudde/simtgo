@@ -323,7 +323,16 @@ time a `-tags cuda` binary wants an NVIDIA driver (`libcuda.so.1`, installed
 with the driver) and, only if it has to compile a kernel, `libnvrtc` from the
 toolkit — a kernel whose PTX is prebuilt runs with no toolkit present at all.
 
-Both are searched for in the usual places: the linker's default path, then
-`$CUDA_PATH` / `$CUDA_HOME` / `/usr/local/cuda` / `/opt/cuda`. `CUDA_PATH` is
-honoured ahead of the system library, and `GOCUDA_LIBCUDA` / `GOCUDA_LIBNVRTC`
-name a file outright. When nothing is found the error lists every path tried.
+The two are searched for differently, because they come from different
+places. The **driver** is installed by the driver package and lands in the
+dynamic linker's default path, so only `libcuda.so.1` and `libcuda.so` are
+tried — a toolkit root is not consulted, and the toolkit's own
+`lib64/stubs/libcuda.so` is deliberately never a candidate, since it exists to
+satisfy a linker and fails every call. **NVRTC** is part of the toolkit, so
+`$CUDA_PATH` and `$CUDA_HOME` are tried first (an explicitly configured
+installation wins over the system one), then the linker's default path, then
+`/usr/local/cuda` and `/opt/cuda`.
+
+`GOCUDA_LIBCUDA` and `GOCUDA_LIBNVRTC` each name a file outright and replace
+that search rather than heading it. When nothing is found, the error lists
+every path tried.

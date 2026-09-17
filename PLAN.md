@@ -156,8 +156,9 @@ from **28.7 ms to 0.9 ms** when the PTX is prebuilt.
       `pkg-config` / a documented override. (2026-09-17) — the question moved
       from build time to run time, so the answer did too: `cuda/library.go`
       decides which *file* to open, honouring `GOCUDA_LIBCUDA` /
-      `GOCUDA_LIBNVRTC` outright and `CUDA_PATH` / `CUDA_HOME` ahead of the
-      system library. `pkg-config` is deliberately **not** used: it configures
+      `GOCUDA_LIBNVRTC` outright and, for NVRTC alone, `CUDA_PATH` /
+      `CUDA_HOME` ahead of the system library — the driver is not part of the
+      toolkit, so a toolkit root says nothing about where it is. `pkg-config` is deliberately **not** used: it configures
       a link, and there is no link left to configure. The policy is untagged,
       loading-free Go, so `cuda/library_test.go` checks the search order on a
       machine with no CUDA — the machine where a path bug actually bites.

@@ -50,8 +50,10 @@ run without a GPU. **Anything added to the driver needs a matching stub**, and
 Which library file is opened is decided in `cuda/library.go`, which is
 deliberately untagged and free of any loading so the path policy is testable
 with no CUDA present (`cuda/library_test.go`). `GOCUDA_LIBCUDA` and
-`GOCUDA_LIBNVRTC` override the search outright; `CUDA_PATH`/`CUDA_HOME` are
-preferred over the system library.
+`GOCUDA_LIBNVRTC` replace the respective search outright. `CUDA_PATH`/
+`CUDA_HOME` apply to **NVRTC only**, ahead of the system library: the driver
+ships with the driver, not the toolkit, so a toolkit root says nothing about
+where it lives.
 
 `cmd/gocuda` depends on `internal/lower` and never on `simt`. It reaches NVRTC
 by shelling out to `cmd/gocuda-nvrtc` (built with `-tags cuda`), which speaks
