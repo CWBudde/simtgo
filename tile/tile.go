@@ -42,9 +42,10 @@ type node struct {
 	id    int
 	n     int // element count
 	args  []*node
-	host  []float32 // opInput: host data, uploaded on materialisation
-	scale float32   // opScale
-	cfn   string    // opUnary: the CUDA function to call
+	host  []float32            // opInput: host data, uploaded on materialisation
+	dev   *cuda.Slice[float32] // opInput: data already on the device
+	scale float32              // opScale
+	cfn   string               // opUnary: the CUDA function to call
 }
 
 // Graph records a pipeline. Operations append to it; nothing touches the

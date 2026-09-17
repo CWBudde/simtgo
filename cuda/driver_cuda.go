@@ -191,10 +191,9 @@ func (f *Function) Launch(grid, block Dim3, sharedBytes int, args ...Arg) error 
 	ptrs := C.malloc(C.size_t(len(args)) * C.size_t(unsafe.Sizeof(uintptr(0))))
 	defer C.free(ptrs)
 
-	base := uintptr(store)
 	table := unsafe.Slice((*unsafe.Pointer)(ptrs), max(len(args), 1))
 	for i, a := range args {
-		dst := unsafe.Pointer(base + uintptr(i*slot))
+		dst := unsafe.Add(store, i*slot)
 		C.memcpy(dst, unsafe.Pointer(&a.b[0]), C.size_t(len(a.b)))
 		table[i] = dst
 	}
