@@ -32,14 +32,13 @@ func TestSeveralDiagnostics(t *testing.T) {
 	diags := refuse(t, `func K(ctx gpu.Ctx, a []float32) {
 	i, j := 0, 1
 	go func() {}()
-	a[i] = float32(j)
 	var m map[int]int
-	_ = m
+	a[i] = float32(j) + float32(len(m))
 }`)
 	if len(diags) != 3 {
 		t.Fatalf("got %d diagnostics, want 3:\n%s", len(diags), render(diags))
 	}
-	for _, want := range []string{"multiple assignment", "unsupported statement", "unsupported"} {
+	for _, want := range []string{"multiple assignment", "unsupported statement", "map[int]int"} {
 		if !strings.Contains(render(diags), want) {
 			t.Errorf("diagnostics do not mention %q:\n%s", want, render(diags))
 		}
@@ -118,4 +117,46 @@ func render(diags []simt.Diagnostic) string {
 		b.WriteString("  " + d.Error() + "\n")
 	}
 	return b.String()
+}
+
+// TestPackageLevelIdentRefused covers a construct that used to be silently
+// mistranslated: a package-level variable was emitted into the CUDA verbatim
+// and only rejected by NVRTC, at run time, as "identifier is undefined" -- a C
+// error about code nobody wrote.
+func TestPackageLevelIdentRefused(t *testing.T) {
+	src := diagPrelude + "var gain float32 = 2\n\nfunc K(ctx gpu.Ctx, a []float32) { a[0] = gain }\n"
+	_, err := simt.Transpile(fstest.MapFS{"k.go": &fstest.MapFile{Data: []byte(src)}}, "K")
+	if err == nil {
+		t.Fatal("expected a package-level variable to be refused")
+	}
+	if !strings.Contains(err.Error(), "declared outside the kernel") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// TestPackageLevelConstStillWorks is the other half of that check: constants
+// are folded by go/types before the emitter sees them, which is what lets
+// kernels.FIR size its tile with FIRBlock + FIRMaxTaps.
+func TestPackageLevelConstStillWorks(t *testing.T) {
+	src := diagPrelude + "const gain = 2.0\n\nfunc K(ctx gpu.Ctx, a []float32) { a[0] = gain }\n"
+	u, err := simt.Transpile(fstest.MapFS{"k.go": &fstest.MapFile{Data: []byte(src)}}, "K")
+	if err != nil {
+		t.Fatalf("Transpile: %v", err)
+	}
+	if !strings.Contains(u.Source, "a[0] = 2.0f") {
+		t.Errorf("constant was not folded:\n%s", u.Source)
+	}
+}
+
+// TestGenericKernelRefused reports the actual problem rather than complaining
+// about the type parameter's interface underlying type.
+func TestGenericKernelRefused(t *testing.T) {
+	src := diagPrelude + "func K[T float32](ctx gpu.Ctx, a []T) { a[0] = 1 }\n"
+	_, err := simt.Transpile(fstest.MapFS{"k.go": &fstest.MapFile{Data: []byte(src)}}, "K")
+	if err == nil {
+		t.Fatal("expected a generic kernel to be refused")
+	}
+	if !strings.Contains(err.Error(), "must not be generic") {
+		t.Errorf("unexpected error: %v", err)
+	}
 }

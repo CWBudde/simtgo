@@ -117,7 +117,7 @@ func (t *transpiler) expr(e ast.Expr) cexpr {
 
 	switch e := e.(type) {
 	case *ast.Ident:
-		return atom("%s", cname(e.Name))
+		return t.ident(e)
 	case *ast.ParenExpr:
 		// Go's own grouping parentheses carry no information the AST does not
 		// already have: the emitter derives every parenthesis it needs from
@@ -135,7 +135,11 @@ func (t *transpiler) expr(e ast.Expr) cexpr {
 		t.fail(e.Pos(), "unsupported unary operator %s", e.Op)
 		return atom("")
 	case *ast.IndexExpr:
-		if _, ok := t.info.Types[e.X].Type.Underlying().(*types.Slice); !ok {
+		typ := t.typeOf(e.X)
+		if typ == nil {
+			return atom("")
+		}
+		if _, ok := typ.Underlying().(*types.Slice); !ok {
 			t.fail(e.Pos(), "only slices can be indexed in kernels")
 			return atom("")
 		}
@@ -236,6 +240,10 @@ func (t *transpiler) assumeBlockDim(c *ast.CallExpr) cexpr {
 		t.fail(c.Pos(), "AssumeBlockDim must be called at the top level of the kernel body")
 		return atom("")
 	}
+	if len(c.Args) != 1 {
+		t.fail(c.Pos(), "AssumeBlockDim takes one argument")
+		return atom("")
+	}
 	n, ok := t.constInt(c.Args[0])
 	if !ok {
 		t.fail(c.Pos(), "AssumeBlockDim needs a constant block size (got a runtime value)")
@@ -288,6 +296,52 @@ func (t *transpiler) lengthOf(e ast.Expr) cexpr {
 	}
 	t.fail(e.Pos(), "len() is only supported for slice parameters and shared buffers")
 	return atom("0")
+}
+
+// ident renders a reference to a variable.
+//
+// The object is resolved rather than the name simply copied, because a kernel
+// runs on a device where nothing exists but its own parameters and locals. A
+// package-level variable emitted verbatim would compile here and then fail
+// inside NVRTC as "identifier is undefined" -- a C error about code the author
+// never wrote. Constants never reach this: go/types has already folded them
+// into literals.
+func (t *transpiler) ident(id *ast.Ident) cexpr {
+	obj := t.info.Uses[id]
+	if obj == nil {
+		obj = t.info.Defs[id]
+	}
+	switch {
+	case id.Name == "_":
+		// go/types resolves the blank identifier to nothing, and C has no
+		// equivalent; before this it was emitted verbatim as a C identifier.
+		t.fail(id.Pos(), "the blank identifier is not supported in kernels")
+		return atom("")
+	case obj == nil:
+		t.fail(id.Pos(), "%s has no resolved type", id.Name)
+		return atom("")
+	case t.poisoned[obj]:
+		return atom("")
+	case obj.Pkg() != nil && obj.Parent() == obj.Pkg().Scope():
+		t.fail(id.Pos(), "%s is declared outside the kernel; a kernel can only use its parameters, its own variables and constants", id.Name)
+		return atom("")
+	case obj.Parent() == types.Universe && id.Name == "nil":
+		t.fail(id.Pos(), "nil has no device equivalent")
+		return atom("")
+	}
+	return atom("%s", cname(id.Name))
+}
+
+// typeOf reports e's checked type, refusing rather than panicking when the
+// type checker left none -- which cannot happen behind Transpile, but can
+// behind an analysis driver that tolerates type errors.
+func (t *transpiler) typeOf(e ast.Expr) types.Type {
+	tv, ok := t.info.Types[e]
+	if !ok || tv.Type == nil {
+		t.fail(e.Pos(), "cannot determine the type of this expression")
+		return nil
+	}
+	return tv.Type
 }
 
 func (t *transpiler) constInt(e ast.Expr) (int, bool) {

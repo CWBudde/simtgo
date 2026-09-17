@@ -234,9 +234,16 @@ func (t *transpiler) decl(s *ast.DeclStmt) {
 				obj := t.info.Defs[n]
 				if obj == nil {
 					t.fail(n.Pos(), "%s has no resolved type", n.Name)
-					return
+					continue
 				}
+				before := len(t.diags)
 				ctype := t.ctype(obj.Type(), n.Pos())
+				if len(t.diags) > before {
+					// Every later use of a variable with no device type would
+					// repeat this one refusal.
+					t.poison(obj)
+					continue
+				}
 				if len(vs.Values) == 0 {
 					t.line("%s %s = 0;", ctype, cname(n.Name))
 					continue
@@ -305,7 +312,11 @@ func (t *transpiler) rangeStmt(s *ast.RangeStmt) {
 		return
 	}
 	var limit cexpr
-	switch typ := t.info.Types[s.X].Type.Underlying().(type) {
+	xt := t.typeOf(s.X)
+	if xt == nil {
+		return
+	}
+	switch typ := xt.Underlying().(type) {
 	case *types.Slice:
 		limit = t.lengthOf(s.X)
 	case *types.Basic:

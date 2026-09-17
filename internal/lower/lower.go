@@ -139,6 +139,13 @@ func (t *transpiler) kernel(fd *ast.FuncDecl) {
 		t.fail(fd.Pos(), "a kernel must not return values; write results through a slice parameter")
 		return
 	}
+	if fd.Type.TypeParams != nil {
+		// Reported here rather than left to ctype, which would otherwise
+		// complain about the type parameter's interface underlying type and
+		// tell the author nothing about why.
+		t.fail(fd.Pos(), "a kernel must not be generic")
+		return
+	}
 	params := t.params(fd.Type.Params)
 	if len(params) == 0 || !IsCtx(params[0].typ) {
 		t.fail(fd.Pos(), "a kernel's first parameter must be gpu.Ctx")
@@ -240,6 +247,10 @@ func (t *transpiler) ctype(typ types.Type, pos token.Pos) string {
 	basic, ok := typ.Underlying().(*types.Basic)
 	if !ok {
 		t.fail(pos, "unsupported type %s on the device", typ)
+		return "void"
+	}
+	if basic.Kind() == types.Invalid {
+		// The type checker has already said something better about this.
 		return "void"
 	}
 	switch basic.Kind() {
