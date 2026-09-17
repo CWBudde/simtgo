@@ -54,9 +54,16 @@ func Available() bool {
 // and would hand out handles belonging to a context that has already been
 // released. Close unloads what is left, so no module can survive its context.
 type Context struct {
-	dev       C.CUdevice
-	ctx       C.CUcontext
-	arch      string
+	dev C.CUdevice
+	ctx C.CUcontext
+
+	// The compute capability is kept as the two numbers the driver reports
+	// rather than as the "compute_75" string alone, because callers that gate
+	// a feature on hardware ("needs 8.0 or better") have to compare numbers,
+	// and re-parsing the string to get them back is a detour through a format
+	// this package invented in the first place.
+	ccMajor, ccMinor int
+
 	maxShared int
 
 	// mu guards the module bookkeeping below. It is also held across the
@@ -94,7 +101,7 @@ func NewContext(device int) (*Context, error) {
 	if err := check(C.cuDeviceGetAttribute(&minor, C.CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, c.dev), "cuDeviceGetAttribute"); err != nil {
 		return nil, err
 	}
-	c.arch = fmt.Sprintf("compute_%d%d", int(major), int(minor))
+	c.ccMajor, c.ccMinor = int(major), int(minor)
 	var shared C.int
 	if err := check(C.cuDeviceGetAttribute(&shared, C.CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK, c.dev), "cuDeviceGetAttribute"); err != nil {
 		return nil, err
@@ -107,8 +114,14 @@ func (c *Context) bind() error {
 	return check(C.cuCtxSetCurrent(c.ctx), "cuCtxSetCurrent")
 }
 
-// Arch reports the virtual architecture of the device, e.g. "compute_75".
-func (c *Context) Arch() string { return c.arch }
+// Arch reports the virtual architecture of the device, e.g. "compute_75". It
+// is what NVRTC's --gpu-architecture expects, and ParseArch reads it back.
+func (c *Context) Arch() string { return fmt.Sprintf("compute_%d%d", c.ccMajor, c.ccMinor) }
+
+// ComputeCapability reports the device's compute capability, e.g. (7, 5) for a
+// Turing card. It is the same fact Arch spells as a string, in the form a
+// caller needs to decide whether a feature is available on this device.
+func (c *Context) ComputeCapability() (major, minor int) { return c.ccMajor, c.ccMinor }
 
 // MaxSharedMemPerBlock reports how much shared memory a single block may use,
 // in bytes (CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK); 48 KiB on most
@@ -379,17 +392,20 @@ func (f *Function) Launch(grid, block Dim3, sharedBytes int, args ...Arg) error 
 	return f.x.Sync()
 }
 
-// Compile JIT-compiles CUDA C source to PTX with NVRTC. The compiler log is
-// returned on success and failure alike; on failure it is the only thing that
-// explains what the generated kernel got wrong.
-func Compile(src, name, arch string) (ptx []byte, log string, err error) {
+// Compile JIT-compiles CUDA C source to PTX with NVRTC.
+//
+// The compiler log comes back on success and failure alike: on success it
+// carries the warnings a generated kernel provoked, and on failure it is the
+// only thing that explains what the kernel got wrong, which is why a refused
+// compilation is a *CompileError holding the whole log rather than a code.
+func Compile(src, name, arch string) (*PTX, error) {
 	csrc, cname := C.CString(src), C.CString(name)
 	defer C.free(unsafe.Pointer(csrc))
 	defer C.free(unsafe.Pointer(cname))
 
 	var prog C.nvrtcProgram
 	if r := C.nvrtcCreateProgram(&prog, csrc, cname, 0, nil, nil); r != C.NVRTC_SUCCESS {
-		return nil, "", nvrtcErr(r, "nvrtcCreateProgram")
+		return nil, nvrtcErr(r, "nvrtcCreateProgram")
 	}
 	defer C.nvrtcDestroyProgram(&prog)
 
@@ -398,6 +414,9 @@ func Compile(src, name, arch string) (ptx []byte, log string, err error) {
 	opts := [1]*C.char{opt}
 	cres := C.nvrtcCompileProgram(prog, 1, &opts[0])
 
+	// The log is read before the status is acted on, because it is the part of
+	// a failed compilation worth keeping.
+	var log string
 	var logSize C.size_t
 	if C.nvrtcGetProgramLogSize(prog, &logSize) == C.NVRTC_SUCCESS && logSize > 1 {
 		buf := make([]C.char, logSize)
@@ -406,30 +425,54 @@ func Compile(src, name, arch string) (ptx []byte, log string, err error) {
 		}
 	}
 	if cres != C.NVRTC_SUCCESS {
-		return nil, log, fmt.Errorf("%w\n%s", nvrtcErr(cres, "nvrtcCompileProgram"), log)
+		return nil, &CompileError{Name: name, Arch: arch, Code: NVRTCResult(cres), Log: log}
 	}
 
 	var ptxSize C.size_t
 	if r := C.nvrtcGetPTXSize(prog, &ptxSize); r != C.NVRTC_SUCCESS {
-		return nil, log, nvrtcErr(r, "nvrtcGetPTXSize")
+		return nil, nvrtcErr(r, "nvrtcGetPTXSize")
 	}
 	buf := make([]C.char, ptxSize)
 	if r := C.nvrtcGetPTX(prog, &buf[0]); r != C.NVRTC_SUCCESS {
-		return nil, log, nvrtcErr(r, "nvrtcGetPTX")
+		return nil, nvrtcErr(r, "nvrtcGetPTX")
 	}
-	return []byte(C.GoString(&buf[0])), log, nil
+	return &PTX{Bytes: []byte(C.GoString(&buf[0])), Log: log, Arch: arch}, nil
 }
 
+// NVRTCVersion reports the version of the NVRTC library this process is linked
+// against. It decides which CUDA C a generated kernel may use and which
+// architectures Compile accepts, so it is worth putting into a bug report next
+// to the driver's own version.
+func NVRTCVersion() (major, minor int, err error) {
+	var maj, min C.int
+	if r := C.nvrtcVersion(&maj, &min); r != C.NVRTC_SUCCESS {
+		return 0, 0, nvrtcErr(r, "nvrtcVersion")
+	}
+	return int(maj), int(min), nil
+}
+
+// check turns a driver status into a *Error that keeps the code, so that a
+// caller can ask errors.Is which failure this was instead of matching on the
+// message. The description is taken here rather than remembered for later
+// because cuGetErrorString needs a driver, and these errors are routinely
+// formatted somewhere that has none.
+//
+// It returns error rather than *Error on purpose: several callers hand the
+// result straight back as an error, and a typed nil pointer travelling through
+// that interface would be a non-nil error reporting success.
 func check(r C.CUresult, op string) error {
 	if r == C.CUDA_SUCCESS {
 		return nil
 	}
-	var name, str *C.char
-	C.cuGetErrorName(r, &name)
+	var str *C.char
 	C.cuGetErrorString(r, &str)
-	return fmt.Errorf("cuda: %s failed: %s (%s)", op, C.GoString(str), C.GoString(name))
+	return &Error{Op: op, Code: Result(r), Desc: C.GoString(str)}
 }
 
+// nvrtcErr is check for NVRTC, and returns error for the same reason.
 func nvrtcErr(r C.nvrtcResult, op string) error {
-	return fmt.Errorf("nvrtc: %s failed: %s", op, C.GoString(C.nvrtcGetErrorString(r)))
+	if r == C.NVRTC_SUCCESS {
+		return nil
+	}
+	return &NVRTCError{Op: op, Code: NVRTCResult(r), Desc: C.GoString(C.nvrtcGetErrorString(r))}
 }

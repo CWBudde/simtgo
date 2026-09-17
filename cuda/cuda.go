@@ -13,6 +13,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strconv"
+	"strings"
 )
 
 // ErrNoCUDA is returned by every operation when the module was built without
@@ -23,6 +25,55 @@ var ErrNoCUDA = errors.New("cuda: built without the 'cuda' build tag (rebuild wi
 // it has been closed. It lives here rather than beside the driver bindings so
 // that callers can test for it in either build.
 var ErrContextClosed = errors.New("cuda: context is closed")
+
+// ParseArch splits a virtual architecture such as "compute_75" into its
+// compute capability.
+//
+// The minor version is the last digit and the major version is everything
+// before it, which is the only reading that survives compute capability 10:
+// "compute_100" is 10.0, not 1.0 with a stray digit, and a fixed two-digit
+// split silently gets every Blackwell-class device wrong.
+func ParseArch(s string) (major, minor int, err error) {
+	const prefix = "compute_"
+	digits, ok := strings.CutPrefix(s, prefix)
+	if !ok {
+		return 0, 0, fmt.Errorf("cuda: %q is not a virtual architecture: expected a %q prefix", s, prefix)
+	}
+	// Arch-conditional targets ("compute_90a", "compute_100f") are rejected
+	// rather than parsed: their PTX is tied to that exact architecture and is
+	// not forward compatible, so a caller that asked for one and got a plain
+	// capability back would be told its kernel runs on hardware it does not.
+	if n := len(digits); n > 1 {
+		if suffix := digits[n-1]; suffix == 'a' || suffix == 'f' {
+			if isDigits(digits[:n-1]) {
+				return 0, 0, fmt.Errorf("cuda: %q is an arch-conditional target and its PTX is not forward compatible; use %q instead", s, prefix+digits[:n-1])
+			}
+		}
+	}
+	if !isDigits(digits) {
+		return 0, 0, fmt.Errorf("cuda: %q is not a virtual architecture: %q is not a compute capability", s, digits)
+	}
+	if len(digits) < 2 {
+		return 0, 0, fmt.Errorf("cuda: %q is not a virtual architecture: a compute capability needs a major and a minor digit, e.g. %q", s, "compute_75")
+	}
+	major, err = strconv.Atoi(digits[:len(digits)-1])
+	if err != nil {
+		return 0, 0, fmt.Errorf("cuda: %q is not a virtual architecture: %w", s, err)
+	}
+	return major, int(digits[len(digits)-1] - '0'), nil
+}
+
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
 
 // DevPtr is a device address (CUdeviceptr).
 type DevPtr uint64

@@ -60,16 +60,18 @@ func Load(ctx *cuda.Context, src, name string) (*Result, error) {
 	// never race.
 	var compileErr error
 	mod, extra, err := ctx.LoadPTXCached(key, func() ([]byte, any, error) {
-		ptx, log, err := cuda.Compile(src, name+".cu", ctx.Arch())
+		p, err := cuda.Compile(src, name+".cu", ctx.Arch())
 		if err != nil {
 			// Dump the source even though there is no PTX: a kernel that does
-			// not compile is exactly the one worth reading.
+			// not compile is exactly the one worth reading. The error is
+			// wrapped rather than replaced so that a caller can still recover
+			// the *cuda.CompileError and read the compiler log out of it.
 			dump(name, short, src, nil)
 			compileErr = fmt.Errorf("compiling %s: %w", name, err)
 			return nil, nil, compileErr
 		}
-		dump(name, short, src, ptx)
-		return ptx, &artifacts{ptx: ptx, log: log}, nil
+		dump(name, short, src, p.Bytes)
+		return p.Bytes, &artifacts{ptx: p.Bytes, log: p.Log}, nil
 	})
 	if err != nil {
 		if compileErr != nil {
