@@ -15,7 +15,8 @@ kernels on real hardware.
 | **SIMT track** | A custom `rustc` codegen backend lowers `#[kernel]` functions through MIR and LLVM IR to PTX | `go/ast` + `go/types` lower a Go subset to CUDA C, which NVRTC compiles to PTX at run time (package `simt`) |
 | **Tile track** | A `#[cutile::module]` proc macro embeds the kernel AST in the host binary and JITs it through Tile IR | The graph is recorded at run time by ordinary Go calls, then fused into one generated kernel (package `tile`) |
 | **Safety** | `DisjointSlice<T>`, launch contracts, const generics | Runtime shape checks; the CPU emulator plus `go test -race` |
-| **Toolchain** | Pinned nightly Rust, custom LLVM | Plain `go1.26`, cgo, NVRTC. No third-party dependencies |
+| **When errors surface** | `rustc` rejects the kernel | `gocuda vet` rejects it, and `go generate` makes an unlowerable kernel fail `go build` |
+| **Toolchain** | Pinned nightly Rust, custom LLVM | Plain `go1.26`, cgo, NVRTC. The library has no third-party dependencies; the `gocuda` tool uses `golang.org/x/tools` |
 
 ### Why Go cannot take Rust's route
 
@@ -117,6 +118,62 @@ package `gpu`. `simt/errors_test.go` pins that boundary.
 One deliberate infidelity: Go's `int` is 64-bit, CUDA's is 32-bit. Kernel
 indices are bounded by the grid, so they are narrowed.
 
+### Errors before `main()`
+
+A kernel is ordinary Go, so the compiler has no opinion about whether it can
+run on a device. Three things give it one:
+
+```sh
+go install github.com/CWBudde/gocuda/cmd/gocuda@latest
+gocuda vet ./kernels                   # or: go vet -vettool=$(which gocuda) ./...
+```
+
+```
+kernels/bad.go:4:2: kernels may not import math (only github.com/CWBudde/gocuda/gpu is available on the device)
+kernels/bad.go:10:23: unsupported type float64 on the device (kernels are float32/int32 only)
+kernels/bad.go:11:2: multiple assignment is not supported in kernels
+```
+
+The analyzer runs the **same lowering** the transpiler does, rather than a
+second opinion about it, so what it accepts and what `simt.Build` accepts
+cannot drift apart. A function whose first parameter is a `gpu.Ctx` is a
+kernel; `//gocuda:ignore` in its doc comment opts one out.
+
+`go generate` writes `kernels/prebuilt/`: the generated CUDA C, its PTX, and one
+constant per kernel that lowered. A hand-written `gate.go` lists the constants
+that must exist, so a kernel that cannot be lowered fails the build itself:
+
+```
+$ go build ./...
+kernels/prebuilt/gate.go:22:2: undefined: Scale
+```
+
+That covers a kernel which was regenerated and turned out not to lower. The
+case it cannot cover — edited and *never* regenerated — is caught by a test
+that needs no GPU:
+
+```go
+func TestPrebuiltIsCurrent(t *testing.T) {
+	if err := simt.VerifyPrebuilt(gocuda.Kernels(), prebuilt.Names()...); err != nil {
+		t.Error(err)
+	}
+}
+```
+
+The embedded PTX is also what removes the compile from start-up. `Build` still
+transpiles — that is what produces the hash the prebuilt is filed under — but
+NVRTC is skipped when one matches:
+
+| | transpile + NVRTC |
+|---|---:|
+| JIT | 28.7 ms |
+| prebuilt PTX | **0.9 ms** |
+
+PTX is forward compatible, so one `compute_75` artifact serves every newer
+device; an older one falls back to NVRTC. A machine with no CUDA toolkit builds
+and runs from the committed PTX, and `gocuda generate -no-ptx` refreshes
+everything but the PTX there.
+
 ## Track 2 — tile
 
 The pipeline is built by running Go code; nothing touches the device until
@@ -180,7 +237,8 @@ several runs:
 | GPU kernel only | 1.03–1.07 ms | **~82–90×** |
 | GPU incl. transfers | 10.5 ms | ~8.5× |
 
-Transpiling and compiling the kernel costs 25 ms, once.
+Transpiling and compiling the kernel costs 28.7 ms, once — or 0.9 ms when the
+PTX was generated ahead of time.
 
 Tile pipeline, 4.19M samples (`go run -tags cuda ./examples/tilefir`):
 
@@ -222,13 +280,18 @@ Go function that both backends run, so correctness is testable without a GPU.
 ## Layout
 
 ```
-cuda/       cgo bindings: CUDA driver API + NVRTC   (build tag "cuda")
-gpu/        kernel vocabulary + CPU grid emulator
-simt/       Go AST -> CUDA C transpiler             (track 1)
-tile/       lazy graph -> one fused kernel          (track 2)
-kernels/    the example kernels, embedded as source
+cuda/          cgo bindings: CUDA driver API + NVRTC   (build tag "cuda")
+gpu/           kernel vocabulary + CPU grid emulator
+simt/          transpile, build and launch             (track 1)
+tile/          lazy graph -> one fused kernel          (track 2)
+internal/lower/   Go AST -> CUDA C; the one definition of the subset
+analysis/simtcheck/  the go/analysis Analyzer behind "gocuda vet"
+cmd/gocuda/    vet and generate                        (no cgo)
+cmd/gocuda-nvrtc/  the NVRTC child process             (build tag "cuda")
+kernels/       the example kernels, embedded as source
+kernels/prebuilt/  generated: CUDA C, PTX, and the build gate
 internal/jit/  compile, cache and load, shared by both tracks
-examples/   vecadd, fir, magnitude, tilefir
+examples/      vecadd, fir, magnitude, tilefir
 ```
 
 All cgo sits behind the `cuda` build tag, so the transpiler and its tests
@@ -241,10 +304,15 @@ go test ./...                 # transpiler, golden files, CPU emulator: no GPU n
 go test -race ./gpu/          # the emulator must be race-clean
 go test -tags cuda ./...      # CPU/GPU parity on a real device
 go run -tags cuda ./examples/fir
+
+go run ./cmd/gocuda vet ./kernels        # refuse kernels that cannot be lowered
+go run ./cmd/gocuda generate -check      # are the committed artifacts current?
+go generate ./...                        # regenerate them (needs NVRTC)
 ```
 
-Generated `.cu` and `.ptx` land in `.gocuda-cache/` for inspection. Point
-`simt.SetCacheDir` elsewhere, or pass `""` to turn it off.
+Generated `.cu` and `.ptx` land in `.gocuda-cache/` for inspection. Pass
+`simt.WithCacheDir("elsewhere")` to `simt.Build` to point it somewhere else, or
+`simt.WithCacheDir("")` to turn it off.
 
 Requires a CUDA installation at `/usr/local/cuda` (headers and `libnvrtc`) and
 an NVIDIA driver; adjust the `#cgo` flags in `cuda/driver_cuda.go` if yours

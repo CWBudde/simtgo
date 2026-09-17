@@ -37,7 +37,7 @@ func (t *Tensor) Materialize() ([]float32, error) {
 func (t *Tensor) run() (*cuda.Slice[float32], func(), error) {
 	g := t.g
 	src, inputs := generate(t.node)
-	res, err := jit.Load(g.ctx, src, "fused")
+	res, err := jit.Load(g.ctx, jit.Request{Src: src, Name: "fused", CacheDir: jit.DefaultCacheDir})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -72,7 +72,7 @@ func (t *Tensor) run() (*cuda.Slice[float32], func(), error) {
 		return nil, cleanup, err
 	}
 	grid := (t.node.n + BlockSize - 1) / BlockSize
-	if err := res.Func.Launch(cuda.D1(grid), cuda.D1(BlockSize), 0, flat...); err != nil {
+	if err := res.Func.LaunchSync(cuda.D1(grid), cuda.D1(BlockSize), 0, flat...); err != nil {
 		return nil, cleanup, err
 	}
 	return out, cleanup, nil

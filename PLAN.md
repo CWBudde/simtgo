@@ -100,13 +100,55 @@ Two defects not in the original list were found and fixed along the way:
 Today a kernel that cannot be transpiled compiles fine and fails when
 `main()` runs. No Go developer will accept that.
 
-- [ ] `gocuda vet`, a `golang.org/x/tools/go/analysis` Analyzer that flags
-      unsupported constructs. Runs in CI, in editors, and under
-      `go vet -vettool`.
-- [ ] AOT pipeline: `go generate` → transpile → NVRTC → `go:embed` the PTX,
+- [x] `gocuda vet`, a `golang.org/x/tools/go/analysis` Analyzer that flags
+      unsupported constructs. Runs in CI and under `go vet -vettool`. *Not* in
+      editors: `gopls` has no plugin mechanism for third-party analyzers and
+      runs a fixed, compiled-in set, so the editor story is a `golangci-lint`
+      module plugin or an on-save task. Correcting that here rather than
+      leaving the claim standing.
+- [x] AOT pipeline: `go generate` → transpile → NVRTC → `go:embed` the PTX,
       with the existing JIT path kept as the fast development loop. One
       transpiler feeds both.
-- [ ] **Exit criterion:** a kernel that cannot be lowered fails `go build`.
+- [x] **Exit criterion:** a kernel that cannot be lowered fails `go build`.
+      This needs three things, not one, and the first bullet alone does not
+      achieve it — `go build` cannot be extended with custom vet checks, and
+      `go test`'s implicit vet runs a fixed subset that ignores `-vettool`:
+
+      1. `go generate` drops the constant for a kernel it could not lower, and
+         a hand-written `gate.go` referencing it stops compiling:
+         `kernels/prebuilt/gate.go:22:2: undefined: Scale`.
+      2. That only catches a kernel that *was* regenerated. One edited and
+         never regenerated keeps its constant and builds green, so
+         `simt.VerifyPrebuilt` in an ordinary `go test ./...` catches the
+         mismatch. No GPU needed; this is the cheapest and strongest of the
+         three.
+      3. `gocuda vet` catches it without regenerating at all.
+
+Done. `Transpile` reports every refused construct rather than the first, as
+typed `simt.Diagnostic`s behind a `simt.UnsupportedError` that `errors.As` can
+unpack. The lowering moved to `internal/lower` so that the vet tool and the
+generator do not need a CUDA toolchain to build — `simt` imports `cuda`, which
+is cgo. `simt.Build` gained functional options and consults a registry of
+prebuilt PTX keyed on the hash of the generated CUDA C, which makes a stale
+artifact impossible to use rather than merely detectable. `simt.SetCacheDir` is
+replaced by `simt.WithCacheDir`.
+
+Three latent defects were found and fixed on the way, each an instance of the
+failure this phase exists to remove:
+
+- The emitter copied any identifier verbatim, so a kernel using a package-level
+  variable lowered cleanly and failed inside NVRTC as `identifier is undefined`
+  — a C error about code the author never wrote. The blank identifier was
+  emitted as a C identifier for the same reason.
+- `//go:embed kernels/*.go` matches `*_test.go`, which then joined the
+  type-check and failed on `import "testing"`: a kernel package could not have
+  tests at all.
+- `sharedSize` returned the same answer for "not a shared buffer" and "a shared
+  buffer I have already complained about", which under multi-diagnostic
+  reporting produced a second, wrong diagnostic for one mistake.
+
+Measured on the T550: the FIR example's `transpile + NVRTC compile` line falls
+from **28.7 ms to 0.9 ms** when the PTX is prebuilt.
 
 ### 1.2 Toolchain discovery and portability (M)
 
@@ -121,11 +163,24 @@ Today a kernel that cannot be transpiled compiles fine and fails when
 
 ### 1.3 Error model and API review (S)
 
-- [ ] Typed errors with `errors.Is`/`As`, preserving `CUresult` codes.
-- [ ] Source positions on every transpiler diagnostic (mostly done — audit for
-      the paths that report without one).
-- [ ] One deliberate pass over the exported surface: naming, `context.Context`
-      support, what stays internal. Cheaper now than after users arrive.
+- [x] Typed errors with `errors.Is`/`As`, preserving `CUresult` codes.
+      `cuda.Result` is a `CUresult` that is itself an error, and `*cuda.Error`
+      carries the failing entry point. The name table is pure Go, so a code
+      still prints itself in a build without the `cuda` tag. Note for Phase 4:
+      loading garbage through `cuModuleLoadData` gives
+      `CUDA_ERROR_INVALID_IMAGE`, not `INVALID_PTX` — only something the driver
+      parses as PTX and then fails to JIT is `INVALID_PTX`.
+- [x] Source positions on every transpiler diagnostic. The audit found the 49
+      refusal sites were all fine and the gaps were all in `Transpile` itself:
+      `go/types` stopped at the first error unless given an `Error` callback,
+      `scanner.ErrorList` reported only its first, and the import refusal had
+      no position of its own because it came from the importer.
+- [x] One deliberate pass over the exported surface. `context.Context` is
+      deliberately **not** added anywhere: every driver call is synchronous and
+      uncancellable — `cuCtxSynchronize`, `cuMemcpyHtoD` and `cuLaunchKernel`
+      cannot be interrupted — so accepting one would advertise semantics that
+      do not exist. It belongs in Phase 4, where `cuStreamQuery` can genuinely
+      `select` on `ctx.Done()`.
 
 ### 1.4 CI on real hardware (M)
 

@@ -108,7 +108,14 @@ func run() error {
 		return err
 	}
 
-	fmt.Printf("transpile + NVRTC compile   %8s\n", build.Round(time.Microsecond))
+	// Which path ran is worth saying, because it is most of this number: with
+	// prebuilt PTX the kernel is only transpiled and loaded, and NVRTC -- some
+	// 23 ms of it -- is skipped entirely.
+	how := "transpile + NVRTC compile"
+	if k.Prebuilt {
+		how = fmt.Sprintf("transpile + load %s PTX", k.Arch)
+	}
+	fmt.Printf("%-27s %8s\n", how, build.Round(time.Microsecond))
 	fmt.Printf("upload  (%d MiB)             %8s\n", (n*4)>>20, upload.Round(time.Microsecond))
 	fmt.Printf("kernel                      %8s\n", kernel.Round(time.Microsecond))
 	fmt.Printf("download                    %8s\n\n", download.Round(time.Microsecond))

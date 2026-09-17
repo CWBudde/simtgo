@@ -21,6 +21,11 @@ func NewContext(device int) (*Context, error) { return nil, ErrNoCUDA }
 // Arch reports the virtual architecture of the device.
 func (c *Context) Arch() string { return "" }
 
+// ComputeCapability reports the device's compute capability. With no device to
+// ask this build answers (0, 0), which callers must read as "unknown" rather
+// than as a device older than every CUDA GPU ever built.
+func (c *Context) ComputeCapability() (major, minor int) { return 0, 0 }
+
 // MaxSharedMemPerBlock reports how much shared memory a single block may use,
 // in bytes. Without a device to ask there is no limit to report, so this build
 // always answers zero, which callers must read as "unknown, skip the check"
@@ -47,8 +52,8 @@ func (c *Context) LoadPTX(ptx []byte) (*Module, error) { return nil, ErrNoCUDA }
 
 // LoadPTXCached loads a module into the context at most once per key. Since
 // nothing can be loaded here, build is never called.
-func (c *Context) LoadPTXCached(key string, build func() (ptx []byte, extra any, err error)) (*Module, any, error) {
-	return nil, nil, ErrNoCUDA
+func (c *Context) LoadPTXCached(key string, build func() ([]byte, error)) (*Module, error) {
+	return nil, ErrNoCUDA
 }
 
 // Module is a placeholder for a loaded PTX module.
@@ -64,10 +69,15 @@ func (m *Module) Unload() error { return ErrNoCUDA }
 type Function struct{}
 
 // Launch runs the kernel.
-func (f *Function) Launch(grid, block Dim3, sharedBytes int, args ...Arg) error { return ErrNoCUDA }
+func (f *Function) LaunchSync(grid, block Dim3, sharedBytes int, args ...Arg) error {
+	return ErrNoCUDA
+}
 
 // Compile JIT-compiles CUDA C to PTX.
-func Compile(src, name, arch string) (ptx []byte, log string, err error) { return nil, "", ErrNoCUDA }
+func Compile(src, name, arch string) (*PTX, error) { return nil, ErrNoCUDA }
+
+// NVRTCVersion reports the version of the NVRTC library.
+func NVRTCVersion() (major, minor int, err error) { return 0, 0, ErrNoCUDA }
 
 // Slice is a placeholder for a typed device buffer.
 type Slice[T any] struct{ n int }

@@ -2,6 +2,9 @@ package cuda_test
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/CWBudde/gocuda/cuda"
@@ -27,14 +30,14 @@ func TestRawKernel(t *testing.T) {
 	defer ctx.Close()
 	t.Logf("device %q, arch %s", ctx.Name(), ctx.Arch())
 
-	ptx, log, err := cuda.Compile(addSrc, "add.cu", ctx.Arch())
+	ptx, err := cuda.Compile(addSrc, "add.cu", ctx.Arch())
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
-	if log != "" {
-		t.Logf("nvrtc log: %s", log)
+	if ptx.Log != "" {
+		t.Logf("nvrtc log: %s", ptx.Log)
 	}
-	mod, err := ctx.LoadPTX(ptx)
+	mod, err := ctx.LoadPTX(ptx.Bytes)
 	if err != nil {
 		t.Fatalf("LoadPTX: %v", err)
 	}
@@ -68,7 +71,7 @@ func TestRawKernel(t *testing.T) {
 
 	const block = 256
 	grid := (n + block - 1) / block
-	if err := fn.Launch(cuda.D1(grid), cuda.D1(block), 0,
+	if err := fn.LaunchSync(cuda.D1(grid), cuda.D1(block), 0,
 		dc.Arg(), da.Arg(), db.Arg(), cuda.ArgI32(n)); err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
@@ -113,7 +116,7 @@ func runAdd(t *testing.T, ctx *cuda.Context, fn *cuda.Function) {
 	defer dc.Free()
 
 	const block = 64
-	if err := fn.Launch(cuda.D1(n/block), cuda.D1(block), 0,
+	if err := fn.LaunchSync(cuda.D1(n/block), cuda.D1(block), 0,
 		dc.Arg(), da.Arg(), db.Arg(), cuda.ArgI32(n)); err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
@@ -168,19 +171,19 @@ func TestModuleCacheIsPerContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewContext: %v", err)
 	}
-	ptx, _, err := cuda.Compile(addSrc, "add.cu", first.Arch())
+	ptx, err := cuda.Compile(addSrc, "add.cu", first.Arch())
 	if err != nil {
 		first.Close()
 		t.Fatalf("Compile: %v", err)
 	}
 
 	builds := 0
-	build := func() ([]byte, any, error) {
+	build := func() ([]byte, error) {
 		builds++
-		return ptx, builds, nil
+		return ptx.Bytes, nil
 	}
 
-	modA, extraA, err := first.LoadPTXCached("add", build)
+	modA, err := first.LoadPTXCached("add", build)
 	if err != nil {
 		first.Close()
 		t.Fatalf("LoadPTXCached (miss): %v", err)
@@ -188,7 +191,7 @@ func TestModuleCacheIsPerContext(t *testing.T) {
 	if builds != 1 {
 		t.Fatalf("builds = %d after the first load, want 1", builds)
 	}
-	modB, extraB, err := first.LoadPTXCached("add", build)
+	modB, err := first.LoadPTXCached("add", build)
 	if err != nil {
 		first.Close()
 		t.Fatalf("LoadPTXCached (hit): %v", err)
@@ -198,9 +201,6 @@ func TestModuleCacheIsPerContext(t *testing.T) {
 	}
 	if modB != modA {
 		t.Errorf("a cache hit returned a different module than the miss")
-	}
-	if extraB != extraA {
-		t.Errorf("extra = %v on the hit, want the %v the miss stored", extraB, extraA)
 	}
 
 	if err := first.Close(); err != nil {
@@ -219,7 +219,7 @@ func TestModuleCacheIsPerContext(t *testing.T) {
 	}
 	defer second.Close()
 
-	modC, _, err := second.LoadPTXCached("add", build)
+	modC, err := second.LoadPTXCached("add", build)
 	if err != nil {
 		t.Fatalf("LoadPTXCached in a fresh context: %v", err)
 	}
@@ -244,7 +244,7 @@ func TestModuleCacheIsPerContext(t *testing.T) {
 	if err := modC.Unload(); err != nil {
 		t.Fatalf("second Unload: %v", err)
 	}
-	if _, _, err := second.LoadPTXCached("add", build); err != nil {
+	if _, err := second.LoadPTXCached("add", build); err != nil {
 		t.Fatalf("LoadPTXCached after Unload: %v", err)
 	}
 	if builds != 3 {
@@ -260,16 +260,15 @@ func TestJITLoadAcrossContexts(t *testing.T) {
 	if !cuda.Available() {
 		t.Skip("no CUDA device available")
 	}
-	// Keep the debug dumps out of the repository.
-	old := jit.CacheDir
-	jit.CacheDir = t.TempDir()
-	defer func() { jit.CacheDir = old }()
+	// A Request with no cache directory writes no dumps, which is what this
+	// test wants: nothing here is worth reading afterwards.
+	req := jit.Request{Src: addSrc, Name: "add"}
 
 	first, err := cuda.NewContext(0)
 	if err != nil {
 		t.Fatalf("NewContext: %v", err)
 	}
-	firstRes, err := jit.Load(first, addSrc, "add")
+	firstRes, err := jit.Load(first, req)
 	if err != nil {
 		first.Close()
 		t.Fatalf("Load: %v", err)
@@ -279,7 +278,7 @@ func TestJITLoadAcrossContexts(t *testing.T) {
 		t.Fatal("Load returned no PTX on a compile")
 	}
 
-	hit, err := jit.Load(first, addSrc, "add")
+	hit, err := jit.Load(first, req)
 	if err != nil {
 		first.Close()
 		t.Fatalf("Load (cache hit): %v", err)
@@ -305,7 +304,7 @@ func TestJITLoadAcrossContexts(t *testing.T) {
 	// With a process-wide cache this call returned the module loaded into the
 	// context that has just been released, and the launch below ran on a stale
 	// handle. It must compile and load into the new context instead.
-	res, err := jit.Load(second, addSrc, "add")
+	res, err := jit.Load(second, req)
 	if err != nil {
 		t.Fatalf("Load in a fresh context: %v", err)
 	}
@@ -313,4 +312,114 @@ func TestJITLoadAcrossContexts(t *testing.T) {
 		t.Error("Load in a fresh context returned no PTX")
 	}
 	runAdd(t, second, res.Func)
+}
+
+// TestParseArch covers the reading of a virtual architecture, including the
+// two-digit assumption that used to be implicit: "compute_100" is compute
+// capability 10.0, and splitting it as one major and two minor digits would
+// report a device three generations older than the one in the machine.
+func TestParseArch(t *testing.T) {
+	ok := []struct {
+		in           string
+		major, minor int
+	}{
+		{"compute_75", 7, 5},
+		{"compute_100", 10, 0},
+		{"compute_61", 6, 1},
+		{"compute_90", 9, 0},
+		{"compute_120", 12, 0},
+	}
+	for _, tc := range ok {
+		major, minor, err := cuda.ParseArch(tc.in)
+		if err != nil {
+			t.Errorf("ParseArch(%q): %v", tc.in, err)
+			continue
+		}
+		if major != tc.major || minor != tc.minor {
+			t.Errorf("ParseArch(%q) = (%d, %d), want (%d, %d)", tc.in, major, minor, tc.major, tc.minor)
+		}
+	}
+
+	bad := []struct {
+		in  string
+		why string
+	}{
+		{"compute_90a", "arch-conditional targets are not forward compatible"},
+		{"compute_100f", "family-conditional targets are not forward compatible"},
+		{"sm_75", "a real architecture is not a virtual one"},
+		{"compute_", "no compute capability at all"},
+		{"compute_7x", "not all digits"},
+		{"compute_7", "no minor digit"},
+		{"", "empty"},
+	}
+	for _, tc := range bad {
+		if major, minor, err := cuda.ParseArch(tc.in); err == nil {
+			t.Errorf("ParseArch(%q) = (%d, %d), want an error: %s", tc.in, major, minor, tc.why)
+		}
+	}
+}
+
+// TestResultNames checks that a status code names itself without the driver,
+// which is what lets these errors be printed in a build without the "cuda"
+// tag and long after the call that produced them.
+func TestResultNames(t *testing.T) {
+	if got, want := cuda.ErrInvalidContext.Name(), "CUDA_ERROR_INVALID_CONTEXT"; got != want {
+		t.Errorf("ErrInvalidContext.Name() = %q, want %q", got, want)
+	}
+	if got, want := cuda.Result(1234).Name(), "CUresult(1234)"; got != want {
+		t.Errorf("Result(1234).Name() = %q, want %q", got, want)
+	}
+	if got := cuda.ErrInvalidContext.Error(); !strings.Contains(got, "CUDA_ERROR_INVALID_CONTEXT") {
+		t.Errorf("ErrInvalidContext.Error() = %q, want it to name the code", got)
+	}
+	if got := cuda.Result(1234).Error(); !strings.Contains(got, "1234") {
+		t.Errorf("Result(1234).Error() = %q, want it to carry the number", got)
+	}
+	if got, want := cuda.ErrNVRTCCompilation.Name(), "NVRTC_ERROR_COMPILATION"; got != want {
+		t.Errorf("ErrNVRTCCompilation.Name() = %q, want %q", got, want)
+	}
+	if got, want := cuda.NVRTCResult(99).Name(), "nvrtcResult(99)"; got != want {
+		t.Errorf("NVRTCResult(99).Name() = %q, want %q", got, want)
+	}
+}
+
+// TestErrorIsAndAs is the point of the typed errors: a caller decides what a
+// failure was from the code, not from the wording of the message, and can
+// still get at the driver entry point that produced it.
+func TestErrorIsAndAs(t *testing.T) {
+	err := error(&cuda.Error{Op: "cuMemAlloc", Code: cuda.ErrInvalidContext, Desc: "invalid device context"})
+	if !errors.Is(err, cuda.ErrInvalidContext) {
+		t.Errorf("errors.Is(%v, ErrInvalidContext) = false", err)
+	}
+	if errors.Is(err, cuda.ErrOutOfMemory) {
+		t.Errorf("errors.Is(%v, ErrOutOfMemory) = true", err)
+	}
+
+	// Wrapping is what internal/jit does to say which kernel failed, so the
+	// recovery has to survive it.
+	wrapped := fmt.Errorf("launching k: %w", err)
+	var drvErr *cuda.Error
+	if !errors.As(wrapped, &drvErr) {
+		t.Fatalf("errors.As(%v, *cuda.Error) = false", wrapped)
+	}
+	if drvErr.Op != "cuMemAlloc" {
+		t.Errorf("recovered Op = %q, want %q", drvErr.Op, "cuMemAlloc")
+	}
+	if !errors.Is(wrapped, cuda.ErrInvalidContext) {
+		t.Errorf("errors.Is(%v, ErrInvalidContext) = false through a wrap", wrapped)
+	}
+
+	// A CompileError keeps the log in its message, since that is all a failed
+	// NVRTC run has to offer.
+	compile := error(&cuda.CompileError{
+		Name: "add.cu", Arch: "compute_75",
+		Code: cuda.ErrNVRTCCompilation,
+		Log:  `add.cu(1): error: identifier "nope" is undefined`,
+	})
+	if !errors.Is(compile, cuda.ErrNVRTCCompilation) {
+		t.Errorf("errors.Is(%v, ErrNVRTCCompilation) = false", compile)
+	}
+	if !strings.Contains(compile.Error(), "identifier") {
+		t.Errorf("CompileError.Error() = %q, want the compiler log in it", compile.Error())
+	}
 }

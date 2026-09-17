@@ -1,4 +1,4 @@
-package simt
+package lower
 
 import (
 	"fmt"
@@ -12,9 +12,12 @@ func (t *transpiler) block(b *ast.BlockStmt) {
 	t.line("{")
 	t.ind++
 	for _, s := range b.List {
-		if t.err != nil {
-			return
-		}
+		// Each statement is refused on its own: mark resets the window that
+		// failed() reports on, so a refusal here does not silence the rest of
+		// the kernel. The braces and t.ind stay balanced because nothing
+		// returns early any more -- which matters, since t.ind is what
+		// SharedF32 and AssumeBlockDim test to insist on the top level.
+		t.mark = len(t.diags)
 		t.stmt(s)
 	}
 	t.ind--
@@ -76,8 +79,12 @@ func (t *transpiler) assign(s *ast.AssignStmt) {
 			t.fail(s.Pos(), "unsupported declaration target %T", lhs)
 			return
 		}
-		if n, ok := t.sharedSize(rhs); ok {
-			t.shared(id, n, s.Pos())
+		if n, isShared, ok := t.sharedSize(rhs); isShared {
+			if ok {
+				t.shared(id, n, s.Pos())
+			} else {
+				t.poison(t.info.Defs[id])
+			}
 			return
 		}
 		t.line("%s;", t.define(id, rhs))
@@ -99,7 +106,13 @@ func (t *transpiler) define(id *ast.Ident, rhs ast.Expr) string {
 		t.fail(id.Pos(), "%s has no resolved type", id.Name)
 		return ""
 	}
+	before := len(t.diags)
 	ctype := t.ctype(obj.Type(), id.Pos())
+	if len(t.diags) > before {
+		// The variable exists but has no device type. Every later use of it
+		// would be a fresh complaint about the same declaration.
+		t.poison(obj)
+	}
 	return fmt.Sprintf("%s %s = %s", ctype, cname(id.Name), t.expr(rhs).s)
 }
 
@@ -122,31 +135,39 @@ func (t *transpiler) shared(id *ast.Ident, n int, pos token.Pos) {
 	t.sharedBytes += 4 * n
 }
 
-// sharedSize reports whether e is a ctx.SharedF32(n) call with a constant n.
-func (t *transpiler) sharedSize(e ast.Expr) (int, bool) {
-	call, ok := unparen(e).(*ast.CallExpr)
-	if !ok {
-		return 0, false
+// sharedSize reports whether e is a ctx.SharedF32(n) call, and if so whether n
+// folded to a constant.
+//
+// The two answers have to be separate. "Not a shared buffer" sends the caller
+// down the ordinary declaration path; "a shared buffer whose size I have
+// already complained about" must not, because that path would go on to reject
+// the []float32 it declares as a type the device has no answer for -- a second
+// diagnostic, about a different thing, for one mistake.
+func (t *transpiler) sharedSize(e ast.Expr) (n int, isShared, ok bool) {
+	call, callOK := unparen(e).(*ast.CallExpr)
+	if !callOK {
+		return 0, false, false
 	}
-	sel, ok := unparen(call.Fun).(*ast.SelectorExpr)
-	if !ok {
-		return 0, false
+	sel, selOK := unparen(call.Fun).(*ast.SelectorExpr)
+	if !selOK {
+		return 0, false, false
 	}
 	s := t.info.Selections[sel]
-	if s == nil || s.Kind() != types.MethodVal || !t.isCtx(s.Recv()) || s.Obj().Name() != "SharedF32" {
-		return 0, false
+	if s == nil || s.Kind() != types.MethodVal || !IsCtx(s.Recv()) || s.Obj().Name() != "SharedF32" {
+		return 0, false, false
 	}
 	if len(call.Args) != 1 {
-		return 0, false
+		t.fail(call.Pos(), "SharedF32 takes one argument")
+		return 0, true, false
 	}
-	n, ok := t.constInt(call.Args[0])
-	if !ok {
+	n, constOK := t.constInt(call.Args[0])
+	if !constOK {
 		// A __shared__ array needs a compile-time extent, so this has to be
 		// reported rather than silently mistranslated.
 		t.fail(call.Pos(), "SharedF32 needs a constant size (got a runtime value)")
-		return 0, false
+		return 0, true, false
 	}
-	return n, true
+	return n, true, true
 }
 
 // simple renders an assignment or increment inline, without a terminator, so
@@ -213,9 +234,16 @@ func (t *transpiler) decl(s *ast.DeclStmt) {
 				obj := t.info.Defs[n]
 				if obj == nil {
 					t.fail(n.Pos(), "%s has no resolved type", n.Name)
-					return
+					continue
 				}
+				before := len(t.diags)
 				ctype := t.ctype(obj.Type(), n.Pos())
+				if len(t.diags) > before {
+					// Every later use of a variable with no device type would
+					// repeat this one refusal.
+					t.poison(obj)
+					continue
+				}
 				if len(vs.Values) == 0 {
 					t.line("%s %s = 0;", ctype, cname(n.Name))
 					continue
@@ -284,7 +312,11 @@ func (t *transpiler) rangeStmt(s *ast.RangeStmt) {
 		return
 	}
 	var limit cexpr
-	switch typ := t.info.Types[s.X].Type.Underlying().(type) {
+	xt := t.typeOf(s.X)
+	if xt == nil {
+		return
+	}
+	switch typ := xt.Underlying().(type) {
 	case *types.Slice:
 		limit = t.lengthOf(s.X)
 	case *types.Basic:
