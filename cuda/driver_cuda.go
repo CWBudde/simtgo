@@ -2,20 +2,25 @@
 
 package cuda
 
-/*
-#cgo CFLAGS: -I/usr/local/cuda/include
-#cgo LDFLAGS: -L/usr/local/cuda/lib64 -L/usr/local/cuda/lib64/stubs -lnvrtc -lcuda
-#include <stdlib.h>
-#include <string.h>
-#include <cuda.h>
-#include <nvrtc.h>
-*/
-import "C"
-
 import (
 	"fmt"
+	"runtime"
 	"sync"
 	"unsafe"
+)
+
+// This file is the CUDA driver API and NVRTC, without cgo. The entry points
+// are resolved from the shared libraries at run time in loader_cuda.go, so the
+// package compiles with CGO_ENABLED=0 and needs no CUDA toolkit to build --
+// only a driver to run against.
+//
+// The constants below are the handful of enum values this package needs,
+// copied from cuda.h rather than included from it, since there is no header to
+// include any more. They are part of the driver ABI and do not change.
+const (
+	attrMaxSharedMemoryPerBlock = 8
+	attrComputeCapabilityMajor  = 75
+	attrComputeCapabilityMinor  = 76
 )
 
 var initOnce struct {
@@ -24,8 +29,17 @@ var initOnce struct {
 }
 
 // Init initialises the CUDA driver. It is safe to call repeatedly.
+//
+// It is also where a machine with no CUDA is discovered: opening libcuda is
+// part of initialising, and fails with a *LibraryError naming what was tried.
 func Init() error {
-	initOnce.Do(func() { initOnce.err = check(C.cuInit(0), "cuInit") })
+	initOnce.Do(func() {
+		if err := loadDriver(); err != nil {
+			initOnce.err = err
+			return
+		}
+		initOnce.err = check(cuInit(0), "cuInit")
+	})
 	return initOnce.err
 }
 
@@ -34,8 +48,8 @@ func Available() bool {
 	if Init() != nil {
 		return false
 	}
-	var n C.int
-	if err := check(C.cuDeviceGetCount(&n), "cuDeviceGetCount"); err != nil {
+	var n int32
+	if err := check(cuDeviceGetCount(&n), "cuDeviceGetCount"); err != nil {
 		return false
 	}
 	return n > 0
@@ -54,8 +68,8 @@ func Available() bool {
 // and would hand out handles belonging to a context that has already been
 // released. Close unloads what is left, so no module can survive its context.
 type Context struct {
-	dev C.CUdevice
-	ctx C.CUcontext
+	dev int32
+	ctx uintptr
 
 	// The compute capability is kept as the two numbers the driver reports
 	// rather than as the "compute_75" string alone, because callers that gate
@@ -81,22 +95,22 @@ func NewContext(device int) (*Context, error) {
 		return nil, err
 	}
 	c := &Context{}
-	if err := check(C.cuDeviceGet(&c.dev, C.int(device)), "cuDeviceGet"); err != nil {
+	if err := check(cuDeviceGet(&c.dev, int32(device)), "cuDeviceGet"); err != nil {
 		return nil, err
 	}
-	if err := check(C.cuDevicePrimaryCtxRetain(&c.ctx, c.dev), "cuDevicePrimaryCtxRetain"); err != nil {
+	if err := check(cuDevicePrimaryCtxRetain(&c.ctx, c.dev), "cuDevicePrimaryCtxRetain"); err != nil {
 		return nil, err
 	}
-	var major, minor C.int
-	if err := check(C.cuDeviceGetAttribute(&major, C.CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, c.dev), "cuDeviceGetAttribute"); err != nil {
+	var major, minor int32
+	if err := check(cuDeviceGetAttribute(&major, attrComputeCapabilityMajor, c.dev), "cuDeviceGetAttribute"); err != nil {
 		return nil, err
 	}
-	if err := check(C.cuDeviceGetAttribute(&minor, C.CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, c.dev), "cuDeviceGetAttribute"); err != nil {
+	if err := check(cuDeviceGetAttribute(&minor, attrComputeCapabilityMinor, c.dev), "cuDeviceGetAttribute"); err != nil {
 		return nil, err
 	}
 	c.ccMajor, c.ccMinor = int(major), int(minor)
-	var shared C.int
-	if err := check(C.cuDeviceGetAttribute(&shared, C.CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK, c.dev), "cuDeviceGetAttribute"); err != nil {
+	var shared int32
+	if err := check(cuDeviceGetAttribute(&shared, attrMaxSharedMemoryPerBlock, c.dev), "cuDeviceGetAttribute"); err != nil {
 		return nil, err
 	}
 	c.maxShared = int(shared)
@@ -104,7 +118,7 @@ func NewContext(device int) (*Context, error) {
 }
 
 func (c *Context) bind() error {
-	return check(C.cuCtxSetCurrent(c.ctx), "cuCtxSetCurrent")
+	return check(cuCtxSetCurrent(c.ctx), "cuCtxSetCurrent")
 }
 
 // Arch reports the virtual architecture of the device, e.g. "compute_75". It
@@ -128,11 +142,14 @@ func (c *Context) MaxSharedMemPerBlock() int { return c.maxShared }
 
 // Name reports the device name.
 func (c *Context) Name() string {
-	buf := make([]C.char, 256)
-	if err := check(C.cuDeviceGetName(&buf[0], C.int(len(buf)), c.dev), "cuDeviceGetName"); err != nil {
+	buf := make([]byte, 256)
+	var pin runtime.Pinner
+	pin.Pin(&buf[0])
+	defer pin.Unpin()
+	if err := check(cuDeviceGetName(&buf[0], int32(len(buf)), c.dev), "cuDeviceGetName"); err != nil {
 		return "unknown"
 	}
-	return C.GoString(&buf[0])
+	return goString(&buf[0])
 }
 
 // Close unloads every module the context owns and then releases the primary
@@ -166,7 +183,7 @@ func (c *Context) Close() error {
 	}
 	c.modules, c.cache = nil, nil
 
-	if err := check(C.cuDevicePrimaryCtxRelease(c.dev), "cuDevicePrimaryCtxRelease"); err != nil && firstErr == nil {
+	if err := check(cuDevicePrimaryCtxRelease(c.dev), "cuDevicePrimaryCtxRelease"); err != nil && firstErr == nil {
 		firstErr = err
 	}
 	return firstErr
@@ -177,7 +194,7 @@ func (c *Context) Sync() error {
 	if err := c.bind(); err != nil {
 		return err
 	}
-	return check(C.cuCtxSynchronize(), "cuCtxSynchronize")
+	return check(cuCtxSynchronize(), "cuCtxSynchronize")
 }
 
 // Alloc reserves n bytes of device memory.
@@ -185,8 +202,8 @@ func (c *Context) Alloc(n int) (DevPtr, error) {
 	if err := c.bind(); err != nil {
 		return 0, err
 	}
-	var p C.CUdeviceptr
-	if err := check(C.cuMemAlloc(&p, C.size_t(n)), "cuMemAlloc"); err != nil {
+	var p uint64
+	if err := check(cuMemAlloc(&p, uint64(n)), "cuMemAlloc"); err != nil {
 		return 0, err
 	}
 	return DevPtr(p), nil
@@ -197,31 +214,31 @@ func (c *Context) Free(p DevPtr) error {
 	if err := c.bind(); err != nil {
 		return err
 	}
-	return check(C.cuMemFree(C.CUdeviceptr(p)), "cuMemFree")
+	return check(cuMemFree(uint64(p)), "cuMemFree")
 }
 
 func (c *Context) copyHtoD(dst DevPtr, src unsafe.Pointer, n int) error {
 	if err := c.bind(); err != nil {
 		return err
 	}
-	return check(C.cuMemcpyHtoD(C.CUdeviceptr(dst), src, C.size_t(n)), "cuMemcpyHtoD")
+	return check(cuMemcpyHtoD(uint64(dst), src, uint64(n)), "cuMemcpyHtoD")
 }
 
 func (c *Context) copyDtoH(dst unsafe.Pointer, src DevPtr, n int) error {
 	if err := c.bind(); err != nil {
 		return err
 	}
-	return check(C.cuMemcpyDtoH(dst, C.CUdeviceptr(src), C.size_t(n)), "cuMemcpyDtoH")
+	return check(cuMemcpyDtoH(dst, uint64(src), uint64(n)), "cuMemcpyDtoH")
 }
 
 // Module is a loaded PTX module. It belongs to the context it was loaded into
 // and becomes invalid when that context is closed.
 type Module struct {
-	c C.CUmodule
+	c uintptr
 	x *Context
 }
 
-// LoadPTX loads PTX (NUL-terminated on the C side) into the context.
+// LoadPTX loads PTX (NUL-terminated on the driver's side) into the context.
 //
 // The context takes ownership of the module: Close unloads it, so a caller
 // only needs Module.Unload to drop one earlier than that.
@@ -241,10 +258,18 @@ func (c *Context) loadPTXLocked(ptx []byte) (*Module, error) {
 	if err := c.bind(); err != nil {
 		return nil, err
 	}
-	src := C.CString(string(ptx))
-	defer C.free(unsafe.Pointer(src))
+
+	// cuModuleLoadData reads a NUL-terminated image. The copy is not avoidable
+	// by appending in place: ptx belongs to the caller, and a spare byte of
+	// capacity would let append write into memory they still own.
+	img := make([]byte, len(ptx)+1)
+	copy(img, ptx)
+	var pin runtime.Pinner
+	pin.Pin(&img[0])
+	defer pin.Unpin()
+
 	m := &Module{x: c}
-	if err := check(C.cuModuleLoadData(&m.c, unsafe.Pointer(src)), "cuModuleLoadData"); err != nil {
+	if err := check(cuModuleLoadData(&m.c, unsafe.Pointer(&img[0])), "cuModuleLoadData"); err != nil {
 		return nil, err
 	}
 	c.modules = append(c.modules, m)
@@ -303,15 +328,15 @@ func (m *Module) Unload() error {
 // the handle first is what makes a second call, from Close or from the caller,
 // harmless.
 func (m *Module) unloadLocked() error {
-	if m.c == nil {
+	if m.c == 0 {
 		return nil
 	}
 	h := m.c
-	m.c = nil
+	m.c = 0
 	if err := m.x.bind(); err != nil {
 		return err
 	}
-	return check(C.cuModuleUnload(h), "cuModuleUnload")
+	return check(cuModuleUnload(h), "cuModuleUnload")
 }
 
 // forgetLocked drops every reference the context holds to m, so that an
@@ -333,16 +358,14 @@ func (c *Context) forgetLocked(m *Module) {
 
 // Function is an entry point inside a Module.
 type Function struct {
-	f C.CUfunction
+	f uintptr
 	x *Context
 }
 
 // Function looks up a kernel by its (extern "C") name.
 func (m *Module) Function(name string) (*Function, error) {
-	cname := C.CString(name)
-	defer C.free(unsafe.Pointer(cname))
 	f := &Function{x: m.x}
-	if err := check(C.cuModuleGetFunction(&f.f, m.c, cname), "cuModuleGetFunction "+name); err != nil {
+	if err := check(cuModuleGetFunction(&f.f, m.c, name), "cuModuleGetFunction "+name); err != nil {
 		return nil, err
 	}
 	return f, nil
@@ -355,35 +378,40 @@ func (m *Module) Function(name string) (*Function, error) {
 // still to come. Having both under one name for a while would be worse than
 // renaming this once.
 //
-// Kernel parameters are copied into C-allocated memory: the driver receives an
-// array of pointers, and cgo forbids handing it an array that itself holds Go
-// pointers.
+// The driver receives an array of pointers to the parameter values. Both the
+// values and the array itself are Go memory here, pinned for the duration of
+// the call: the rule that C must not be shown Go memory containing Go pointers
+// is about the collector moving or freeing it, and that is what a Pinner
+// suspends. The cgo implementation malloc'd both instead; this is a wash for
+// cost -- two C allocations become two Go ones -- and is done this way because
+// there is no C allocator left to call, not because it is faster.
 func (f *Function) LaunchSync(grid, block Dim3, sharedBytes int, args ...Arg) error {
 	if err := f.x.bind(); err != nil {
 		return err
 	}
 
 	const slot = 8 // one 8-byte aligned slot per parameter
-	store := C.malloc(C.size_t(len(args) * slot))
-	defer C.free(store)
-	ptrs := C.malloc(C.size_t(len(args)) * C.size_t(unsafe.Sizeof(uintptr(0))))
-	defer C.free(ptrs)
+	store := make([]byte, max(len(args), 1)*slot)
+	table := make([]unsafe.Pointer, max(len(args), 1))
 
-	table := unsafe.Slice((*unsafe.Pointer)(ptrs), max(len(args), 1))
+	var pin runtime.Pinner
+	pin.Pin(&store[0])
+	pin.Pin(&table[0])
+	defer pin.Unpin()
+
 	for i, a := range args {
-		dst := unsafe.Add(store, i*slot)
-		C.memcpy(dst, unsafe.Pointer(&a.b[0]), C.size_t(len(a.b)))
-		table[i] = dst
+		copy(store[i*slot:], a.b)
+		table[i] = unsafe.Pointer(&store[i*slot])
 	}
 
-	var params *unsafe.Pointer
+	var params unsafe.Pointer
 	if len(args) > 0 {
-		params = (*unsafe.Pointer)(ptrs)
+		params = unsafe.Pointer(&table[0])
 	}
-	err := check(C.cuLaunchKernel(f.f,
-		C.uint(grid.X), C.uint(grid.Y), C.uint(grid.Z),
-		C.uint(block.X), C.uint(block.Y), C.uint(block.Z),
-		C.uint(sharedBytes), nil, params, nil), "cuLaunchKernel")
+	err := check(cuLaunchKernel(f.f,
+		grid.X, grid.Y, grid.Z,
+		block.X, block.Y, block.Z,
+		uint32(sharedBytes), 0, params, nil), "cuLaunchKernel")
 	if err != nil {
 		return err
 	}
@@ -397,57 +425,81 @@ func (f *Function) LaunchSync(grid, block Dim3, sharedBytes int, args ...Arg) er
 // only thing that explains what the kernel got wrong, which is why a refused
 // compilation is a *CompileError holding the whole log rather than a code.
 func Compile(src, name, arch string) (*PTX, error) {
-	csrc, cname := C.CString(src), C.CString(name)
-	defer C.free(unsafe.Pointer(csrc))
-	defer C.free(unsafe.Pointer(cname))
-
-	var prog C.nvrtcProgram
-	if r := C.nvrtcCreateProgram(&prog, csrc, cname, 0, nil, nil); r != C.NVRTC_SUCCESS {
-		return nil, nvrtcErr(r, "nvrtcCreateProgram")
+	if err := loadNVRTC(); err != nil {
+		return nil, err
 	}
-	defer C.nvrtcDestroyProgram(&prog)
 
-	opt := C.CString("--gpu-architecture=" + arch)
-	defer C.free(unsafe.Pointer(opt))
-	opts := [1]*C.char{opt}
-	cres := C.nvrtcCompileProgram(prog, 1, &opts[0])
+	var prog uintptr
+	if r := nvrtcCreateProgram(&prog, src, name, 0, nil, nil); r != nvrtcSuccess {
+		return nil, nvrtcError(r, "nvrtcCreateProgram")
+	}
+	defer nvrtcDestroyProgram(&prog)
+
+	// The options array is a char** of NUL-terminated strings. purego converts
+	// a string *argument* for us, but this one is an array, so it is built by
+	// hand and pinned like any other pointer-to-pointer handed to C.
+	opt := append([]byte("--gpu-architecture="+arch), 0)
+	opts := []*byte{&opt[0]}
+	var pin runtime.Pinner
+	pin.Pin(&opt[0])
+	pin.Pin(&opts[0])
+	cres := nvrtcCompileProgram(prog, 1, unsafe.Pointer(&opts[0]))
+	pin.Unpin()
 
 	// The log is read before the status is acted on, because it is the part of
 	// a failed compilation worth keeping.
 	var log string
-	var logSize C.size_t
-	if C.nvrtcGetProgramLogSize(prog, &logSize) == C.NVRTC_SUCCESS && logSize > 1 {
-		buf := make([]C.char, logSize)
-		if C.nvrtcGetProgramLog(prog, &buf[0]) == C.NVRTC_SUCCESS {
-			log = C.GoString(&buf[0])
+	var logSize uint64
+	if nvrtcGetProgramLogSize(prog, &logSize) == nvrtcSuccess && logSize > 1 {
+		buf := make([]byte, logSize)
+		var lpin runtime.Pinner
+		lpin.Pin(&buf[0])
+		ok := nvrtcGetProgramLog(prog, unsafe.Pointer(&buf[0])) == nvrtcSuccess
+		lpin.Unpin()
+		if ok {
+			log = goString(&buf[0])
 		}
 	}
-	if cres != C.NVRTC_SUCCESS {
-		return nil, &CompileError{Name: name, Arch: arch, Code: NVRTCResult(cres), Log: log}
+	if cres != nvrtcSuccess {
+		return nil, &CompileError{Name: name, Arch: arch, Code: cres, Log: log}
 	}
 
-	var ptxSize C.size_t
-	if r := C.nvrtcGetPTXSize(prog, &ptxSize); r != C.NVRTC_SUCCESS {
-		return nil, nvrtcErr(r, "nvrtcGetPTXSize")
+	var ptxSize uint64
+	if r := nvrtcGetPTXSize(prog, &ptxSize); r != nvrtcSuccess {
+		return nil, nvrtcError(r, "nvrtcGetPTXSize")
 	}
-	buf := make([]C.char, ptxSize)
-	if r := C.nvrtcGetPTX(prog, &buf[0]); r != C.NVRTC_SUCCESS {
-		return nil, nvrtcErr(r, "nvrtcGetPTX")
+	buf := make([]byte, ptxSize)
+	var ppin runtime.Pinner
+	ppin.Pin(&buf[0])
+	r := nvrtcGetPTX(prog, unsafe.Pointer(&buf[0]))
+	ppin.Unpin()
+	if r != nvrtcSuccess {
+		return nil, nvrtcError(r, "nvrtcGetPTX")
 	}
-	return &PTX{Bytes: []byte(C.GoString(&buf[0])), Log: log, Arch: arch}, nil
+	return &PTX{Bytes: []byte(goString(&buf[0])), Log: log, Arch: arch}, nil
 }
 
-// NVRTCVersion reports the version of the NVRTC library this process is linked
-// against. It decides which CUDA C a generated kernel may use and which
-// architectures Compile accepts, so it is worth putting into a bug report next
-// to the driver's own version.
+// NVRTCVersion reports the version of the NVRTC library this process loaded.
+// It decides which CUDA C a generated kernel may use and which architectures
+// Compile accepts, so it is worth putting into a bug report next to the
+// driver's own version.
 func NVRTCVersion() (major, minor int, err error) {
-	var maj, min C.int
-	if r := C.nvrtcVersion(&maj, &min); r != C.NVRTC_SUCCESS {
-		return 0, 0, nvrtcErr(r, "nvrtcVersion")
+	if err := loadNVRTC(); err != nil {
+		return 0, 0, err
+	}
+	var maj, min int32
+	if r := nvrtcVersion(&maj, &min); r != nvrtcSuccess {
+		return 0, 0, nvrtcError(r, "nvrtcVersion")
 	}
 	return int(maj), int(min), nil
 }
+
+// The two success codes, named here so the call sites read as they did when
+// they came from the headers.
+const (
+	cudaSuccess  Result      = 0
+	nvrtcSuccess NVRTCResult = 0
+)
 
 // check turns a driver status into a *Error that keeps the code, so that a
 // caller can ask errors.Is which failure this was instead of matching on the
@@ -458,19 +510,21 @@ func NVRTCVersion() (major, minor int, err error) {
 // It returns error rather than *Error on purpose: several callers hand the
 // result straight back as an error, and a typed nil pointer travelling through
 // that interface would be a non-nil error reporting success.
-func check(r C.CUresult, op string) error {
-	if r == C.CUDA_SUCCESS {
+func check(r Result, op string) error {
+	if r == cudaSuccess {
 		return nil
 	}
-	var str *C.char
-	C.cuGetErrorString(r, &str)
-	return &Error{Op: op, Code: Result(r), Desc: C.GoString(str)}
+	// The driver owns the string it hands back, so it outlives the call and
+	// needs no pinning; goString copies it into Go memory.
+	var str *byte
+	cuGetErrorString(r, &str)
+	return &Error{Op: op, Code: r, Desc: goString(str)}
 }
 
-// nvrtcErr is check for NVRTC, and returns error for the same reason.
-func nvrtcErr(r C.nvrtcResult, op string) error {
-	if r == C.NVRTC_SUCCESS {
+// nvrtcError is check for NVRTC, and returns error for the same reason.
+func nvrtcError(r NVRTCResult, op string) error {
+	if r == nvrtcSuccess {
 		return nil
 	}
-	return &NVRTCError{Op: op, Code: NVRTCResult(r), Desc: C.GoString(C.nvrtcGetErrorString(r))}
+	return &NVRTCError{Op: op, Code: r, Desc: nvrtcGetErrorString(r)}
 }
