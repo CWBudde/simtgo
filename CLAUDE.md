@@ -18,6 +18,7 @@ go build ./...                       # must stay green; the prebuilt gate can br
 go test ./...                        # transpiler, golden files, CPU emulator — no GPU needed
 go test -race ./gpu/                 # the emulator must be race-clean
 go test -tags cuda ./...             # CPU/GPU parity on a real device
+CGO_ENABLED=0 go build -tags cuda ./...   # the driver must build without cgo or a toolkit
 go test -run TestGolden ./simt/      # a single test
 GOCUDA_UPDATE=1 go test -run TestGolden ./simt/   # refresh simt/testdata/*.cu goldens
 
@@ -35,16 +36,29 @@ prettier) — `trunk check`. There is no CI workflow in the repo yet.
 
 ## The `cuda` build tag
 
-All cgo lives behind `//go:build cuda`. `cuda/stub.go` mirrors the API for
-`!cuda` builds and every call returns `ErrNoCUDA`, so the transpiler, the
-analyzer and their tests build and run on a machine with no CUDA toolkit and
-no GPU. Anything new that touches cgo needs a matching stub. The toolkit path
-is hard-coded in the `#cgo` flags of `cuda/driver_cuda.go` (`/usr/local/cuda`).
+There is no cgo anywhere. The driver and NVRTC are `dlopen`ed at run time via
+purego (`cuda/loader_cuda.go`), so everything builds with `CGO_ENABLED=0` and
+with no toolkit installed — check that with
+`CGO_ENABLED=0 go build -tags cuda ./...`.
 
-`cmd/gocuda` is deliberately cgo-free: it must build without a toolkit, so it
-depends on `internal/lower` and never on `simt`. NVRTC is reached by shelling
-out to `cmd/gocuda-nvrtc` (built with `-tags cuda`), which speaks JSON on
-stdin/stdout, one batch per invocation.
+The tag still selects the implementation: the driver lives behind
+`//go:build cuda`, and `cuda/stub.go` mirrors the API for `!cuda` builds where
+every call returns `ErrNoCUDA`, so the transpiler, the analyzer and their tests
+run without a GPU. **Anything added to the driver needs a matching stub**, and
+`cuda/surface_test.go` fails if the two surfaces drift.
+
+Which library file is opened is decided in `cuda/library.go`, which is
+deliberately untagged and free of any loading so the path policy is testable
+with no CUDA present (`cuda/library_test.go`). `GOCUDA_LIBCUDA` and
+`GOCUDA_LIBNVRTC` override the search outright; `CUDA_PATH`/`CUDA_HOME` are
+preferred over the system library.
+
+`cmd/gocuda` depends on `internal/lower` and never on `simt`. It reaches NVRTC
+by shelling out to `cmd/gocuda-nvrtc` (built with `-tags cuda`), which speaks
+JSON on stdin/stdout, one batch per invocation. That split existed because
+`simt` was cgo and `cmd/gocuda` had to build without a toolkit; now that
+nothing is cgo, the child process is no longer necessary — collapsing it is
+tracked in `PLAN.md` under Phase 1.2.
 
 ## Architecture
 
