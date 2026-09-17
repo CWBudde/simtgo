@@ -243,3 +243,48 @@ func TestClassifyParity(t *testing.T) {
 	}
 	assertClose(t, got, want, 1e-6)
 }
+
+// TestSoftclipParity covers a kernel that calls another Go function. The CPU
+// side needs nothing for this: a device function is ordinary Go, so the
+// emulator runs the very same code the device compiles.
+func TestSoftclipParity(t *testing.T) {
+	ctx := device(t)
+	const n, block = 1 << 14, 256
+	const threshold float32 = 0.5
+	x := randomSignal(n)
+
+	want := make([]float32, n)
+	gpu.RunCPU((n+block-1)/block, block, func(c gpu.Ctx) { kernels.Softclip(c, want, x, threshold) })
+
+	// An independent reference, written as one expression rather than the
+	// kernel's branches.
+	ref := make([]float32, n)
+	for i, v := range x {
+		a := math.Abs(float64(v))
+		s := a
+		if a > float64(threshold) {
+			over := a - float64(threshold)
+			s = float64(threshold) + over/(1+over)
+		}
+		ref[i] = float32(math.Copysign(s, float64(v)))
+	}
+	assertClose(t, want, ref, 1e-6)
+
+	k, err := simt.Build(ctx, gocuda.Kernels(), "Softclip")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	dy, _ := cuda.NewSlice[float32](ctx, n)
+	dx, _ := cuda.Upload(ctx, x)
+	defer dy.Free()
+	defer dx.Free()
+
+	if err := k.LaunchN(n, block, dy, dx, threshold); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	got, err := dy.Download()
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	assertClose(t, got, want, 1e-6)
+}

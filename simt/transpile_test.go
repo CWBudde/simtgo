@@ -14,7 +14,7 @@ import (
 // TestGolden pins the generated CUDA for every example kernel. Run with
 // GOCUDA_UPDATE=1 to refresh the golden files after an intentional change.
 func TestGolden(t *testing.T) {
-	for _, name := range []string{"VecAdd", "Magnitude", "Scale", "FIR", "Classify"} {
+	for _, name := range []string{"VecAdd", "Magnitude", "Scale", "FIR", "Classify", "Softclip"} {
 		t.Run(name, func(t *testing.T) {
 			u, err := simt.Transpile(gocuda.Kernels(), name)
 			if err != nil {
@@ -299,5 +299,103 @@ func TestRangeValue(t *testing.T) {
 				t.Errorf("generated CUDA does not contain %q:\n%s", tc.want, got)
 			}
 		})
+	}
+}
+
+// TestDeviceFunctions pins the shape of a translation unit that contains more
+// than the entry point: a prototype for every device function, then the
+// definitions, then the __global__ kernel. Prototypes first is what makes the
+// order of the Go declarations irrelevant.
+func TestDeviceFunctions(t *testing.T) {
+	cases := []struct {
+		name, body string
+		want       []string
+	}{{
+		name: "a scalar helper",
+		body: "func scale(v, k float32) float32 { return v * k }\n\n" +
+			"func K(ctx gpu.Ctx, y, x []float32) { i := ctx.GlobalID(); if i < len(y) { y[i] = scale(x[i], 2) } }",
+		want: []string{
+			"__device__ float scale(float v, float k);",
+			"__device__ float scale(float v, float k)",
+			"return v * k;",
+			"y[i] = scale(x[i], 2.0f);",
+		},
+	}, {
+		// A slice parameter lowers to a pointer plus a length here exactly as
+		// it does on a kernel, so the call site has to pass both.
+		name: "a slice parameter travels with its length",
+		body: "func total(xs []float32) float32 { s := float32(0)\nfor _, v := range xs { s += v }\nreturn s }\n\n" +
+			"func K(ctx gpu.Ctx, y, x []float32) { y[0] = total(x) }",
+		want: []string{
+			"__device__ float total(float* xs, int xs_len);",
+			"y[0] = total(x, x_len);",
+		},
+	}, {
+		name: "a helper with no result",
+		body: "func fill(xs []float32, v float32) { for i := range xs { xs[i] = v } }\n\n" +
+			"func K(ctx gpu.Ctx, y []float32) { fill(y, 1) }",
+		want: []string{"__device__ void fill(float* xs, int xs_len, float v);", "fill(y, y_len, 1.0f);"},
+	}, {
+		name: "a helper reached only through another helper",
+		body: "func inner(x float32) float32 { return x + 1 }\n\n" +
+			"func outer(x float32) float32 { return inner(x) * 2 }\n\n" +
+			"func K(ctx gpu.Ctx, y, x []float32) { y[0] = outer(x[0]) }",
+		want: []string{
+			"__device__ float inner(float x);",
+			"__device__ float outer(float x);",
+			"return inner(x) * 2.0f;",
+		},
+	}, {
+		// gpu.Ctx has no device representation, so it is dropped from the
+		// signature and from the call, the way a kernel's own is. The opt-out
+		// is what stops the helper being taken for a kernel in its own right.
+		name: "a helper taking gpu.Ctx, opted out of being a kernel",
+		body: "//gocuda:ignore\nfunc where(ctx gpu.Ctx) int { return ctx.GlobalID() }\n\n" +
+			"func K(ctx gpu.Ctx, y []float32) { i := where(ctx); if i < len(y) { y[i] = 1 } }",
+		want: []string{"__device__ int where();", "int i = where();"},
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := transpile(t, tc.body).Source
+			for _, w := range tc.want {
+				if !strings.Contains(got, w) {
+					t.Errorf("generated CUDA does not contain %q:\n%s", w, got)
+				}
+			}
+			// The entry point stays last, so every prototype precedes it.
+			if i := strings.Index(got, "__global__"); i >= 0 && strings.Contains(got[i:], "__device__") {
+				t.Errorf("a device function was emitted after the entry point:\n%s", got)
+			}
+			// A device function is discovered partway through another
+			// function's body, so its own indent has to start again.
+			for _, line := range strings.Split(got, "\n") {
+				if strings.Contains(line, "__device__") && strings.HasPrefix(line, "\t") {
+					t.Errorf("a device function was emitted indented:\n%s", got)
+					break
+				}
+			}
+		})
+	}
+}
+
+// TestDeviceFunctionEmittedOnce keeps a helper reached by two paths from being
+// defined twice, which C would refuse.
+func TestDeviceFunctionEmittedOnce(t *testing.T) {
+	u := transpile(t, "func inner(x float32) float32 { return x + 1 }\n\n"+
+		"func outer(x float32) float32 { return inner(x) * 2 }\n\n"+
+		"func K(ctx gpu.Ctx, y, x []float32) { y[0] = inner(x[0]) + outer(x[1]) }")
+	if n := strings.Count(u.Source, "__device__ float inner(float x)\n"); n != 1 {
+		t.Errorf("inner is defined %d times, want 1:\n%s", n, u.Source)
+	}
+}
+
+// TestUncalledFunctionIsNotEmitted keeps the translation unit to what the
+// kernel actually reaches.
+func TestUncalledFunctionIsNotEmitted(t *testing.T) {
+	u := transpile(t, "func unused(x float32) float32 { return x }\n\n"+
+		"func K(ctx gpu.Ctx, y []float32) { y[0] = 1 }")
+	if strings.Contains(u.Source, "unused") {
+		t.Errorf("an uncalled function was emitted:\n%s", u.Source)
 	}
 }

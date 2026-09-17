@@ -60,11 +60,7 @@ func (t *transpiler) stmt(s ast.Stmt) {
 	case *ast.BranchStmt:
 		t.branch(s)
 	case *ast.ReturnStmt:
-		if len(s.Results) > 0 {
-			t.fail(s.Pos(), "a kernel cannot return a value")
-			return
-		}
-		t.line("return;")
+		t.returnStmt(s)
 	case *ast.EmptyStmt:
 	default:
 		t.fail(s.Pos(), "unsupported statement %T", s)
@@ -121,8 +117,38 @@ func (t *transpiler) define(id *ast.Ident, rhs ast.Expr) string {
 	return fmt.Sprintf("%s %s = %s", ctype, cname(id.Name), t.expr(rhs).s)
 }
 
+// returnStmt lowers a return. A kernel writes through its parameters and has
+// nothing to return; a device function returns its one result.
+func (t *transpiler) returnStmt(s *ast.ReturnStmt) {
+	if len(s.Results) == 0 {
+		t.line("return;")
+		return
+	}
+	if !t.inDevice {
+		t.fail(s.Pos(), "a kernel cannot return a value")
+		return
+	}
+	if t.result == nil {
+		t.fail(s.Pos(), "%s returns nothing", t.current.Name())
+		return
+	}
+	if len(s.Results) > 1 {
+		t.fail(s.Pos(), "a device function must return at most one value")
+		return
+	}
+	t.line("return %s;", t.expr(s.Results[0]).s)
+}
+
 // shared declares a block's __shared__ tile of n float32 values.
 func (t *transpiler) shared(id *ast.Ident, n int, pos token.Pos) {
+	if t.inDevice {
+		// A tile belongs to the block, and both its size and the block size it
+		// implies are accounted on the kernel -- which is what Build and
+		// Launch enforce. A device function has no launch to make promises
+		// about.
+		t.fail(pos, "shared memory may only be declared in a kernel, not in a device function")
+		return
+	}
 	if t.ind != 1 {
 		t.fail(pos, "shared memory must be declared at the top level of the kernel")
 		return

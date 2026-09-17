@@ -122,10 +122,23 @@ A kernel that sizes shared memory against a fixed block size says so with
 quietly reading the wrong stretch of memory. `Build` likewise refuses a kernel
 whose shared memory exceeds what the device offers per block.
 
+A kernel may call another function in its package, which is emitted as a
+`__device__` function alongside it: a prototype for each one the kernel
+reaches, then the definitions, then the entry point. Slice parameters split
+into a pointer and a length there too, so the call passes both. Recursion is
+refused — there is no stack depth on the device to spend on it — and so are
+methods, generics, variadics and more than one result. A function taking a
+`gpu.Ctx` **is** a kernel by the rule above, so calling one is refused unless
+it carries `//gocuda:ignore`, which already means "not a kernel"; the `Ctx`
+then vanishes from the C signature as the kernel's own does, and shared memory
+and `AssumeBlockDim` stay refused inside it, because both are promises about a
+launch. The CPU side needs nothing at all for any of this: a device function
+is ordinary Go, so `RunCPU` runs the very code the device compiles.
+
 Everything else is **refused with a file and line**, never mistranslated:
-allocation, interfaces, goroutines, multiple assignment, calls to other Go
-functions, `float64` (1/32 rate on `sm_75`), and any import other than
-package `gpu`. `simt/errors_test.go` pins that boundary.
+allocation, interfaces, goroutines, multiple assignment, `float64` (1/32 rate
+on `sm_75`), and any import other than package `gpu`. `simt/errors_test.go`
+pins that boundary.
 
 One deliberate infidelity: Go's `int` is 64-bit, CUDA's is 32-bit. Kernel
 indices are bounded by the grid, so they are narrowed.
@@ -267,8 +280,9 @@ Honest limits, not papered over:
   compile time that threads do not alias. Go has no borrow checker and no
   const generics; this repository substitutes runtime shape checks and a
   race-detectable CPU emulator. That is weaker, and knowingly so.
-- **No device functions.** A kernel cannot call another Go function yet.
-  Inlining or emitting `__device__` functions is the obvious next step.
+- **No recursion.** A kernel may call another Go function, but not one that
+  reaches itself. That is a deliberate refusal rather than a gap: device
+  stack depth is a launch-configuration problem, not a language one.
 - **One dimension.** Grids and blocks are 1-D; 2-D and 3-D indexing is
   unimplemented, not impossible.
 - **No chained windowed operations** in the tile track: the halo of the outer

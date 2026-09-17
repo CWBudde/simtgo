@@ -36,9 +36,41 @@ func TestUnsupported(t *testing.T) {
 		body: "func K(ctx gpu.Ctx, a []float32) { go func() { a[0] = 1 }() }",
 		want: "unsupported statement",
 	}, {
-		name: "calling a Go function",
-		body: "func helper(x float32) float32 { return x }\n\nfunc K(ctx gpu.Ctx, a []float32) { a[0] = helper(a[1]) }",
-		want: "device functions are not implemented",
+		// Device functions are emitted, but not ones that call themselves:
+		// there is no stack depth on the device to spend on it.
+		name: "a recursive device function",
+		body: "func down(x float32) float32 { if x > 0 { return down(x - 1) }\nreturn x }\n\n" +
+			"func K(ctx gpu.Ctx, a []float32) { a[0] = down(a[1]) }",
+		want: "down calls itself",
+	}, {
+		name: "mutually recursive device functions",
+		body: "func even(x float32) float32 { return odd(x) }\n\nfunc odd(x float32) float32 { return even(x) }\n\n" +
+			"func K(ctx gpu.Ctx, a []float32) { a[0] = even(a[1]) }",
+		want: "even, which is already being lowered",
+	}, {
+		name: "calling another kernel",
+		body: "func Other(ctx gpu.Ctx, a []float32) { a[0] = 1 }\n\nfunc K(ctx gpu.Ctx, a []float32) { Other(ctx, a) }",
+		want: "Other is a kernel",
+	}, {
+		name: "a device function returning two values",
+		body: "func two(x float32) (float32, float32) { return x, x }\n\nfunc K(ctx gpu.Ctx, a []float32) { two(a[0]); a[0] = 1 }",
+		want: "must return at most one value",
+	}, {
+		name: "a variadic device function",
+		body: "func any(xs ...float32) float32 { return xs[0] }\n\nfunc K(ctx gpu.Ctx, a []float32) { a[0] = any(a[1]) }",
+		want: "must not be variadic",
+	}, {
+		name: "shared memory inside a device function",
+		body: "//gocuda:ignore\nfunc stage(ctx gpu.Ctx) float32 { s := ctx.SharedF32(4)\nreturn s[0] }\n\n" +
+			"func K(ctx gpu.Ctx, a []float32) { a[0] = stage(ctx) }",
+		want: "shared memory may only be declared in a kernel",
+	}, {
+		// Without the opt-out the helper is a kernel in its own right, and
+		// calling a kernel is what the previous case refuses.
+		name: "a gpu.Ctx helper that did not opt out of being a kernel",
+		body: "func where(ctx gpu.Ctx) int { return ctx.GlobalID() }\n\n" +
+			"func K(ctx gpu.Ctx, a []float32) { a[0] = float32(where(ctx)) }",
+		want: "where is a kernel",
 	}, {
 		name: "multiple assignment",
 		body: "func K(ctx gpu.Ctx, a []float32) { i, j := 0, 1; a[i] = a[j] }",

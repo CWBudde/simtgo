@@ -21,6 +21,7 @@ var Gate = []Lowered{
 	VecAdd,
 	Magnitude,
 	Scale,
+	Softclip,
 }
 
 // Names returns Gate as plain strings, for simt.VerifyPrebuilt.

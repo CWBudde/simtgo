@@ -89,7 +89,7 @@ func run(pass *analysis.Pass) (any, error) {
 		// The Unit is discarded: this runs the real lowering rather than a
 		// cheaper approximation of it, so that a construct the emitter would
 		// mistranslate is a construct the analyzer sees.
-		_, diags := lower.Kernel(pass.Fset, pass.TypesInfo, fd)
+		_, diags := lower.Kernel(pass.Fset, pass.TypesInfo, pass.Files, fd)
 		report(pass, diags)
 	}
 	return nil, nil

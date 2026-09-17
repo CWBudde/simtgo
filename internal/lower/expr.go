@@ -194,7 +194,14 @@ func (t *transpiler) call(c *ast.CallExpr) cexpr {
 			// CUDA provides overloaded min/max for int and float.
 			return atom("%s(%s)", f.Name, t.args(c))
 		}
-		t.fail(c.Pos(), "calls to %s are not supported in kernels (device functions are not implemented)", f.Name)
+		if obj, ok := t.info.Uses[f].(*types.Func); ok {
+			name, ok := t.deviceFunc(c.Pos(), obj)
+			if !ok {
+				return atom("")
+			}
+			return atom("%s(%s)", name, t.deviceArgs(c, obj))
+		}
+		t.fail(c.Pos(), "calls to %s are not supported in kernels", f.Name)
 		return atom("")
 
 	case *ast.SelectorExpr:
@@ -228,6 +235,35 @@ func (t *transpiler) call(c *ast.CallExpr) cexpr {
 	return atom("")
 }
 
+// deviceArgs renders a call's arguments to match the device function's C
+// signature: the gpu.Ctx receiver-in-all-but-name is dropped, and every slice
+// is passed as the pointer and the length the signature splits it into.
+func (t *transpiler) deviceArgs(c *ast.CallExpr, obj *types.Func) string {
+	fd := t.declOf(obj)
+	if fd == nil {
+		return ""
+	}
+	params := t.params(fd.Type.Params)
+	args := c.Args
+	if len(params) > 0 && IsCtx(params[0].typ) && len(args) > 0 {
+		params, args = params[1:], args[1:]
+	}
+	if len(params) != len(args) {
+		// go/types has already reported the mismatch; saying so again here
+		// would only describe the generated code.
+		return ""
+	}
+	out := make([]string, 0, len(args))
+	for i, p := range params {
+		if _, ok := p.typ.(*types.Slice); ok {
+			out = append(out, t.expr(args[i]).at(precArg), t.lengthOf(args[i]).at(precArg))
+			continue
+		}
+		out = append(out, t.expr(args[i]).at(precArg))
+	}
+	return strings.Join(out, ", ")
+}
+
 // assumeBlockDim records ctx.AssumeBlockDim(n) and emits nothing.
 //
 // The call is a statement about the launch, not device code: it tells the host
@@ -236,6 +272,10 @@ func (t *transpiler) call(c *ast.CallExpr) cexpr {
 // Because that promise has to hold for the whole kernel it may only be made
 // once, unconditionally, with a size the type checker can fold.
 func (t *transpiler) assumeBlockDim(c *ast.CallExpr) cexpr {
+	if t.inDevice {
+		t.fail(c.Pos(), "AssumeBlockDim may only be called in a kernel, not in a device function")
+		return atom("")
+	}
 	if t.ind != 1 {
 		t.fail(c.Pos(), "AssumeBlockDim must be called at the top level of the kernel body")
 		return atom("")
