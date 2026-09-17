@@ -280,6 +280,11 @@ func (t *transpiler) lengthOf(e ast.Expr) cexpr {
 		if l, ok := t.lens[obj]; ok {
 			return atom("%s", l)
 		}
+		// A buffer whose declaration was already refused has no length
+		// because of that refusal, not because len() was misused here.
+		if t.poisoned[obj] {
+			return atom("0")
+		}
 	}
 	t.fail(e.Pos(), "len() is only supported for slice parameters and shared buffers")
 	return atom("0")

@@ -14,6 +14,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"sort"
 	"strings"
 )
 
@@ -50,7 +51,7 @@ func Kernel(fset *token.FileSet, info *types.Info, fd *ast.FuncDecl) (*Unit, []D
 	t := &transpiler{fset: fset, info: info, lens: map[types.Object]string{}}
 	t.kernel(fd)
 	if len(t.diags) > 0 {
-		return nil, t.diags
+		return nil, tidy(t.diags)
 	}
 	return &Unit{
 		Source:        t.buf.String(),
@@ -58,6 +59,22 @@ func Kernel(fset *token.FileSet, info *types.Info, fd *ast.FuncDecl) (*Unit, []D
 		RequiredBlock: t.requiredBlock,
 		SharedBytes:   t.sharedBytes,
 	}, nil
+}
+
+// tidy puts diagnostics in source order and drops exact duplicates, which a
+// node reachable by two paths can otherwise produce.
+func tidy(diags []Diagnostic) []Diagnostic {
+	sort.SliceStable(diags, func(i, j int) bool { return diags[i].Pos < diags[j].Pos })
+	out := diags[:0]
+	var last Diagnostic
+	for i, d := range diags {
+		if i > 0 && d == last {
+			continue
+		}
+		out = append(out, d)
+		last = d
+	}
+	return out
 }
 
 type transpiler struct {
@@ -73,20 +90,38 @@ type transpiler struct {
 	// launch; see Unit.
 	requiredBlock int
 	sharedBytes   int
-	// diags collects every construct this kernel was refused for. Step 2 of
-	// the plan lets the walk continue past one; for now it stops at the first,
-	// exactly as before.
+	// diags collects every construct this kernel was refused for.
 	diags []Diagnostic
+	// mark is len(diags) when the current statement began. Refusals are
+	// collected per statement: descending further into a statement that has
+	// already been refused only produces noise about the wreckage, but the
+	// next statement starts clean and can be refused on its own merits. That
+	// is the difference between reporting one problem per run and reporting
+	// what is actually wrong with the kernel.
+	mark int
+	// poisoned holds objects a diagnostic was already issued about, so that
+	// every later mention of a variable whose declaration was refused stays
+	// quiet instead of repeating the consequences of one mistake.
+	poisoned map[types.Object]bool
 }
 
 func (t *transpiler) fail(pos token.Pos, format string, args ...any) {
-	if len(t.diags) == 0 {
-		t.diags = append(t.diags, Diagnostic{Pos: pos, Msg: fmt.Sprintf(format, args...)})
-	}
+	t.diags = append(t.diags, Diagnostic{Pos: pos, Msg: fmt.Sprintf(format, args...)})
 }
 
-// failed reports whether the kernel has already been refused.
-func (t *transpiler) failed() bool { return len(t.diags) > 0 }
+// failed reports whether the statement being rendered has already been refused.
+func (t *transpiler) failed() bool { return len(t.diags) > t.mark }
+
+// poison records that obj has been reported on, so later uses stay silent.
+func (t *transpiler) poison(obj types.Object) {
+	if obj == nil {
+		return
+	}
+	if t.poisoned == nil {
+		t.poisoned = map[types.Object]bool{}
+	}
+	t.poisoned[obj] = true
+}
 
 func (t *transpiler) line(format string, args ...any) {
 	t.buf.WriteString(strings.Repeat("\t", t.ind))
@@ -109,10 +144,10 @@ func (t *transpiler) kernel(fd *ast.FuncDecl) {
 		t.fail(fd.Pos(), "a kernel's first parameter must be gpu.Ctx")
 		return
 	}
+	// A name clash is a fact about the signature, not a reason to stop: the
+	// body is lowered anyway so that its own problems are reported in the
+	// same run. Nothing is emitted while any diagnostic stands.
 	t.checkLengthNames(params[1:])
-	if t.failed() {
-		return
-	}
 
 	var decls []string
 	for _, p := range params[1:] {
@@ -152,7 +187,6 @@ func (t *transpiler) checkLengthNames(params []param) {
 	for _, p := range params {
 		if slice, ok := generated[cname(p.name)]; ok {
 			t.fail(p.pos, "parameter %s collides with the length generated for slice parameter %s; rename it", p.name, slice)
-			return
 		}
 	}
 }
