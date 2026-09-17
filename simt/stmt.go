@@ -1,0 +1,277 @@
+package simt
+
+import (
+	"fmt"
+	"go/ast"
+	"go/token"
+	"go/types"
+	"strconv"
+)
+
+func (t *transpiler) block(b *ast.BlockStmt) {
+	t.line("{")
+	t.ind++
+	for _, s := range b.List {
+		if t.err != nil {
+			return
+		}
+		t.stmt(s)
+	}
+	t.ind--
+	t.line("}")
+}
+
+func (t *transpiler) stmt(s ast.Stmt) {
+	switch s := s.(type) {
+	case *ast.AssignStmt:
+		t.assign(s)
+	case *ast.IncDecStmt:
+		t.line("%s;", t.simple(s))
+	case *ast.ExprStmt:
+		t.line("%s;", t.expr(s.X))
+	case *ast.DeclStmt:
+		t.decl(s)
+	case *ast.IfStmt:
+		t.ifStmt(s)
+	case *ast.ForStmt:
+		t.forStmt(s)
+	case *ast.RangeStmt:
+		t.rangeStmt(s)
+	case *ast.BlockStmt:
+		t.block(s)
+	case *ast.BranchStmt:
+		switch s.Tok {
+		case token.BREAK, token.CONTINUE:
+			t.line("%s;", s.Tok)
+		default:
+			t.fail(s.Pos(), "%s is not supported in kernels", s.Tok)
+		}
+	case *ast.ReturnStmt:
+		if len(s.Results) > 0 {
+			t.fail(s.Pos(), "a kernel cannot return a value")
+			return
+		}
+		t.line("return;")
+	case *ast.EmptyStmt:
+	default:
+		t.fail(s.Pos(), "unsupported statement %T", s)
+	}
+}
+
+func (t *transpiler) assign(s *ast.AssignStmt) {
+	if len(s.Lhs) != 1 || len(s.Rhs) != 1 {
+		t.fail(s.Pos(), "multiple assignment is not supported in kernels")
+		return
+	}
+	lhs, rhs := s.Lhs[0], s.Rhs[0]
+
+	if s.Tok == token.DEFINE {
+		id, ok := lhs.(*ast.Ident)
+		if !ok {
+			t.fail(s.Pos(), "unsupported declaration target %T", lhs)
+			return
+		}
+		if n, ok := t.sharedSize(rhs); ok {
+			if t.ind != 1 {
+				t.fail(s.Pos(), "shared memory must be declared at the top level of the kernel")
+				return
+			}
+			t.line("__shared__ float %s[%d];", cname(id.Name), n)
+			t.lens[id.Name] = strconv.Itoa(n)
+			return
+		}
+		obj := t.info.Defs[id]
+		if obj == nil {
+			t.fail(id.Pos(), "%s has no resolved type", id.Name)
+			return
+		}
+		if id.Name == "_" {
+			t.line("(void)(%s);", t.expr(rhs))
+			return
+		}
+		t.line("%s %s = %s;", t.ctype(obj.Type(), id.Pos()), cname(id.Name), t.expr(rhs))
+		return
+	}
+	t.line("%s;", t.simple(s))
+}
+
+// sharedSize reports whether e is a ctx.SharedF32(n) call with a constant n.
+func (t *transpiler) sharedSize(e ast.Expr) (int, bool) {
+	call, ok := unparen(e).(*ast.CallExpr)
+	if !ok {
+		return 0, false
+	}
+	sel, ok := unparen(call.Fun).(*ast.SelectorExpr)
+	if !ok {
+		return 0, false
+	}
+	s := t.info.Selections[sel]
+	if s == nil || s.Kind() != types.MethodVal || !t.isCtx(s.Recv()) || s.Obj().Name() != "SharedF32" {
+		return 0, false
+	}
+	if len(call.Args) != 1 {
+		return 0, false
+	}
+	n, ok := t.constInt(call.Args[0])
+	if !ok {
+		// A __shared__ array needs a compile-time extent, so this has to be
+		// reported rather than silently mistranslated.
+		t.fail(call.Pos(), "SharedF32 needs a constant size (got a runtime value)")
+		return 0, false
+	}
+	return n, true
+}
+
+// simple renders an assignment or increment inline, without a terminator, so
+// it can also serve as a for-loop clause.
+func (t *transpiler) simple(s ast.Stmt) string {
+	switch s := s.(type) {
+	case nil:
+		return ""
+	case *ast.IncDecStmt:
+		return fmt.Sprintf("%s%s", t.expr(s.X), s.Tok)
+	case *ast.AssignStmt:
+		if len(s.Lhs) != 1 || len(s.Rhs) != 1 {
+			t.fail(s.Pos(), "multiple assignment is not supported in kernels")
+			return ""
+		}
+		lhs, rhs := t.expr(s.Lhs[0]), t.expr(s.Rhs[0])
+		switch s.Tok {
+		case token.ASSIGN, token.ADD_ASSIGN, token.SUB_ASSIGN, token.MUL_ASSIGN,
+			token.QUO_ASSIGN, token.REM_ASSIGN, token.AND_ASSIGN, token.OR_ASSIGN,
+			token.XOR_ASSIGN, token.SHL_ASSIGN, token.SHR_ASSIGN:
+			return fmt.Sprintf("%s %s %s", lhs, s.Tok, rhs)
+		case token.DEFINE:
+			id, ok := s.Lhs[0].(*ast.Ident)
+			if !ok {
+				t.fail(s.Pos(), "unsupported declaration target")
+				return ""
+			}
+			obj := t.info.Defs[id]
+			if obj == nil {
+				t.fail(id.Pos(), "%s has no resolved type", id.Name)
+				return ""
+			}
+			return fmt.Sprintf("%s %s = %s", t.ctype(obj.Type(), id.Pos()), cname(id.Name), rhs)
+		default:
+			t.fail(s.Pos(), "unsupported assignment %s", s.Tok)
+			return ""
+		}
+	default:
+		t.fail(s.Pos(), "unsupported clause %T", s)
+		return ""
+	}
+}
+
+func (t *transpiler) decl(s *ast.DeclStmt) {
+	gd, ok := s.Decl.(*ast.GenDecl)
+	if !ok {
+		t.fail(s.Pos(), "unsupported declaration")
+		return
+	}
+	switch gd.Tok {
+	case token.CONST:
+		// Constants are folded into their use sites by go/types, so nothing
+		// needs to be emitted here.
+		return
+	case token.VAR:
+		for _, spec := range gd.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				t.fail(spec.Pos(), "unsupported specification")
+				return
+			}
+			if len(vs.Values) != 0 && len(vs.Values) != len(vs.Names) {
+				t.fail(vs.Pos(), "unsupported var declaration")
+				return
+			}
+			for i, n := range vs.Names {
+				obj := t.info.Defs[n]
+				if obj == nil {
+					t.fail(n.Pos(), "%s has no resolved type", n.Name)
+					return
+				}
+				ctype := t.ctype(obj.Type(), n.Pos())
+				if len(vs.Values) == 0 {
+					t.line("%s %s = 0;", ctype, cname(n.Name))
+					continue
+				}
+				t.line("%s %s = %s;", ctype, cname(n.Name), t.expr(vs.Values[i]))
+			}
+		}
+	default:
+		t.fail(s.Pos(), "%s declarations are not supported in kernels", gd.Tok)
+	}
+}
+
+func (t *transpiler) ifStmt(s *ast.IfStmt) {
+	if s.Init != nil {
+		// Give the init statement its own scope, as Go does.
+		t.line("{")
+		t.ind++
+		t.line("%s;", t.simple(s.Init))
+		defer func() {
+			t.ind--
+			t.line("}")
+		}()
+	}
+	t.line("if %s", paren(t.expr(s.Cond)))
+	t.block(s.Body)
+	switch els := s.Else.(type) {
+	case nil:
+	case *ast.BlockStmt:
+		t.line("else")
+		t.block(els)
+	case *ast.IfStmt:
+		t.line("else")
+		t.ifStmt(els)
+	default:
+		t.fail(s.Else.Pos(), "unsupported else branch %T", s.Else)
+	}
+}
+
+func (t *transpiler) forStmt(s *ast.ForStmt) {
+	switch {
+	case s.Init == nil && s.Post == nil && s.Cond == nil:
+		t.line("while (true)")
+	case s.Init == nil && s.Post == nil:
+		t.line("while %s", paren(t.expr(s.Cond)))
+	default:
+		cond := ""
+		if s.Cond != nil {
+			cond = t.expr(s.Cond)
+		}
+		t.line("for (%s; %s; %s)", t.simple(s.Init), cond, t.simple(s.Post))
+	}
+	t.block(s.Body)
+}
+
+// rangeStmt lowers `for i := range x` where x is a slice or an integer.
+func (t *transpiler) rangeStmt(s *ast.RangeStmt) {
+	if s.Tok != token.DEFINE || s.Value != nil {
+		t.fail(s.Pos(), "only `for i := range x` is supported in kernels")
+		return
+	}
+	id, ok := s.Key.(*ast.Ident)
+	if !ok {
+		t.fail(s.Pos(), "unsupported range variable")
+		return
+	}
+	var limit string
+	switch typ := t.info.Types[s.X].Type.Underlying().(type) {
+	case *types.Slice:
+		limit = t.lengthOf(s.X)
+	case *types.Basic:
+		if typ.Info()&types.IsInteger == 0 {
+			t.fail(s.X.Pos(), "cannot range over %s", typ)
+			return
+		}
+		limit = t.expr(s.X)
+	default:
+		t.fail(s.X.Pos(), "cannot range over %s", typ)
+		return
+	}
+	name := cname(id.Name)
+	t.line("for (int %s = 0; %s < %s; %s++)", name, name, limit, name)
+	t.block(s.Body)
+}
