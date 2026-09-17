@@ -15,28 +15,28 @@ version, one OS, one Go version**.
 
 What the PoC is not:
 
-| | Current | Needed |
-|---|---|---|
-| Driver API | 18 calls, fully synchronous | streams, events, async copies, pinned memory |
-| Grids | ~~1-D only~~ 1-D/2-D/3-D | — |
-| Types | `float32`, `int32`/`int` | integers, `float64`, structs, fixed arrays |
-| Kernel calls | ~~none~~ `__device__` functions, recursion refused | — |
-| Errors | surface at **run time**, inside `main()` | at **build time** |
-| Toolchain | ~~hard-coded `/usr/local/cuda`~~ run-time `dlopen`, no cgo | Windows |
-| Tile ops | 7, one windowed, no reductions | reductions, 2-D, fusion planning |
+|              | Current                                                    | Needed                                       |
+| ------------ | ---------------------------------------------------------- | -------------------------------------------- |
+| Driver API   | 18 calls, fully synchronous                                | streams, events, async copies, pinned memory |
+| Grids        | ~~1-D only~~ 1-D/2-D/3-D                                   | —                                            |
+| Types        | `float32`, `int32`/`int`                                   | integers, `float64`, structs, fixed arrays   |
+| Kernel calls | ~~none~~ `__device__` functions, recursion refused         | —                                            |
+| Errors       | surface at **run time**, inside `main()`                   | at **build time**                            |
+| Toolchain    | ~~hard-coded `/usr/local/cuda`~~ run-time `dlopen`, no cgo | Windows                                      |
+| Tile ops     | 7, one windowed, no reductions                             | reductions, 2-D, fusion planning             |
 
 ## The decision that gates everything else
 
 **Keep generating CUDA C for NVRTC, or emit PTX (or LLVM IR) directly?**
 
-| | CUDA C + NVRTC (today) | Direct PTX/LLVM IR |
-|---|---|---|
-| Optimiser | NVIDIA's, for free | yours to write |
-| Artifacts | readable `.cu`, easy to diff and debug | PTX only |
-| Runtime dependency | `libnvrtc` (~60 MB) | none beyond the driver |
-| Startup | ~25 ms compile per kernel | none, if AOT |
-| Control | none over registers, scheduling, ABI | total |
-| Effort to extend | low | very high |
+|                    | CUDA C + NVRTC (today)                 | Direct PTX/LLVM IR     |
+| ------------------ | -------------------------------------- | ---------------------- |
+| Optimiser          | NVIDIA's, for free                     | yours to write         |
+| Artifacts          | readable `.cu`, easy to diff and debug | PTX only               |
+| Runtime dependency | `libnvrtc` (~60 MB)                    | none beyond the driver |
+| Startup            | ~25 ms compile per kernel              | none, if AOT           |
+| Control            | none over registers, scheduling, ABI   | total                  |
+| Effort to extend   | low                                    | very high              |
 
 **Recommendation: stay on CUDA C through 1.0.** The C++ round trip has not
 been the limiting factor in anything measured so far, and giving up NVIDIA's
@@ -55,11 +55,11 @@ Small, verified defects. Do these first; they are cheap and they distort any
 benchmark or test written on top of them.
 
 - [x] **Parameter name collision.** `func K(ctx gpu.Ctx, x []float32, x_len int32)`
-      emits `int x_len, int x_len` — a duplicate C parameter. *Verified.*
+      emits `int x_len, int x_len` — a duplicate C parameter. _Verified._
       Fix: generate lengths into a reserved namespace and reject collisions
       with a Go-level error instead of letting NVRTC report a C one.
 - [x] **Symbol table keyed by name.** `transpiler.lens` (`simt/transpile.go`)
-      maps identifier *strings* to length expressions. Key it on
+      maps identifier _strings_ to length expressions. Key it on
       `types.Object` so shadowing can never resolve to the wrong symbol.
 - [x] **Unvalidated launch geometry.** `ctx.SharedF32(FIRBlock + FIRMaxTaps)`
       assumes a launch with `block == FIRBlock`; launching otherwise silently
@@ -95,13 +95,13 @@ Two defects not in the original list were found and fixed along the way:
 
 ## Phase 1 — Foundations that cannot be retrofitted
 
-### 1.1 Build-time errors, not run-time (M) — *the single biggest gap*
+### 1.1 Build-time errors, not run-time (M) — _the single biggest gap_
 
 Today a kernel that cannot be transpiled compiles fine and fails when
 `main()` runs. No Go developer will accept that.
 
 - [x] `gocuda vet`, a `golang.org/x/tools/go/analysis` Analyzer that flags
-      unsupported constructs. Runs in CI and under `go vet -vettool`. *Not* in
+      unsupported constructs. Runs in CI and under `go vet -vettool`. _Not_ in
       editors: `gopls` has no plugin mechanism for third-party analyzers and
       runs a fixed, compiled-in set, so the editor story is a `golangci-lint`
       module plugin or an on-save task. Correcting that here rather than
@@ -155,7 +155,7 @@ from **28.7 ms to 0.9 ms** when the PTX is prebuilt.
 - [x] Replace the hard-coded paths in `cuda/driver_cuda.go` with `CUDA_PATH` /
       `pkg-config` / a documented override. (2026-09-17) — the question moved
       from build time to run time, so the answer did too: `cuda/library.go`
-      decides which *file* to open, honouring `GOCUDA_LIBCUDA` /
+      decides which _file_ to open, honouring `GOCUDA_LIBCUDA` /
       `GOCUDA_LIBNVRTC` outright and, for NVRTC alone, `CUDA_PATH` /
       `CUDA_HOME` ahead of the system library — the driver is not part of the
       toolkit, so a toolkit root says nothing about where it is. `pkg-config` is deliberately **not** used: it configures
@@ -174,7 +174,7 @@ from **28.7 ms to 0.9 ms** when the PTX is prebuilt.
       link failure the caller could never have recovered from.
 - [ ] Windows support; document macOS as unsupported (no CUDA).
       Unblocked by the above — there is no C toolchain in the way any more —
-      but it cannot be *claimed* without a Windows host or Phase 1.4's CI, so
+      but it cannot be _claimed_ without a Windows host or Phase 1.4's CI, so
       it is left open rather than written blind.
 - [x] Keep the `cuda` build tag working as the no-GPU fallback. (2026-09-17) —
       kept as it was, and now enforced: `cuda/surface_test.go` type-checks the
@@ -236,8 +236,8 @@ Nothing below is verifiable without this.
 ## Phase 2 — Language coverage (L)
 
 Each item means: a spec entry, a golden test, and a CPU/GPU parity test. Until
-Phase 3 writes the subset spec, "a spec entry" is the README's *The supported
-subset* section — the plan files the real grammar-and-semantics document under
+Phase 3 writes the subset spec, "a spec entry" is the README's _The supported
+subset_ section — the plan files the real grammar-and-semantics document under
 Phase 3, so pulling it forward would be doing that item, not this one.
 
 - [x] **Device functions.** A kernel cannot call another Go function. This
@@ -363,7 +363,7 @@ micro-optimisation.
 - [ ] **Persistent on-disk kernel cache** keyed by (source, arch, NVRTC
       version) — removes the 25 ms compile from every process start.
 - [ ] Multi-GPU; explicit context and stream ownership; goroutine-safety
-      documented *and tested*. **The per-call `cuCtxSetCurrent` is broken, and
+      documented _and tested_. **The per-call `cuCtxSetCurrent` is broken, and
       this is now reproduced rather than suspected.** `Context.bind` makes the
       context current on the calling OS thread, but a goroutine may migrate to
       another thread between that cgo call and the next one, which then sees a
@@ -447,19 +447,19 @@ Naming these keeps the scope honest:
 
 ## Sequencing
 
-| Phase | Size | Depends on | Main risk |
-|---|---|---|---|
-| 0 Known bugs | S | — | none |
-| 1.1 Build-time errors | M | — | changes the public API, so do it early |
-| 1.2 Portability | M | — | `dlopen`/`purego` rework of all cgo |
-| 1.3 Error model & API | S | 1.1 | cheap now, expensive after users |
-| 1.4 GPU CI | M | — | hardware access and cost |
-| 2 Language coverage | L | 1.1, 1.4 | device functions touch the whole emitter |
-| 3 Correctness | L | 1.4, 2 | fuzzer findings may force emitter redesign |
-| 4 Host runtime | M | 1.3 | streams change ownership semantics |
-| 5 Performance | M | 2, 4 | may expose NVRTC as the ceiling → revisit the PTX decision |
-| 6 Tile maturity | L | 2, 4 | reductions and 2-D tiling are a rewrite of the code generator |
-| 7 Release | S–M | all | — |
+| Phase                 | Size | Depends on | Main risk                                                     |
+| --------------------- | ---- | ---------- | ------------------------------------------------------------- |
+| 0 Known bugs          | S    | —          | none                                                          |
+| 1.1 Build-time errors | M    | —          | changes the public API, so do it early                        |
+| 1.2 Portability       | M    | —          | `dlopen`/`purego` rework of all cgo                           |
+| 1.3 Error model & API | S    | 1.1        | cheap now, expensive after users                              |
+| 1.4 GPU CI            | M    | —          | hardware access and cost                                      |
+| 2 Language coverage   | L    | 1.1, 1.4   | device functions touch the whole emitter                      |
+| 3 Correctness         | L    | 1.4, 2     | fuzzer findings may force emitter redesign                    |
+| 4 Host runtime        | M    | 1.3        | streams change ownership semantics                            |
+| 5 Performance         | M    | 2, 4       | may expose NVRTC as the ceiling → revisit the PTX decision    |
+| 6 Tile maturity       | L    | 2, 4       | reductions and 2-D tiling are a rewrite of the code generator |
+| 7 Release             | S–M  | all        | —                                                             |
 
 The critical path is **1.1 → 1.4 → 2 → 3**. Phases 4 and 6 can run in
 parallel once the foundations hold.

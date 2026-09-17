@@ -1,7 +1,7 @@
 # gocuda — writing CUDA kernels in Go
 
-A proof of concept prompted by NVIDIA's [*Introducing CUDA Rust: Two Tracks for
-Writing GPU Kernels*](https://developer.nvidia.com/blog/introducing-cuda-rust-two-tracks-for-writing-gpu-kernels/).
+A proof of concept prompted by NVIDIA's [_Introducing CUDA Rust: Two Tracks for
+Writing GPU Kernels_](https://developer.nvidia.com/blog/introducing-cuda-rust-two-tracks-for-writing-gpu-kernels/).
 The question it answers: **can Go do this too?**
 
 Short answer: not by the same means, but the result is closer than expected.
@@ -10,13 +10,13 @@ kernels on real hardware.
 
 ## The two tracks
 
-| | CUDA Rust | This repository |
-|---|---|---|
-| **SIMT track** | A custom `rustc` codegen backend lowers `#[kernel]` functions through MIR and LLVM IR to PTX | `go/ast` + `go/types` lower a Go subset to CUDA C, which NVRTC compiles to PTX at run time (package `simt`) |
-| **Tile track** | A `#[cutile::module]` proc macro embeds the kernel AST in the host binary and JITs it through Tile IR | The graph is recorded at run time by ordinary Go calls, then fused into one generated kernel (package `tile`) |
-| **Safety** | `DisjointSlice<T>`, launch contracts, const generics | Runtime shape checks; the CPU emulator plus `go test -race` |
-| **When errors surface** | `rustc` rejects the kernel | `gocuda vet` rejects it, and `go generate` makes an unlowerable kernel fail `go build` |
-| **Toolchain** | Pinned nightly Rust, custom LLVM | Plain `go1.26`, cgo, NVRTC. The library has no third-party dependencies; the `gocuda` tool uses `golang.org/x/tools` |
+|                         | CUDA Rust                                                                                             | This repository                                                                                                      |
+| ----------------------- | ----------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| **SIMT track**          | A custom `rustc` codegen backend lowers `#[kernel]` functions through MIR and LLVM IR to PTX          | `go/ast` + `go/types` lower a Go subset to CUDA C, which NVRTC compiles to PTX at run time (package `simt`)          |
+| **Tile track**          | A `#[cutile::module]` proc macro embeds the kernel AST in the host binary and JITs it through Tile IR | The graph is recorded at run time by ordinary Go calls, then fused into one generated kernel (package `tile`)        |
+| **Safety**              | `DisjointSlice<T>`, launch contracts, const generics                                                  | Runtime shape checks; the CPU emulator plus `go test -race`                                                          |
+| **When errors surface** | `rustc` rejects the kernel                                                                            | `gocuda vet` rejects it, and `go generate` makes an unlowerable kernel fail `go build`                               |
+| **Toolchain**           | Pinned nightly Rust, custom LLVM                                                                      | Plain `go1.26`, cgo, NVRTC. The library has no third-party dependencies; the `gocuda` tool uses `golang.org/x/tools` |
 
 ### Why Go cannot take Rust's route
 
@@ -120,7 +120,7 @@ means. A `switch` whose cases are all constant becomes a C `switch`, with an
 explicit `break` closing each clause because Go does not fall through;
 `fallthrough` is honoured by leaving that `break` out. Any other switch — a
 tagless one, or one testing a variable — becomes the `if`/`else` chain that Go
-actually describes, and a bare `break` inside *that* is refused rather than
+actually describes, and a bare `break` inside _that_ is refused rather than
 emitted, because in C it would leave the enclosing loop. A labelled `break` or
 `continue` becomes a `goto` to a target after the loop or at the end of its
 body; before that was implemented the label was dropped, which is the kind of
@@ -137,7 +137,7 @@ A kernel may call another function in its package, which is emitted as a
 reaches, then the definitions, then the entry point. Slice parameters split
 into a pointer and a length there too, so the call passes both. Recursion is
 refused — there is no stack depth on the device to spend on it — and so are
-methods, generics, variadics, more than one result, and a *named* result,
+methods, generics, variadics, more than one result, and a _named_ result,
 which would be a local the body assigns to and a bare return that carries it.
 A function taking a `gpu.Ctx` **is** a kernel by the rule above, so calling
 one is refused unless it carries `//gocuda:ignore`, which already means
@@ -165,7 +165,7 @@ go install github.com/CWBudde/gocuda/cmd/gocuda@latest
 gocuda vet ./kernels                   # or: go vet -vettool=$(which gocuda) ./...
 ```
 
-```
+```text
 kernels/bad.go:4:2: kernels may not import math (only github.com/CWBudde/gocuda/gpu is available on the device)
 kernels/bad.go:10:23: unsupported type float64 on the device (kernels are float32/int32 only)
 kernels/bad.go:11:2: multiple assignment is not supported in kernels
@@ -180,13 +180,13 @@ kernel; `//gocuda:ignore` in its doc comment opts one out.
 constant per kernel that lowered. A hand-written `gate.go` lists the constants
 that must exist, so a kernel that cannot be lowered fails the build itself:
 
-```
+```console
 $ go build ./...
 kernels/prebuilt/gate.go:22:2: undefined: Scale
 ```
 
 That covers a kernel which was regenerated and turned out not to lower. The
-case it cannot cover — edited and *never* regenerated — is caught by a test
+case it cannot cover — edited and _never_ regenerated — is caught by a test
 that needs no GPU:
 
 ```go
@@ -201,10 +201,10 @@ The embedded PTX is also what removes the compile from start-up. `Build` still
 transpiles — that is what produces the hash the prebuilt is filed under — but
 NVRTC is skipped when one matches:
 
-| | transpile + NVRTC |
-|---|---:|
-| JIT | 28.7 ms |
-| prebuilt PTX | **0.9 ms** |
+|              | transpile + NVRTC |
+| ------------ | ----------------: |
+| JIT          |           28.7 ms |
+| prebuilt PTX |        **0.9 ms** |
 
 PTX is forward compatible, so one `compute_75` artifact serves every newer
 device; an older one falls back to NVRTC. A machine with no CUDA toolkit builds
@@ -224,8 +224,8 @@ vals, err := out.Materialize()
 
 Elementwise operations never become temporaries — they fold into one C
 expression evaluated at the thread's index. The windowed operation cannot, so
-it stages a shared tile, *including its halo computed through the same fused
-expression*, and leaves its result in a local:
+it stages a shared tile, _including its halo computed through the same fused
+expression_, and leaves its result in a local:
 
 ```cuda
 // generated by github.com/CWBudde/gocuda/tile: 6 operations fused into one kernel
@@ -257,7 +257,7 @@ extern "C" __global__ void fused(float* out, int out_len, float* p0, int p0_len,
 ```
 
 `MaterializeStepwise` runs the same graph one kernel per operation, so the cost
-of *not* fusing is measurable rather than asserted.
+of _not_ fusing is measurable rather than asserted.
 
 ## Measured
 
@@ -267,22 +267,22 @@ NVIDIA T550 Laptop (`sm_75`, 4 GB), CUDA 12.8 NVRTC, driver 580, go1.26.8,
 FIR filter, 4.19M samples, 33 taps (`go run -tags cuda ./examples/fir`), across
 several runs:
 
-| | time | vs one core |
-|---|---:|---:|
-| CPU, one core | 87.5 ms | 1.0× |
-| CPU, 11 cores | 21.1 ms | 4.1× |
-| GPU kernel only | 1.03–1.07 ms | **~82–90×** |
-| GPU incl. transfers | 10.5 ms | ~8.5× |
+|                     |         time | vs one core |
+| ------------------- | -----------: | ----------: |
+| CPU, one core       |      87.5 ms |        1.0× |
+| CPU, 11 cores       |      21.1 ms |        4.1× |
+| GPU kernel only     | 1.03–1.07 ms | **~82–90×** |
+| GPU incl. transfers |      10.5 ms |       ~8.5× |
 
 Transpiling and compiling the kernel costs 28.7 ms, once — or 0.9 ms when the
 PTX was generated ahead of time.
 
 Tile pipeline, 4.19M samples (`go run -tags cuda ./examples/tilefir`):
 
-| | kernels | time |
-|---|---:|---:|
-| fused | 1 | 14.3–14.9 ms |
-| stepwise | 3 | 16.3–20.7 ms (1.15–1.39× slower, plus two temporaries) |
+|          | kernels |                                                   time |
+| -------- | ------: | -----------------------------------------------------: |
+| fused    |       1 |                                           14.3–14.9 ms |
+| stepwise |       3 | 16.3–20.7 ms (1.15–1.39× slower, plus two temporaries) |
 
 ## What Go still cannot do
 
@@ -306,19 +306,19 @@ Honest limits, not papered over:
 
 ## What already exists in Go
 
-| Project | What it does | Relation to this |
-|---|---|---|
-| [`gorgonia.org/cu`](https://pkg.go.dev/gorgonia.org/cu) | Idiomatic bindings to the CUDA driver API | The host half, done properly. Kernels are still written in CUDA C |
-| [mumax3's `cuda2go`](https://github.com/mumax/3) | Generates Go *wrappers* from hand-written `.cu` kernels | The opposite direction: CUDA is the source of truth |
-| [`gosl`](https://www.cogentcore.org/lab/gosl/) (Cogent Core, formerly `emer/gosl`) | Translates Go to WGSL compute shaders for WebGPU | The closest existing work — Go as a shader language, portable across vendors rather than CUDA-specific |
-| TinyGo | Go on LLVM | Registers `nvptx64`, but its Go version support and host-oriented runtime rule it out today |
+| Project                                                                            | What it does                                            | Relation to this                                                                                       |
+| ---------------------------------------------------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| [`gorgonia.org/cu`](https://pkg.go.dev/gorgonia.org/cu)                            | Idiomatic bindings to the CUDA driver API               | The host half, done properly. Kernels are still written in CUDA C                                      |
+| [mumax3's `cuda2go`](https://github.com/mumax/3)                                   | Generates Go _wrappers_ from hand-written `.cu` kernels | The opposite direction: CUDA is the source of truth                                                    |
+| [`gosl`](https://www.cogentcore.org/lab/gosl/) (Cogent Core, formerly `emer/gosl`) | Translates Go to WGSL compute shaders for WebGPU        | The closest existing work — Go as a shader language, portable across vendors rather than CUDA-specific |
+| TinyGo                                                                             | Go on LLVM                                              | Registers `nvptx64`, but its Go version support and host-oriented runtime rule it out today            |
 
 This repository's distinguishing bet is the **single source**: the kernel is a
 Go function that both backends run, so correctness is testable without a GPU.
 
 ## Layout
 
-```
+```text
 cuda/          CUDA driver API + NVRTC, loaded at run time (build tag "cuda")
 gpu/           kernel vocabulary + CPU grid emulator
 simt/          transpile, build and launch             (track 1)
