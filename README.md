@@ -98,11 +98,23 @@ keep a shared misunderstanding from passing as agreement.
 ### The supported subset
 
 Slices lower to a pointer plus a length, so `len()` works. `:=`, `=`, compound
-assignment, `if`/`else`, three-clause `for`, `for i := range`, `break`,
-`continue`, arithmetic, comparisons, indexing and conversions all translate.
+assignment, `if`/`else`, three-clause `for`, `for i := range`,
+`for i, v := range`, `switch`, `break`, `continue`, their labelled forms,
+arithmetic, comparisons, indexing and conversions all translate.
 `gpu.Sqrt`, `gpu.Hypot` and friends become `sqrtf`, `hypotf`; `ctx.GlobalID()`
 becomes `blockIdx.x * blockDim.x + threadIdx.x`; `ctx.SharedF32(n)` becomes a
 `__shared__` array.
+
+Two of those need a word, because Go and C disagree about what the spelling
+means. A `switch` whose cases are all constant becomes a C `switch`, with an
+explicit `break` closing each clause because Go does not fall through;
+`fallthrough` is honoured by leaving that `break` out. Any other switch — a
+tagless one, or one testing a variable — becomes the `if`/`else` chain that Go
+actually describes, and a bare `break` inside *that* is refused rather than
+emitted, because in C it would leave the enclosing loop. A labelled `break` or
+`continue` becomes a `goto` to a target after the loop or at the end of its
+body; before that was implemented the label was dropped, which is the kind of
+silent mistranslation the rest of this section exists to rule out.
 
 A kernel that sizes shared memory against a fixed block size says so with
 `ctx.AssumeBlockDim(n)`. It emits no code; it records the requirement, so that

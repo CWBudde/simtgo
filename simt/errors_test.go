@@ -65,6 +65,24 @@ func TestUnsupported(t *testing.T) {
 		name: "conditional block size",
 		body: "func K(ctx gpu.Ctx, a []float32) { if len(a) > 0 { ctx.AssumeBlockDim(128) } }",
 		want: "top level of the kernel body",
+	}, {
+		name: "type switch",
+		body: "func K(ctx gpu.Ctx, a []float32) { var x any = 1; switch x.(type) { case int: a[0] = 1 } }",
+		want: "type switches are not supported",
+	}, {
+		// A switch with a non-constant case lowers to an if/else chain, where
+		// a C break would leave the enclosing loop instead of the switch.
+		name: "break inside a switch that lowered to an if/else chain",
+		body: "func K(ctx gpu.Ctx, a []float32, n int32) { for i := 0; i < int(n); i++ { switch { case i > 1: break } }; a[0] = 1 }",
+		want: "cannot break out of a switch",
+	}, {
+		name: "a label on something other than a loop",
+		body: "func K(ctx gpu.Ctx, a []float32, n int32) { here: switch n { case 1: break here }; a[0] = 1 }",
+		want: "a label may only be placed on a for loop",
+	}, {
+		name: "range with a value, assigned rather than declared",
+		body: "func K(ctx gpu.Ctx, y, x []float32) { var i int; var v float32; for i, v = range x { y[i] = v } }",
+		want: "only `for i := range x` and `for i, v := range x` are supported",
 	}}
 
 	for _, tc := range cases {

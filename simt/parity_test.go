@@ -180,3 +180,66 @@ func TestFIRParity(t *testing.T) {
 	got, _ := dy.Download()
 	assertClose(t, got, want, 1e-5)
 }
+
+// TestClassifyParity covers the statement forms the transpiler gained
+// together: a switch over a constant set of bands, a labelled break out of a
+// nested search, and a range loop that binds the value.
+func TestClassifyParity(t *testing.T) {
+	ctx := device(t)
+	const n, block = 1 << 14, 128
+	x := randomSignal(n)
+	edges := []float32{0.1, 0.25, 0.5, 0.8, 1.2, 1.8, 2.5}
+
+	want := make([]float32, n)
+	gpu.RunCPU((n+block-1)/block, block, func(c gpu.Ctx) { kernels.Classify(c, want, x, edges) })
+
+	// An independent reference: the band is the index of the first edge the
+	// sample does not exceed, written as a flat scan rather than the kernel's
+	// grouped one.
+	ref := make([]float32, n)
+	var bias float32
+	for _, e := range edges {
+		bias += e
+	}
+	for i, v := range x {
+		v = float32(math.Abs(float64(v)))
+		band := len(edges)
+		for j, e := range edges {
+			if v <= e {
+				band = j
+				break
+			}
+		}
+		gain := float32(1)
+		switch band {
+		case 0:
+			gain = 0.25
+		case 1, 2:
+			gain = 0.5
+		case 3:
+			gain = 0.75
+		}
+		ref[i] = gain*v + bias*0.001
+	}
+	assertClose(t, want, ref, 1e-6)
+
+	k, err := simt.Build(ctx, gocuda.Kernels(), "Classify")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	dout, _ := cuda.NewSlice[float32](ctx, n)
+	dx, _ := cuda.Upload(ctx, x)
+	de, _ := cuda.Upload(ctx, edges)
+	defer dout.Free()
+	defer dx.Free()
+	defer de.Free()
+
+	if err := k.LaunchN(n, block, dout, dx, de); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	got, err := dout.Download()
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	assertClose(t, got, want, 1e-6)
+}

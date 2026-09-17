@@ -121,6 +121,34 @@ type transpiler struct {
 	// every later mention of a variable whose declaration was refused stays
 	// quiet instead of repeating the consequences of one mistake.
 	poisoned map[types.Object]bool
+	// names holds every identifier the function spells, so that a generated
+	// name -- the index a `for _, v := range` still needs -- can be chosen
+	// where it cannot collide with one the author wrote.
+	names map[string]bool
+	// labels holds the labelled loops currently open, keyed by their Go name.
+	labels map[string]*labelState
+	// pendingLabel is the label the next loop will carry. It is claimed by
+	// that loop and cleared immediately, so a nested one cannot inherit it.
+	pendingLabel *labelState
+	// breakables is what a bare `break` would leave, innermost last.
+	breakables []breakable
+}
+
+// collectNames records every identifier spelled anywhere in fn.
+//
+// It is deliberately blunt: a generated name is rejected because the spelling
+// occurs at all, not because it is in scope. Scope information is not
+// available on both of the paths that share this lowering, and a name nobody
+// used is no loss.
+func collectNames(fn *ast.FuncDecl) map[string]bool {
+	names := map[string]bool{}
+	ast.Inspect(fn, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Ident); ok {
+			names[id.Name] = true
+		}
+		return true
+	})
+	return names
 }
 
 func (t *transpiler) fail(pos token.Pos, format string, args ...any) {
@@ -149,6 +177,7 @@ func (t *transpiler) line(format string, args ...any) {
 
 // kernel emits the __global__ entry point for fd.
 func (t *transpiler) kernel(fd *ast.FuncDecl) {
+	t.names = collectNames(fd)
 	if fd.Recv != nil {
 		t.fail(fd.Pos(), "a kernel must be a plain function, not a method")
 		return

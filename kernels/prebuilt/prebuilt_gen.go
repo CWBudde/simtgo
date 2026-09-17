@@ -8,6 +8,9 @@ import (
 	"github.com/CWBudde/gocuda/simt"
 )
 
+// Classify reports that the kernel of that name lowered to CUDA C.
+const Classify Lowered = "Classify"
+
 // FIR reports that the kernel of that name lowered to CUDA C.
 const FIR Lowered = "FIR"
 
@@ -19,6 +22,9 @@ const Magnitude Lowered = "Magnitude"
 
 // Scale reports that the kernel of that name lowered to CUDA C.
 const Scale Lowered = "Scale"
+
+//go:embed Classify.compute_75.ptx
+var ptxClassify []byte
 
 //go:embed FIR.compute_75.ptx
 var ptxFIR []byte
@@ -33,6 +39,12 @@ var ptxMagnitude []byte
 var ptxScale []byte
 
 func init() {
+	simt.RegisterPrebuilt(simt.Prebuilt{
+		Name:         "Classify",
+		SourceSHA256: "429f5a395a1ce94ac51f234d80233a1eee0db124a462d28b3a9b84653895dfc8",
+		Arch:         "compute_75",
+		PTX:          ptxClassify,
+	})
 	simt.RegisterPrebuilt(simt.Prebuilt{
 		Name:          "FIR",
 		SourceSHA256:  "2f63dc9c83677287b49d35709334d694d26082261948e92c3f4183325466c4b3",

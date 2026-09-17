@@ -14,7 +14,7 @@ import (
 // TestGolden pins the generated CUDA for every example kernel. Run with
 // GOCUDA_UPDATE=1 to refresh the golden files after an intentional change.
 func TestGolden(t *testing.T) {
-	for _, name := range []string{"VecAdd", "Magnitude", "Scale", "FIR"} {
+	for _, name := range []string{"VecAdd", "Magnitude", "Scale", "FIR", "Classify"} {
 		t.Run(name, func(t *testing.T) {
 			u, err := simt.Transpile(gocuda.Kernels(), name)
 			if err != nil {
@@ -142,5 +142,162 @@ func TestUnitRequirements(t *testing.T) {
 	plain := transpile(t, "func K(ctx gpu.Ctx, y []float32) { y[ctx.GlobalID()] = 1 }")
 	if plain.RequiredBlock != 0 || plain.SharedBytes != 0 {
 		t.Errorf("RequiredBlock = %d, SharedBytes = %d, want 0 and 0", plain.RequiredBlock, plain.SharedBytes)
+	}
+}
+
+// TestSwitch pins both lowerings of a Go switch. A switch whose cases are all
+// constant becomes a C switch, which needs an explicit break per clause
+// because Go does not fall through; anything else becomes an if/else chain,
+// because C's switch cannot test a non-constant case at all.
+func TestSwitch(t *testing.T) {
+	const decl = "func K(ctx gpu.Ctx, y []float32, a, b int32) "
+	cases := []struct {
+		name, body string
+		want       []string
+		absent     []string
+	}{{
+		name: "constant cases become a C switch",
+		body: decl + "{ switch a { case 1: y[0] = 1\ncase 2, 3: y[0] = 2\ndefault: y[0] = 3 } }",
+		want: []string{"switch (a)", "case 1:", "case 2:", "case 3:", "default:", "break;"},
+	}, {
+		name: "fallthrough drops the break that ends a clause",
+		body: decl + "{ switch a { case 1: y[0] = 1\nfallthrough\ncase 2: y[0] = 2 } }",
+		// One clause ends in fallthrough, the other in break: exactly one break.
+		want:   []string{"switch (a)", "case 1:", "case 2:"},
+		absent: []string{"fallthrough"},
+	}, {
+		name: "a tagless switch becomes an if/else chain",
+		body: decl + "{ switch { case a < 1: y[0] = 1\ncase a < 2: y[0] = 2\ndefault: y[0] = 3 } }",
+		want: []string{"if (a < 1)", "else", "if (a < 2)"},
+		// C's switch cannot test a condition, so none may be emitted.
+		absent: []string{"switch ("},
+	}, {
+		name: "a non-constant case becomes an if/else chain against the tag",
+		body: decl + "{ switch a { case b: y[0] = 1\ndefault: y[0] = 2 } }",
+		want: []string{"if (a == b)", "else"},
+		// A C switch case label must be a constant expression.
+		absent: []string{"switch ("},
+	}, {
+		// Parenthesised only where C needs it: == binds tighter than ||, so
+		// the comparisons stand as they are.
+		name: "a case with several values tests each of them",
+		body: decl + "{ switch a { case b, b + 1: y[0] = 1 } }",
+		want: []string{"if (a == b || a == b + 1)"},
+	}, {
+		name: "an initialiser gets its own scope",
+		body: decl + "{ switch c := a + b; c { case 1: y[0] = 1 } }",
+		want: []string{"int c = a + b;", "switch (c)"},
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := transpile(t, tc.body).Source
+			for _, w := range tc.want {
+				if !strings.Contains(got, w) {
+					t.Errorf("generated CUDA does not contain %q:\n%s", w, got)
+				}
+			}
+			for _, a := range tc.absent {
+				if strings.Contains(got, a) {
+					t.Errorf("generated CUDA contains %q, which it must not:\n%s", a, got)
+				}
+			}
+		})
+	}
+}
+
+// TestFallthroughEmitsOneBreak pins the count rather than the text: a clause
+// that falls through must not be closed, and the one that does not must be.
+func TestFallthroughEmitsOneBreak(t *testing.T) {
+	u := transpile(t, "func K(ctx gpu.Ctx, y []float32, a int32) "+
+		"{ switch a { case 1: y[0] = 1\nfallthrough\ncase 2: y[0] = 2 } }")
+	if n := strings.Count(u.Source, "break;"); n != 1 {
+		t.Errorf("generated CUDA has %d break statements, want 1:\n%s", n, u.Source)
+	}
+}
+
+// TestLabelledBranch pins labelled break and continue.
+//
+// Before this was implemented the label was dropped and `break outer` emitted
+// a bare `break;`, which leaves the inner loop -- a mistranslation, not a
+// refusal. C has no labelled break, so both lower to a goto: the break target
+// sits after the loop, the continue target as the last statement of its body,
+// where falling off the end still runs the for-clause's post statement, which
+// is what Go's labelled continue does.
+func TestLabelledBranch(t *testing.T) {
+	src := "func K(ctx gpu.Ctx, y []float32, n int32) {\n" +
+		"outer:\n" +
+		"\tfor i := 0; i < int(n); i++ {\n" +
+		"\t\tfor j := 0; j < int(n); j++ {\n" +
+		"\t\t\tif i == j {\n\t\t\t\tbreak outer\n\t\t\t}\n" +
+		"\t\t\tif i < j {\n\t\t\t\tcontinue outer\n\t\t\t}\n" +
+		"\t\t\ty[i] = 1\n" +
+		"\t\t}\n" +
+		"\t}\n" +
+		"}"
+	got := transpile(t, src).Source
+	for _, want := range []string{
+		"goto outer_break;",
+		"goto outer_continue;",
+		"outer_continue: ;",
+		"outer_break: ;",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("generated CUDA does not contain %q:\n%s", want, got)
+		}
+	}
+	// The continue target must be inside the labelled loop and the break
+	// target after it, or the two jumps mean the wrong thing.
+	if strings.Index(got, "outer_continue: ;") > strings.Index(got, "outer_break: ;") {
+		t.Errorf("the continue target must precede the break target:\n%s", got)
+	}
+}
+
+// TestUnusedLabelEmitsNothing keeps a label that nothing jumps to out of the
+// generated source: an unused label is a warning in C, and the Go compiler
+// would have refused the kernel anyway.
+func TestUnusedLabelEmitsNothing(t *testing.T) {
+	got := transpile(t, "func K(ctx gpu.Ctx, y []float32, n int32) {\n"+
+		"outer:\n"+
+		"\tfor i := 0; i < int(n); i++ {\n"+
+		"\t\tif i == 0 {\n\t\t\tbreak outer\n\t\t}\n"+
+		"\t}\n"+
+		"}").Source
+	if strings.Contains(got, "outer_continue") {
+		t.Errorf("an unused continue target was emitted:\n%s", got)
+	}
+	if !strings.Contains(got, "outer_break: ;") {
+		t.Errorf("the used break target is missing:\n%s", got)
+	}
+}
+
+// TestRangeValue pins `for i, v := range x`. The value is a copy in Go, so it
+// is a local in C too -- assigning to it must not write through to the slice.
+func TestRangeValue(t *testing.T) {
+	cases := []struct{ name, body, want string }{{
+		name: "named index",
+		body: "func K(ctx gpu.Ctx, y, x []float32) { for i, v := range x { y[i] = v } }",
+		want: "float v = x[i];",
+	}, {
+		name: "blank index gets a synthesised one",
+		body: "func K(ctx gpu.Ctx, y, x []float32) { s := float32(0)\nfor _, v := range x { s += v }\ny[0] = s }",
+		want: "float v = x[v_i];",
+	}, {
+		name: "the synthesised index steps around a name already in use",
+		body: "func K(ctx gpu.Ctx, y, x []float32, v_i int32) { s := float32(0)\nfor _, v := range x { s += v + float32(v_i) }\ny[0] = s }",
+		want: "float v = x[v_i2];",
+	}, {
+		name: "ranging over a shared tile",
+		body: "func K(ctx gpu.Ctx, y []float32) { t := ctx.SharedF32(4)\nctx.SyncThreads()\ns := float32(0)\nfor _, v := range t { s += v }\ny[0] = s }",
+		want: "float v = t[v_i];",
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := transpile(t, tc.body).Source
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("generated CUDA does not contain %q:\n%s", tc.want, got)
+			}
+		})
 	}
 }
