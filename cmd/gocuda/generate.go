@@ -94,6 +94,15 @@ func run(o generateOptions) error {
 	}
 	if len(diags) > 0 {
 		printDiags(o.pkgDir, pkg, diags)
+		// Nothing in the package can be lowered, so nothing may stay gated.
+		// A refusal that applies to the whole package -- a forbidden import
+		// is the usual one, and is perfectly valid Go -- would otherwise
+		// leave yesterday's constants in place and let "go build" pass.
+		if !o.check && !o.initGate {
+			if err := writeAll(o, map[string][]byte{genFile: renderGen(o, nil, nil)}); err != nil {
+				return err
+			}
+		}
 		return fmt.Errorf("%s cannot be lowered", o.pkgDir)
 	}
 
@@ -311,10 +320,20 @@ func writeAll(o generateOptions, files map[string][]byte) error {
 	for _, e := range entries {
 		name := e.Name()
 		generated := name == genFile || strings.HasSuffix(name, ".cu") || strings.HasSuffix(name, ".ptx")
-		if _, keep := files[name]; generated && !keep {
-			if err := os.Remove(filepath.Join(o.outDir, name)); err != nil {
-				return err
-			}
+		if _, keep := files[name]; !generated || keep {
+			continue
+		}
+		// Without a toolkit this run cannot produce PTX, so it must not
+		// destroy any: the machine that cannot rebuild the artifact is
+		// exactly the machine that needs the committed one. It is left
+		// unregistered rather than removed, and says so.
+		if o.noPTX && strings.HasSuffix(name, ".ptx") {
+			fmt.Fprintf(os.Stderr, "%s no longer matches the kernel it was built from; it is kept but not registered, and a run with NVRTC will replace it\n",
+				filepath.Join(o.outDir, name))
+			continue
+		}
+		if err := os.Remove(filepath.Join(o.outDir, name)); err != nil {
+			return err
 		}
 	}
 	names := make([]string, 0, len(files))

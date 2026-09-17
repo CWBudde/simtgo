@@ -52,7 +52,12 @@ func LoadPackage(fsys fs.FS) (*Package, []Diagnostic, error) {
 		if err != nil {
 			return nil, nil, fmt.Errorf("reading %s: %w", name, err)
 		}
-		f, err := parser.ParseFile(fset, name, src, parser.SkipObjectResolution)
+		// Comments are parsed because //gocuda:ignore lives in one, and an
+		// opt-out the analyzer honours but the generator does not is worse
+		// than no opt-out at all: it passes the check and then fails the
+		// build. The analysis framework hands over a commented AST, so this is
+		// what makes the two agree.
+		f, err := parser.ParseFile(fset, name, src, parser.SkipObjectResolution|parser.ParseComments)
 		if err != nil {
 			return &Package{Fset: fset, Files: files}, append(diags, parseDiagnostics(err)...), nil
 		}
@@ -104,6 +109,9 @@ func LoadPackage(fsys fs.FS) (*Package, []Diagnostic, error) {
 func (p *Package) Names() []string {
 	var out []string
 	for _, f := range p.Files {
+		if Ignored(f.Doc) {
+			continue
+		}
 		for _, d := range f.Decls {
 			if fd, ok := d.(*ast.FuncDecl); ok && IsKernelDecl(p.Info, fd) {
 				out = append(out, fd.Name.Name)

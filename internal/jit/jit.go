@@ -62,10 +62,10 @@ type Result struct {
 // stay true for as long as the source they were built from exists. Memory is
 // bounded by the number of distinct kernel sources a process compiles.
 //
-// An entry describes the most recent build for the key. Two builds of the same
-// source for the same architecture differ only in where the PTX came from, and
-// only a caller that deliberately mixes the prebuilt and the NVRTC path for
-// one kernel can observe which of the two is reported.
+// The key carries the origin as well as the source and the architecture, so
+// the prebuilt and the NVRTC build of one kernel have entries of their own and
+// cannot overwrite each other's -- which they could when the key was only
+// (source, architecture), reporting one context's origin to another's caller.
 type artifacts struct {
 	ptx      []byte
 	log      string
@@ -92,16 +92,7 @@ var (
 // the one place that can end it: the context, which unloads what it owns on
 // Close.
 func Load(ctx *cuda.Context, req Request) (*Result, error) {
-	// The architecture is folded into the hash even though a context has only
-	// one, so that dumps of the same source built for different devices do not
-	// overwrite each other. The full sum keys the cache: the 12 hex digits
-	// below are a convenience for reading file names, not 48 bits of collision
-	// resistance to hang a module lookup on.
-	sum := sha256.Sum256([]byte(req.Src + "\x00" + ctx.Arch()))
-	key := hex.EncodeToString(sum[:])
-	short := key[:12]
-
-	res, err := load(ctx, key, short, req)
+	res, err := load(ctx, cacheKey(ctx, req), req)
 	if err != nil && req.PTX != nil && rejectedPTX(err) {
 		// Prebuilt PTX was produced by the NVRTC of whoever ran the generator,
 		// and it records that NVRTC's ISA version in its .version directive --
@@ -117,9 +108,26 @@ func Load(ctx *cuda.Context, req Request) (*Result, error) {
 		// A failed build leaves the module cache untouched, so this is simply
 		// a second LoadPTXCached call under the same key.
 		req.PTX, req.PTXArch = nil, ""
-		res, err = load(ctx, key, short, req)
+		res, err = load(ctx, cacheKey(ctx, req), req)
 	}
 	return res, err
+}
+
+// cacheKey identifies a loaded module.
+//
+// The architecture is folded in even though a context has only one, so that
+// dumps of the same source built for different devices do not overwrite each
+// other. So is where the PTX came from: a module built from prebuilt PTX and
+// one compiled here are different modules, and a caller that asked for the
+// second must not be handed the first because the first happened to be loaded
+// already. Leaving the origin out is what made WithoutPrebuilt unreliable.
+func cacheKey(ctx *cuda.Context, req Request) string {
+	origin := "nvrtc"
+	if req.PTX != nil {
+		origin = "prebuilt\x00" + req.PTXArch
+	}
+	sum := sha256.Sum256([]byte(req.Src + "\x00" + ctx.Arch() + "\x00" + origin))
+	return hex.EncodeToString(sum[:])
 }
 
 // rejectedPTX reports whether the driver turned the image down, as opposed to
@@ -132,13 +140,15 @@ func rejectedPTX(err error) bool {
 }
 
 // load is one attempt: at most one build, and at most one module load.
-func load(ctx *cuda.Context, key, short string, req Request) (*Result, error) {
+func load(ctx *cuda.Context, key string, req Request) (*Result, error) {
+	// The 12 hex digits are a convenience for reading file names, not
+	// collision resistance to hang a module lookup on.
+	short := key[:12]
 	// compileErr distinguishes a failure of ours from one of the context's, so
-	// that the message says which step actually gave up. Together with built
-	// it is written under the context's lock and read after LoadPTXCached has
-	// returned, so the two never race.
+	// that the message says which step actually gave up. It is written under
+	// the context's lock and read after LoadPTXCached has returned, so the two
+	// never race.
 	var compileErr error
-	var built *artifacts
 
 	mod, err := ctx.LoadPTXCached(key, func() ([]byte, error) {
 		if req.PTX != nil {
@@ -147,7 +157,7 @@ func load(ctx *cuda.Context, key, short string, req Request) (*Result, error) {
 			// was compiled" is the least useful answer it could give while
 			// chasing a kernel that misbehaves only when prebuilt.
 			dump(req.CacheDir, req.Name, short, req.Src, req.PTX)
-			built = &artifacts{ptx: req.PTX, prebuilt: true, arch: req.PTXArch}
+			remember(key, artifacts{ptx: req.PTX, prebuilt: true, arch: req.PTXArch})
 			return req.PTX, nil
 		}
 		p, err := cuda.Compile(req.Src, req.Name+".cu", ctx.Arch())
@@ -161,7 +171,7 @@ func load(ctx *cuda.Context, key, short string, req Request) (*Result, error) {
 			return nil, compileErr
 		}
 		dump(req.CacheDir, req.Name, short, req.Src, p.Bytes)
-		built = &artifacts{ptx: p.Bytes, log: p.Log, arch: ctx.Arch()}
+		remember(key, artifacts{ptx: p.Bytes, log: p.Log, arch: ctx.Arch()})
 		return p.Bytes, nil
 	})
 	if err != nil {
@@ -176,16 +186,12 @@ func load(ctx *cuda.Context, key, short string, req Request) (*Result, error) {
 		return nil, err
 	}
 
-	a := artifacts{}
-	if built != nil {
-		a = *built
-		remember(key, a)
-	} else {
-		// A cache hit means some earlier build in this process loaded that
-		// module, and every build records what it produced, so the lookup
-		// answers. A miss would leave the PTX unreported rather than wrong.
-		a, _ = recall(key)
-	}
+	// Every build records what it produced before returning, and the context
+	// publishes the module only after the build returns, so a caller that
+	// arrives here by a cache hit finds the metadata already recorded. Doing
+	// it the other way round -- recording once LoadPTXCached had returned, and
+	// so once the lock was released -- let a concurrent hit read nothing.
+	a, _ := recall(key)
 	return &Result{Func: fn, PTX: a.ptx, Log: a.log, Prebuilt: a.prebuilt, Arch: a.arch}, nil
 }
 

@@ -5,6 +5,7 @@ import (
 	"go/token"
 	"go/types"
 	"strconv"
+	"strings"
 )
 
 // GPUPkgPath is the import path of the kernel vocabulary package.
@@ -92,6 +93,31 @@ func importRefusal(path string) string {
 	return "kernels may not import " + path + " (only " + GPUPkgPath + " is available on the device)"
 }
 
+// IgnoreDirective opts a declaration, or a whole file, out of being treated as
+// a kernel.
+const IgnoreDirective = "//gocuda:ignore"
+
+// Ignored reports whether doc carries the opt-out directive.
+//
+// It lives here, beside the rule it opts out of, because every caller that
+// decides what a kernel is has to agree: an opt-out honoured by the vet tool
+// but not by the generator would pass the check and then fail generation,
+// which is worse than having no opt-out at all.
+//
+// go vet has no //nolint equivalent -- there is no general way for a user to
+// silence one of its diagnostics -- so the check has to bring its own.
+func Ignored(doc *ast.CommentGroup) bool {
+	if doc == nil {
+		return false
+	}
+	for _, c := range doc.List {
+		if c.Text == IgnoreDirective || strings.HasPrefix(c.Text, IgnoreDirective+" ") {
+			return true
+		}
+	}
+	return false
+}
+
 // CheckImports refuses every import a kernel source may not have.
 //
 // When simt type-checks kernel sources itself the rule is enforced by
@@ -121,6 +147,9 @@ func CheckImports(f *ast.File) []Diagnostic {
 // exactly the "compiles fine, dies in main()" failure this phase removes.
 func IsKernelDecl(info *types.Info, fd *ast.FuncDecl) bool {
 	if fd.Recv != nil || fd.Body == nil || fd.Type.Params == nil || len(fd.Type.Params.List) == 0 {
+		return false
+	}
+	if Ignored(fd.Doc) {
 		return false
 	}
 	first := fd.Type.Params.List[0]

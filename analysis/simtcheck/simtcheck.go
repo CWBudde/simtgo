@@ -50,9 +50,6 @@ var Analyzer = &analysis.Analyzer{
 	RunDespiteErrors: false,
 }
 
-// ignoreDirective opts a declaration, or a whole file, out of the check.
-const ignoreDirective = "//gocuda:ignore"
-
 func run(pass *analysis.Pass) (any, error) {
 	// A package that does not import the kernel vocabulary cannot contain a
 	// kernel. Imports() is a pre-computed slice of the direct imports, so for
@@ -64,13 +61,15 @@ func run(pass *analysis.Pass) (any, error) {
 	var files []*ast.File
 	var kernels []*ast.FuncDecl
 	for _, f := range pass.Files {
-		if isTestFile(pass, f) || ignored(f.Doc) {
+		if isTestFile(pass, f) || lower.Ignored(f.Doc) {
 			continue
 		}
 		files = append(files, f)
 		for _, d := range f.Decls {
+			// IsKernelDecl applies the opt-out itself, so that what this
+			// reports and what the generator lowers cannot disagree.
 			fd, ok := d.(*ast.FuncDecl)
-			if ok && !ignored(fd.Doc) && lower.IsKernelDecl(pass.TypesInfo, fd) {
+			if ok && lower.IsKernelDecl(pass.TypesInfo, fd) {
 				kernels = append(kernels, fd)
 			}
 		}
@@ -119,20 +118,4 @@ func importsGPU(p *types.Package) bool {
 // would be told it may not import "testing".
 func isTestFile(pass *analysis.Pass, f *ast.File) bool {
 	return strings.HasSuffix(pass.Fset.Position(f.Pos()).Filename, "_test.go")
-}
-
-// ignored reports whether doc carries the opt-out directive.
-//
-// go vet has no //nolint equivalent -- there is no general way for a user to
-// silence one of its diagnostics -- so the check has to bring its own.
-func ignored(doc *ast.CommentGroup) bool {
-	if doc == nil {
-		return false
-	}
-	for _, c := range doc.List {
-		if c.Text == ignoreDirective || strings.HasPrefix(c.Text, ignoreDirective+" ") {
-			return true
-		}
-	}
-	return false
 }

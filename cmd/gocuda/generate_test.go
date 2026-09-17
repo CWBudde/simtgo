@@ -187,3 +187,100 @@ func TestParseArchLocal(t *testing.T) {
 		}
 	}
 }
+
+const ignoredHelper = `package kernels
+
+import "github.com/CWBudde/gocuda/gpu"
+
+// Helper takes a Ctx but is never lowered.
+//
+//gocuda:ignore
+func Helper(ctx gpu.Ctx, a []float64) {
+	a[0] = 1
+}
+`
+
+const forbiddenImport = `package kernels
+
+import (
+	"math"
+
+	"github.com/CWBudde/gocuda/gpu"
+)
+
+func Rooted(ctx gpu.Ctx, a []float32) {
+	a[0] = float32(math.Pi)
+}
+`
+
+// TestIgnoreDirectiveIsHonouredByGenerate: the opt-out has to mean the same
+// thing to the generator as it does to the vet tool. Honoured by only one of
+// them, it passes the check and then fails the build, which is worse than not
+// offering it.
+func TestIgnoreDirectiveIsHonouredByGenerate(t *testing.T) {
+	o := fixture(t, map[string]string{"k.go": goodKernel, "helper.go": ignoredHelper})
+	if err := run(o); err != nil {
+		t.Fatalf("an ignored declaration was still lowered: %v", err)
+	}
+	gen := read(t, filepath.Join(o.outDir, genFile))
+	if strings.Contains(gen, "Helper") {
+		t.Errorf("an ignored declaration was gated:\n%s", gen)
+	}
+	if !strings.Contains(gen, "VecAdd") {
+		t.Errorf("the real kernel was not gated:\n%s", gen)
+	}
+}
+
+// TestPackageLevelRefusalDropsTheGate: a forbidden import is valid Go, so the
+// compiler has nothing to say about it. If the refusal left the old constants
+// in place, generation would fail while "go build" stayed green -- the one
+// outcome the gate exists to prevent.
+func TestPackageLevelRefusalDropsTheGate(t *testing.T) {
+	o := fixture(t, map[string]string{"k.go": goodKernel})
+	if err := run(o); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(read(t, filepath.Join(o.outDir, genFile)), "VecAdd") {
+		t.Fatal("setup: VecAdd was not gated to begin with")
+	}
+
+	if err := os.WriteFile(filepath.Join(o.pkgDir, "k.go"), []byte(forbiddenImport), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(o); err == nil {
+		t.Fatal("expected a forbidden import to fail generation")
+	}
+	if gen := read(t, filepath.Join(o.outDir, genFile)); strings.Contains(gen, "VecAdd") {
+		t.Errorf("a package that cannot be lowered is still gated:\n%s", gen)
+	}
+}
+
+// TestNoPTXKeepsUnmatchedPTX: -no-ptx runs on the machine that cannot rebuild
+// PTX, so it is the one run that must never delete any. A stale artifact is
+// left unregistered; the registry is keyed by content, so it can never be used
+// by mistake.
+func TestNoPTXKeepsUnmatchedPTX(t *testing.T) {
+	o := fixture(t, map[string]string{"k.go": goodKernel})
+	if err := run(o); err != nil {
+		t.Fatal(err)
+	}
+	ptx := filepath.Join(o.outDir, "VecAdd.compute_75.ptx")
+	if err := os.WriteFile(ptx, []byte("// pretend PTX\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Edit the kernel so the committed PTX no longer matches its source.
+	if err := os.WriteFile(filepath.Join(o.pkgDir, "k.go"),
+		[]byte(strings.Replace(goodKernel, "a[i] + b[i]", "a[i] - b[i]", 1)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(o); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(ptx); err != nil {
+		t.Errorf("-no-ptx destroyed the committed PTX it cannot rebuild: %v", err)
+	}
+	if gen := read(t, filepath.Join(o.outDir, genFile)); strings.Contains(gen, "go:embed") {
+		t.Errorf("PTX that no longer matches its source was still registered:\n%s", gen)
+	}
+}

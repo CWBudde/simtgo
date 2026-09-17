@@ -298,3 +298,42 @@ func BenchmarkBuild(b *testing.B) {
 		run(b)
 	})
 }
+
+// TestWithoutPrebuiltOnAWarmContext pins the negative control.
+//
+// Build the prebuilt path first and the NVRTC path second, in one context, and
+// the second call used to be answered from the module cache with the first
+// call's module -- because the cache key held only the source and the device's
+// architecture, not where the PTX came from. WithoutPrebuilt then silently did
+// nothing, which is the one thing an option whose whole purpose is to be a
+// control must never do.
+func TestWithoutPrebuiltOnAWarmContext(t *testing.T) {
+	swapRegistry(t)
+	dev := freshDevice(t)
+	arch := dev.Arch()
+	u, ptx := compileFIR(t, arch)
+	registerFIR(t, u, ptx, arch)
+
+	warm, err := Build(dev, kernelSources, "FIR", WithCacheDir(""))
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if !warm.Prebuilt {
+		t.Fatal("setup: the first build did not take the prebuilt path")
+	}
+
+	cold, err := Build(dev, kernelSources, "FIR", WithoutPrebuilt(), WithCacheDir(""))
+	if err != nil {
+		t.Fatalf("Build with WithoutPrebuilt: %v", err)
+	}
+	if cold.Prebuilt {
+		t.Error("WithoutPrebuilt returned the prebuilt module that was already loaded")
+	}
+	if cold.Arch != arch {
+		t.Errorf("Arch = %q, want the device's own %q on the NVRTC path", cold.Arch, arch)
+	}
+	// Both are real, launchable modules; the point is only where they came from.
+	if cold.RequiredBlock != warm.RequiredBlock || cold.Source != warm.Source {
+		t.Error("the two paths disagree about the kernel itself, not just its origin")
+	}
+}
