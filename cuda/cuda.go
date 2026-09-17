@@ -15,11 +15,11 @@
 // could only be ignored, and accepting one would advertise a guarantee that
 // does not exist.
 //
-// It becomes meaningful with streams and events (PLAN.md Phase 4), where
-// cuStreamQuery can genuinely be polled against a cancelled context. When it
-// arrives the convention is a context.Context first, named ctx, and the CUDA
-// context second, named dev -- which is why the parameters are already spelled
-// that way.
+// It becomes meaningful once streams and events exist, because cuStreamQuery
+// can genuinely be polled against a cancelled context. When it arrives the
+// convention is a context.Context first, named ctx, and the CUDA context
+// second, named dev -- which is why the parameters are already spelled that
+// way.
 package cuda
 
 import (

@@ -351,9 +351,9 @@ func (m *Module) Function(name string) (*Function, error) {
 // LaunchSync runs the kernel and waits for it to finish.
 //
 // The name says so because the wait is the surprising part: cuLaunchKernel is
-// asynchronous, and Phase 4 of PLAN.md adds the asynchronous launch that
-// deserves the plain name. Having both under one name for a while would be
-// worse than renaming this once.
+// asynchronous, so the plain name belongs to the asynchronous launch that is
+// still to come. Having both under one name for a while would be worse than
+// renaming this once.
 //
 // Kernel parameters are copied into C-allocated memory: the driver receives an
 // array of pointers, and cgo forbids handing it an array that itself holds Go

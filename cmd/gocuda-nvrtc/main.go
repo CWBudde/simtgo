@@ -10,8 +10,9 @@
 // It reads a JSON request on stdin and writes a JSON response on stdout, one
 // batch per invocation rather than one process per kernel.
 //
-// Phase 1.2 of PLAN.md loads libnvrtc at run time, at which point this command
-// has no reason to exist and the generator can call cuda.Compile directly.
+// Loading libnvrtc at run time, rather than linking it, would remove the
+// reason for this command entirely: the generator could then call cuda.Compile
+// itself without dragging cgo into a tool that otherwise needs none.
 package main
 
 import (
