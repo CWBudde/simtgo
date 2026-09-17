@@ -10,6 +10,8 @@
 package lower
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"go/ast"
 	"go/token"
@@ -29,6 +31,20 @@ type Unit struct {
 	Name          string // the Go function's name, also the C entry point
 	RequiredBlock int    // block size the kernel demands, 0 when it declares none
 	SharedBytes   int    // total statically declared __shared__ bytes
+	// SourceHash identifies Source, and is what an ahead-of-time artifact is
+	// filed under. Hashing the generated CUDA C rather than the Go source
+	// means a change to the emitter invalidates a prebuilt just as a change to
+	// the kernel does, and that comments and formatting in the Go source,
+	// which cannot affect the output, do not.
+	SourceHash string
+}
+
+// SourceHash is the identity of a piece of generated CUDA C. It is the whole
+// staleness story for ahead-of-time artifacts: a prebuilt is found by what it
+// was built from, so one built from anything else is simply not found.
+func SourceHash(src string) string {
+	sum := sha256.Sum256([]byte(src))
+	return hex.EncodeToString(sum[:])
 }
 
 // A Diagnostic is one reason a kernel cannot be lowered.
@@ -53,11 +69,13 @@ func Kernel(fset *token.FileSet, info *types.Info, fd *ast.FuncDecl) (*Unit, []D
 	if len(t.diags) > 0 {
 		return nil, tidy(t.diags)
 	}
+	src := t.buf.String()
 	return &Unit{
-		Source:        t.buf.String(),
+		Source:        src,
 		Name:          fd.Name.Name,
 		RequiredBlock: t.requiredBlock,
 		SharedBytes:   t.sharedBytes,
+		SourceHash:    SourceHash(src),
 	}, nil
 }
 

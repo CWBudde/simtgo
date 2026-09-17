@@ -71,7 +71,7 @@ func TestRawKernel(t *testing.T) {
 
 	const block = 256
 	grid := (n + block - 1) / block
-	if err := fn.Launch(cuda.D1(grid), cuda.D1(block), 0,
+	if err := fn.LaunchSync(cuda.D1(grid), cuda.D1(block), 0,
 		dc.Arg(), da.Arg(), db.Arg(), cuda.ArgI32(n)); err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
@@ -116,7 +116,7 @@ func runAdd(t *testing.T, ctx *cuda.Context, fn *cuda.Function) {
 	defer dc.Free()
 
 	const block = 64
-	if err := fn.Launch(cuda.D1(n/block), cuda.D1(block), 0,
+	if err := fn.LaunchSync(cuda.D1(n/block), cuda.D1(block), 0,
 		dc.Arg(), da.Arg(), db.Arg(), cuda.ArgI32(n)); err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
@@ -178,12 +178,12 @@ func TestModuleCacheIsPerContext(t *testing.T) {
 	}
 
 	builds := 0
-	build := func() ([]byte, any, error) {
+	build := func() ([]byte, error) {
 		builds++
-		return ptx.Bytes, builds, nil
+		return ptx.Bytes, nil
 	}
 
-	modA, extraA, err := first.LoadPTXCached("add", build)
+	modA, err := first.LoadPTXCached("add", build)
 	if err != nil {
 		first.Close()
 		t.Fatalf("LoadPTXCached (miss): %v", err)
@@ -191,7 +191,7 @@ func TestModuleCacheIsPerContext(t *testing.T) {
 	if builds != 1 {
 		t.Fatalf("builds = %d after the first load, want 1", builds)
 	}
-	modB, extraB, err := first.LoadPTXCached("add", build)
+	modB, err := first.LoadPTXCached("add", build)
 	if err != nil {
 		first.Close()
 		t.Fatalf("LoadPTXCached (hit): %v", err)
@@ -201,9 +201,6 @@ func TestModuleCacheIsPerContext(t *testing.T) {
 	}
 	if modB != modA {
 		t.Errorf("a cache hit returned a different module than the miss")
-	}
-	if extraB != extraA {
-		t.Errorf("extra = %v on the hit, want the %v the miss stored", extraB, extraA)
 	}
 
 	if err := first.Close(); err != nil {
@@ -222,7 +219,7 @@ func TestModuleCacheIsPerContext(t *testing.T) {
 	}
 	defer second.Close()
 
-	modC, _, err := second.LoadPTXCached("add", build)
+	modC, err := second.LoadPTXCached("add", build)
 	if err != nil {
 		t.Fatalf("LoadPTXCached in a fresh context: %v", err)
 	}
@@ -247,7 +244,7 @@ func TestModuleCacheIsPerContext(t *testing.T) {
 	if err := modC.Unload(); err != nil {
 		t.Fatalf("second Unload: %v", err)
 	}
-	if _, _, err := second.LoadPTXCached("add", build); err != nil {
+	if _, err := second.LoadPTXCached("add", build); err != nil {
 		t.Fatalf("LoadPTXCached after Unload: %v", err)
 	}
 	if builds != 3 {
@@ -263,16 +260,15 @@ func TestJITLoadAcrossContexts(t *testing.T) {
 	if !cuda.Available() {
 		t.Skip("no CUDA device available")
 	}
-	// Keep the debug dumps out of the repository.
-	old := jit.CacheDir
-	jit.CacheDir = t.TempDir()
-	defer func() { jit.CacheDir = old }()
+	// A Request with no cache directory writes no dumps, which is what this
+	// test wants: nothing here is worth reading afterwards.
+	req := jit.Request{Src: addSrc, Name: "add"}
 
 	first, err := cuda.NewContext(0)
 	if err != nil {
 		t.Fatalf("NewContext: %v", err)
 	}
-	firstRes, err := jit.Load(first, addSrc, "add")
+	firstRes, err := jit.Load(first, req)
 	if err != nil {
 		first.Close()
 		t.Fatalf("Load: %v", err)
@@ -282,7 +278,7 @@ func TestJITLoadAcrossContexts(t *testing.T) {
 		t.Fatal("Load returned no PTX on a compile")
 	}
 
-	hit, err := jit.Load(first, addSrc, "add")
+	hit, err := jit.Load(first, req)
 	if err != nil {
 		first.Close()
 		t.Fatalf("Load (cache hit): %v", err)
@@ -308,7 +304,7 @@ func TestJITLoadAcrossContexts(t *testing.T) {
 	// With a process-wide cache this call returned the module loaded into the
 	// context that has just been released, and the launch below ran on a stale
 	// handle. It must compile and load into the new context instead.
-	res, err := jit.Load(second, addSrc, "add")
+	res, err := jit.Load(second, req)
 	if err != nil {
 		t.Fatalf("Load in a fresh context: %v", err)
 	}

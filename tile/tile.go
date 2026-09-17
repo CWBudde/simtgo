@@ -57,7 +57,7 @@ type Graph struct {
 }
 
 // New starts a graph on the given device context.
-func New(ctx *cuda.Context) *Graph { return &Graph{ctx: ctx} }
+func New(dev *cuda.Context) *Graph { return &Graph{ctx: dev} }
 
 // Tensor is a one-dimensional value in a graph. It holds no data: it is a
 // handle to a node whose value will be computed if and when it is needed.

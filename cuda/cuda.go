@@ -6,6 +6,20 @@
 // (notably the Go-to-CUDA transpiler in package simt) builds and tests on
 // machines without a CUDA toolchain. Without the tag, every entry point here
 // fails with ErrNoCUDA.
+//
+// # On context.Context
+//
+// Nothing here takes one, deliberately. Every call in this package is
+// synchronous and uncancellable: cuCtxSynchronize, cuMemcpyHtoD and
+// cuLaunchKernel cannot be interrupted once issued, so a deadline passed in
+// could only be ignored, and accepting one would advertise a guarantee that
+// does not exist.
+//
+// It becomes meaningful with streams and events (PLAN.md Phase 4), where
+// cuStreamQuery can genuinely be polled against a cancelled context. When it
+// arrives the convention is a context.Context first, named ctx, and the CUDA
+// context second, named dev -- which is why the parameters are already spelled
+// that way.
 package cuda
 
 import (

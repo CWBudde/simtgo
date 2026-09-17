@@ -70,16 +70,9 @@ type Context struct {
 	// build callback of LoadPTXCached, so one source is compiled once
 	// however many goroutines ask for it at the same moment.
 	mu      sync.Mutex
-	modules []*Module             // every module loaded here, in load order
-	cache   map[string]cacheEntry // the subset loaded through LoadPTXCached
+	modules []*Module          // every module loaded here, in load order
+	cache   map[string]*Module // the subset loaded through LoadPTXCached
 	closed  bool
-}
-
-// cacheEntry is one cached module together with the value its builder attached
-// to it. The extra value is opaque to this package; see LoadPTXCached.
-type cacheEntry struct {
-	mod   *Module
-	extra any
 }
 
 // NewContext retains the primary context of the given device ordinal.
@@ -263,34 +256,34 @@ func (c *Context) loadPTXLocked(ptx []byte) (*Module, error) {
 // seen without ever caching a module beyond the life of its context.
 //
 // build runs only on a miss, with the context's lock held, so concurrent
-// callers asking for the same key compile once and share the result. Besides
-// the PTX to load, build returns a value this package stores but never looks
-// at and hands back on every subsequent hit: internal/jit uses it to carry the
-// generated PTX and the NVRTC log, so a cache hit can report exactly what the
-// original miss reported. The split is deliberate -- the caller keeps the
-// compile and dump policy, the context keeps the module's lifetime.
-func (c *Context) LoadPTXCached(key string, build func() (ptx []byte, extra any, err error)) (*Module, any, error) {
+// callers asking for the same key compile once and share the result. What this
+// cache is for is the module alone: a CUmodule dies with its context, which is
+// the one thing a package-level map cannot get right. Everything else a caller
+// wants to remember about a build -- the PTX, the compiler log, where the
+// bytes came from -- is inert and belongs in the caller's own map, so it is
+// not dragged through this API as an untyped value.
+func (c *Context) LoadPTXCached(key string, build func() ([]byte, error)) (*Module, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
-		return nil, nil, ErrContextClosed
+		return nil, ErrContextClosed
 	}
-	if e, ok := c.cache[key]; ok {
-		return e.mod, e.extra, nil
+	if m, ok := c.cache[key]; ok {
+		return m, nil
 	}
-	ptx, extra, err := build()
+	ptx, err := build()
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	m, err := c.loadPTXLocked(ptx)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if c.cache == nil {
-		c.cache = make(map[string]cacheEntry)
+		c.cache = make(map[string]*Module)
 	}
-	c.cache[key] = cacheEntry{mod: m, extra: extra}
-	return m, extra, nil
+	c.cache[key] = m
+	return m, nil
 }
 
 // Unload releases the module ahead of its context's Close, which is the only
@@ -331,8 +324,8 @@ func (c *Context) forgetLocked(m *Module) {
 			break
 		}
 	}
-	for key, e := range c.cache {
-		if e.mod == m {
+	for key, cached := range c.cache {
+		if cached == m {
 			delete(c.cache, key)
 		}
 	}
@@ -355,12 +348,17 @@ func (m *Module) Function(name string) (*Function, error) {
 	return f, nil
 }
 
-// Launch runs the kernel and waits for it to finish.
+// LaunchSync runs the kernel and waits for it to finish.
+//
+// The name says so because the wait is the surprising part: cuLaunchKernel is
+// asynchronous, and Phase 4 of PLAN.md adds the asynchronous launch that
+// deserves the plain name. Having both under one name for a while would be
+// worse than renaming this once.
 //
 // Kernel parameters are copied into C-allocated memory: the driver receives an
 // array of pointers, and cgo forbids handing it an array that itself holds Go
 // pointers.
-func (f *Function) Launch(grid, block Dim3, sharedBytes int, args ...Arg) error {
+func (f *Function) LaunchSync(grid, block Dim3, sharedBytes int, args ...Arg) error {
 	if err := f.x.bind(); err != nil {
 		return err
 	}
