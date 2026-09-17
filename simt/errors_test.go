@@ -47,6 +47,24 @@ func TestUnsupported(t *testing.T) {
 		name: "map",
 		body: "func K(ctx gpu.Ctx, a []float32) { m := map[int]int{}; a[0] = float32(m[1]) }",
 		want: "unsupported type",
+	}, {
+		// A slice parameter lowers to a pointer plus a generated length, so a
+		// parameter spelled like that length would reach NVRTC as a duplicate.
+		name: "parameter collides with a generated length",
+		body: "func K(ctx gpu.Ctx, x []float32, x_len int32) { x[0] = float32(x_len) }",
+		want: "collides with the length generated for slice parameter x",
+	}, {
+		name: "non-constant block size",
+		body: "func K(ctx gpu.Ctx, a []float32) { ctx.AssumeBlockDim(len(a)); a[0] = 1 }",
+		want: "constant block size",
+	}, {
+		name: "two different block sizes",
+		body: "func K(ctx gpu.Ctx, a []float32) { ctx.AssumeBlockDim(128); ctx.AssumeBlockDim(256); a[0] = 1 }",
+		want: "already declared a block size of 128",
+	}, {
+		name: "conditional block size",
+		body: "func K(ctx gpu.Ctx, a []float32) { if len(a) > 0 { ctx.AssumeBlockDim(128) } }",
+		want: "top level of the kernel body",
 	}}
 
 	for _, tc := range cases {

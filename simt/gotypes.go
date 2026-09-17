@@ -43,6 +43,11 @@ func gpuPackage() *types.Package {
 	}
 	method("SyncThreads", nil, nil)
 	method("SharedF32", []*types.Var{types.NewVar(token.NoPos, pkg, "n", intT)}, ret(f32Slice))
+	// AssumeBlockDim yields nothing on either backend: on the CPU it is a
+	// check, on the device it lowers to no code at all. It is declared here
+	// all the same, because the transpiler has to see the call to learn which
+	// block size the kernel was written for.
+	method("AssumeBlockDim", []*types.Var{types.NewVar(token.NoPos, pkg, "n", intT)}, nil)
 
 	fn := func(name string, arity int) {
 		params := make([]*types.Var, arity)

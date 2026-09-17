@@ -15,7 +15,9 @@
 package gpu
 
 import (
+	"fmt"
 	"runtime"
+	"runtime/debug"
 	"sync"
 )
 
@@ -56,9 +58,17 @@ func (c Ctx) SyncThreads() {
 //
 // Calls are matched between threads by their order of execution, exactly as
 // __shared__ declarations are: every thread of a block must reach every
-// SharedF32 call.
+// SharedF32 call, and every thread must ask for the same n at the same call.
+// A __shared__ declaration on the device is a property of the compiled kernel,
+// not of the thread that executes it, so a kernel whose threads disagree about
+// how much shared memory exists is not a kernel the GPU could run at all. The
+// emulator therefore does not try to give such a kernel a plausible answer: it
+// records the disagreement and RunCPU turns it into a panic (see blockState
+// for why the panic is deferred to RunCPU's caller).
 func (c Ctx) SharedF32(n int) []float32 {
 	if c.block == nil {
+		// A zero-value Ctx is not part of a launch, so there is nobody to
+		// share with and nothing to cross-check: hand out a private buffer.
 		return make([]float32, n)
 	}
 	i := c.thread.seq
@@ -67,20 +77,100 @@ func (c Ctx) SharedF32(n int) []float32 {
 	c.block.mu.Lock()
 	defer c.block.mu.Unlock()
 	for len(c.block.slabs) <= i {
-		c.block.slabs = append(c.block.slabs, nil)
+		c.block.slabs = append(c.block.slabs, slab{})
 	}
-	if c.block.slabs[i] == nil {
-		c.block.slabs[i] = make([]float32, n)
+	s := &c.block.slabs[i]
+	if !s.alloc {
+		s.alloc, s.size, s.buf = true, n, make([]float32, n)
+		return s.buf
 	}
-	return c.block.slabs[i]
+	if s.size != n {
+		c.block.reportLocked(fmt.Sprintf(
+			"gpu: SharedF32 size mismatch at call #%d of block %d: an earlier thread asked for %d element(s), thread %d asked for %d. "+
+				"Shared memory is sized once per block, so every thread of a block must pass the same (constant) size to the same SharedF32 call.",
+			i, c.bid, s.size, c.tid, n))
+		// Return a private buffer of the size that was actually requested so
+		// the offending thread can run to completion without an out-of-range
+		// panic drowning out the diagnosis above. Its results are meaningless,
+		// but nobody will get to read them: RunCPU panics.
+		return make([]float32, n)
+	}
+	return s.buf
 }
 
+// AssumeBlockDim declares the block size this kernel was written for.
+//
+// Kernels routinely size their shared memory against a block size baked into
+// the source ("s := ctx.SharedF32(256)" next to an implicit assumption that
+// blockDim.x is 256). Launched with a different block size such a kernel does
+// not fail, it quietly computes the wrong thing: threads beyond the declared
+// size run off the end of the tile, or part of the tile is never filled and
+// contributes zeros. Stating the assumption turns that class of silent
+// corruption into a check the CPU emulator performs here, and the GPU launch
+// path performs against the kernel's recorded block size.
+//
+// Outside RunCPU (a zero-value Ctx, which belongs to no launch) it is a no-op,
+// exactly as SyncThreads is, so that a kernel body can still be called as a
+// plain function. On the device the transpiler emits nothing for it: the
+// declared size has already been consumed at compile time.
+func (c Ctx) AssumeBlockDim(n int) {
+	if c.block != nil && c.bdim != n {
+		c.block.report(fmt.Sprintf(
+			"gpu: block size mismatch: the kernel declares AssumeBlockDim(%d) but was launched with blockDim=%d. "+
+				"Launch it with %d threads per block, or rewrite the kernel so it works for any block size.",
+			n, c.bdim, n))
+	}
+}
+
+// threadState is the per-thread bookkeeping the emulator needs. seq is the
+// number of SharedF32 calls this thread has made so far, which doubles as the
+// index of its next call; comparing the final values across a block is how
+// divergent shared-memory usage is detected.
 type threadState struct{ seq int }
 
+// slab is one shared buffer of a block together with the size it was created
+// with. Keeping the size is what allows a later thread that asks for a
+// different size at the same call index to be diagnosed rather than silently
+// handed a buffer of the wrong length. alloc is tracked separately because a
+// legitimately empty slab (n == 0) is indistinguishable from an unused one by
+// looking at buf alone.
+type slab struct {
+	buf   []float32
+	size  int
+	alloc bool
+}
+
+// blockState is the state the threads of one block share.
+//
+// fail holds the first contract violation observed in the block. Violations
+// are detected on a thread's own goroutine, but they deliberately do not panic
+// there: a panic on a thread goroutine would take down the whole test process,
+// because recover runs only on the stack of the goroutine that panicked, and
+// it would strand the thread's siblings in the barrier forever. So the
+// diagnosis is recorded, the offending call returns something harmless, the
+// block runs to completion, and RunCPU re-raises the first recorded diagnosis
+// as a panic on its own caller's goroutine — loud, and catchable by both the
+// kernel author's recover and a test's.
 type blockState struct {
 	bar   *barrier
 	mu    sync.Mutex
-	slabs [][]float32
+	slabs []slab
+	fail  string
+}
+
+// report records a contract violation. The first one wins: later violations
+// are usually consequences of the first and would only bury it.
+func (s *blockState) report(msg string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reportLocked(msg)
+}
+
+// reportLocked is report for callers that already hold s.mu.
+func (s *blockState) reportLocked(msg string) {
+	if s.fail == "" {
+		s.fail = msg
+	}
 }
 
 // RunCPU executes fn over a grid of blocks, emulating a CUDA launch.
@@ -93,6 +183,13 @@ type blockState struct {
 // This is a debugging and correctness tool, not a fast CPU backend: a
 // goroutine per thread is nothing like a warp. Benchmarks should compare
 // against an ordinary Go loop instead.
+//
+// RunCPU panics if the kernel violates the block-level contract the emulator
+// can check (see SharedF32 and AssumeBlockDim) or if the kernel itself panics
+// on one of its thread goroutines. The panic is raised here, on RunCPU's own
+// caller's goroutine, rather than where the problem was found, so that it is
+// recoverable and testable instead of terminating the process from a goroutine
+// nobody can recover on.
 func RunCPU(grid, block int, fn func(Ctx)) {
 	if grid <= 0 || block <= 0 {
 		return
@@ -104,33 +201,108 @@ func RunCPU(grid, block int, fn func(Ctx)) {
 	}
 	close(blocks)
 
+	var (
+		failMu sync.Mutex
+		fail   string
+	)
 	var wg sync.WaitGroup
 	wg.Add(workers)
 	for range workers {
 		go func() {
 			defer wg.Done()
 			for b := range blocks {
-				runBlock(b, grid, block, fn)
+				// Once one block has produced a diagnosis, running the rest of
+				// the grid can only produce more of the same, so drain the
+				// queue instead. The launch is about to panic anyway.
+				failMu.Lock()
+				stop := fail != ""
+				failMu.Unlock()
+				if stop {
+					continue
+				}
+				if msg := runBlock(b, grid, block, fn); msg != "" {
+					failMu.Lock()
+					if fail == "" {
+						fail = msg
+					}
+					failMu.Unlock()
+				}
 			}
 		}()
 	}
 	wg.Wait()
+
+	// Safe without the mutex: wg.Wait happens after every write to fail.
+	if fail != "" {
+		panic(fail)
+	}
 }
 
-func runBlock(bid, grid, block int, fn func(Ctx)) {
+// runBlock runs the threads of one block and returns the first contract
+// violation it observed, or "" if the block was well behaved. It returns the
+// diagnosis rather than panicking because it runs on one of RunCPU's worker
+// goroutines, which is no more recoverable than a thread goroutine is.
+func runBlock(bid, grid, block int, fn func(Ctx)) string {
 	st := &blockState{bar: newBarrier(block)}
+
+	// The thread states outlive the goroutines that use them: after the block
+	// has finished, their seq counters say how many SharedF32 calls each
+	// thread made, and those counts must agree.
+	threads := make([]*threadState, block)
+	for t := range block {
+		threads[t] = &threadState{}
+	}
+
 	var wg sync.WaitGroup
 	wg.Add(block)
 	for t := range block {
 		go func() {
 			defer wg.Done()
+			// A kernel that panics on a thread goroutine would otherwise kill
+			// the process. Catch it, let the barrier forget the thread so its
+			// siblings are not stranded, and hand the message upwards to be
+			// re-raised by RunCPU. The original stack is kept, since that is
+			// the part with the diagnostic value.
+			defer func() {
+				if r := recover(); r != nil {
+					st.report(fmt.Sprintf("gpu: kernel panicked in block %d, thread %d: %v\n\n%s", bid, t, r, debug.Stack()))
+					st.bar.abandon()
+				}
+			}()
 			fn(Ctx{
 				tid: t, bid: bid, bdim: block, gdim: grid,
-				block: st, thread: &threadState{},
+				block: st, thread: threads[t],
 			})
 		}()
 	}
 	wg.Wait()
+
+	if msg := divergence(bid, threads); msg != "" {
+		st.report(msg)
+	}
+	return st.fail // no lock needed: every writer has been joined
+}
+
+// divergence reports whether the threads of a finished block disagreed about
+// how many SharedF32 calls to make. Since calls are matched by execution
+// order, a thread that skipped one shares the wrong buffer with everybody from
+// that point on, which is a wrong answer rather than a crash — hence the
+// check.
+func divergence(bid int, threads []*threadState) string {
+	if len(threads) == 0 {
+		return ""
+	}
+	want := threads[0].seq
+	for t, ts := range threads {
+		if ts.seq != want {
+			return fmt.Sprintf(
+				"gpu: divergent SharedF32 usage in block %d: thread 0 made %d SharedF32 call(s), thread %d made %d. "+
+					"Shared buffers are matched across threads by call order, so every thread of a block must reach every SharedF32 call; "+
+					"hoist the call out of the conditional that threads disagree about.",
+				bid, want, t, ts.seq)
+		}
+	}
+	return ""
 }
 
 // barrier is a reusable barrier for a fixed number of participants.
@@ -161,5 +333,22 @@ func (b *barrier) wait() {
 	}
 	for gen == b.gen {
 		b.cond.Wait()
+	}
+}
+
+// abandon removes one participant from the barrier for good. It exists for the
+// one case where a thread stops taking part without reaching the end of the
+// kernel: a panic. Without it the surviving threads would wait at the next
+// barrier for a participant that no longer exists, and the deadlock would hide
+// the panic that caused it.
+func (b *barrier) abandon() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.n--
+	// The departure may have been the one the others were waiting for.
+	if b.n > 0 && b.count >= b.n {
+		b.count = 0
+		b.gen++
+		b.cond.Broadcast()
 	}
 }

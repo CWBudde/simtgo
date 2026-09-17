@@ -28,7 +28,12 @@ func (t *transpiler) stmt(s ast.Stmt) {
 	case *ast.IncDecStmt:
 		t.line("%s;", t.simple(s))
 	case *ast.ExprStmt:
-		t.line("%s;", t.expr(s.X))
+		// ctx.AssumeBlockDim(n) describes the launch rather than the device
+		// code and renders as nothing at all; a bare `;` line would be the
+		// only trace of it in the generated source.
+		if c := t.expr(s.X); c.s != "" {
+			t.line("%s;", c.s)
+		}
 	case *ast.DeclStmt:
 		t.decl(s)
 	case *ast.IfStmt:
@@ -72,27 +77,49 @@ func (t *transpiler) assign(s *ast.AssignStmt) {
 			return
 		}
 		if n, ok := t.sharedSize(rhs); ok {
-			if t.ind != 1 {
-				t.fail(s.Pos(), "shared memory must be declared at the top level of the kernel")
-				return
-			}
-			t.line("__shared__ float %s[%d];", cname(id.Name), n)
-			t.lens[id.Name] = strconv.Itoa(n)
+			t.shared(id, n, s.Pos())
 			return
 		}
-		obj := t.info.Defs[id]
-		if obj == nil {
-			t.fail(id.Pos(), "%s has no resolved type", id.Name)
-			return
-		}
-		if id.Name == "_" {
-			t.line("(void)(%s);", t.expr(rhs))
-			return
-		}
-		t.line("%s %s = %s;", t.ctype(obj.Type(), id.Pos()), cname(id.Name), t.expr(rhs))
+		t.line("%s;", t.define(id, rhs))
 		return
 	}
 	t.line("%s;", t.simple(s))
+}
+
+// define renders a `:=` declaration as `T name = rhs`, without a terminator.
+// Statements and for-clauses both need it, and resolving the declared object
+// in one place keeps the two from deriving the C type differently.
+//
+// The declared type is mapped before the initialiser is rendered, so a
+// variable of a type the device has no answer for is reported as exactly that
+// rather than through whatever its initialiser happens to be.
+func (t *transpiler) define(id *ast.Ident, rhs ast.Expr) string {
+	obj := t.info.Defs[id]
+	if obj == nil {
+		t.fail(id.Pos(), "%s has no resolved type", id.Name)
+		return ""
+	}
+	ctype := t.ctype(obj.Type(), id.Pos())
+	return fmt.Sprintf("%s %s = %s", ctype, cname(id.Name), t.expr(rhs).s)
+}
+
+// shared declares a block's __shared__ tile of n float32 values.
+func (t *transpiler) shared(id *ast.Ident, n int, pos token.Pos) {
+	if t.ind != 1 {
+		t.fail(pos, "shared memory must be declared at the top level of the kernel")
+		return
+	}
+	obj := t.info.Defs[id]
+	if obj == nil {
+		t.fail(id.Pos(), "%s has no resolved type", id.Name)
+		return
+	}
+	t.line("__shared__ float %s[%d];", cname(id.Name), n)
+	t.lens[obj] = strconv.Itoa(n)
+	// Every block gets its own copy of the tile, so the running total is what
+	// each block will ask the device for. SharedF32 is float32-only, hence the
+	// fixed element size.
+	t.sharedBytes += 4 * n
 }
 
 // sharedSize reports whether e is a ctx.SharedF32(n) call with a constant n.
@@ -129,30 +156,27 @@ func (t *transpiler) simple(s ast.Stmt) string {
 	case nil:
 		return ""
 	case *ast.IncDecStmt:
-		return fmt.Sprintf("%s%s", t.expr(s.X), s.Tok)
+		return fmt.Sprintf("%s%s", t.expr(s.X).s, s.Tok)
 	case *ast.AssignStmt:
 		if len(s.Lhs) != 1 || len(s.Rhs) != 1 {
 			t.fail(s.Pos(), "multiple assignment is not supported in kernels")
 			return ""
 		}
-		lhs, rhs := t.expr(s.Lhs[0]), t.expr(s.Rhs[0])
+		if s.Tok == token.DEFINE {
+			id, ok := s.Lhs[0].(*ast.Ident)
+			if !ok {
+				t.fail(s.Pos(), "unsupported declaration target %T", s.Lhs[0])
+				return ""
+			}
+			return t.define(id, s.Rhs[0])
+		}
 		switch s.Tok {
 		case token.ASSIGN, token.ADD_ASSIGN, token.SUB_ASSIGN, token.MUL_ASSIGN,
 			token.QUO_ASSIGN, token.REM_ASSIGN, token.AND_ASSIGN, token.OR_ASSIGN,
 			token.XOR_ASSIGN, token.SHL_ASSIGN, token.SHR_ASSIGN:
-			return fmt.Sprintf("%s %s %s", lhs, s.Tok, rhs)
-		case token.DEFINE:
-			id, ok := s.Lhs[0].(*ast.Ident)
-			if !ok {
-				t.fail(s.Pos(), "unsupported declaration target")
-				return ""
-			}
-			obj := t.info.Defs[id]
-			if obj == nil {
-				t.fail(id.Pos(), "%s has no resolved type", id.Name)
-				return ""
-			}
-			return fmt.Sprintf("%s %s = %s", t.ctype(obj.Type(), id.Pos()), cname(id.Name), rhs)
+			// Both sides stand in positions that accept a whole expression, so
+			// neither needs parentheses of its own.
+			return fmt.Sprintf("%s %s %s", t.expr(s.Lhs[0]).s, s.Tok, t.expr(s.Rhs[0]).s)
 		default:
 			t.fail(s.Pos(), "unsupported assignment %s", s.Tok)
 			return ""
@@ -196,7 +220,7 @@ func (t *transpiler) decl(s *ast.DeclStmt) {
 					t.line("%s %s = 0;", ctype, cname(n.Name))
 					continue
 				}
-				t.line("%s %s = %s;", ctype, cname(n.Name), t.expr(vs.Values[i]))
+				t.line("%s %s = %s;", ctype, cname(n.Name), t.expr(vs.Values[i]).s)
 			}
 		}
 	default:
@@ -215,7 +239,9 @@ func (t *transpiler) ifStmt(s *ast.IfStmt) {
 			t.line("}")
 		}()
 	}
-	t.line("if %s", paren(t.expr(s.Cond)))
+	// C's statement grammar supplies the parentheses, so the condition is
+	// rendered as the full expression it is.
+	t.line("if (%s)", t.expr(s.Cond).s)
 	t.block(s.Body)
 	switch els := s.Else.(type) {
 	case nil:
@@ -235,11 +261,11 @@ func (t *transpiler) forStmt(s *ast.ForStmt) {
 	case s.Init == nil && s.Post == nil && s.Cond == nil:
 		t.line("while (true)")
 	case s.Init == nil && s.Post == nil:
-		t.line("while %s", paren(t.expr(s.Cond)))
+		t.line("while (%s)", t.expr(s.Cond).s)
 	default:
 		cond := ""
 		if s.Cond != nil {
-			cond = t.expr(s.Cond)
+			cond = t.expr(s.Cond).s
 		}
 		t.line("for (%s; %s; %s)", t.simple(s.Init), cond, t.simple(s.Post))
 	}
@@ -257,7 +283,7 @@ func (t *transpiler) rangeStmt(s *ast.RangeStmt) {
 		t.fail(s.Pos(), "unsupported range variable")
 		return
 	}
-	var limit string
+	var limit cexpr
 	switch typ := t.info.Types[s.X].Type.Underlying().(type) {
 	case *types.Slice:
 		limit = t.lengthOf(s.X)
@@ -271,7 +297,10 @@ func (t *transpiler) rangeStmt(s *ast.RangeStmt) {
 		t.fail(s.X.Pos(), "cannot range over %s", typ)
 		return
 	}
+	// The limit becomes the right operand of a comparison, so anything binding
+	// looser than one has to be parenthesised: `i < a & b` would otherwise
+	// compare first and mask afterwards.
 	name := cname(id.Name)
-	t.line("for (int %s = 0; %s < %s; %s++)", name, name, limit, name)
+	t.line("for (int %s = 0; %s < %s; %s++)", name, name, limit.at(precRel+1), name)
 	t.block(s.Body)
 }

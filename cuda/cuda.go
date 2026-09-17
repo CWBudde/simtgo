@@ -19,6 +19,11 @@ import (
 // the "cuda" build tag.
 var ErrNoCUDA = errors.New("cuda: built without the 'cuda' build tag (rebuild with -tags cuda)")
 
+// ErrContextClosed is returned when a context is asked to load something after
+// it has been closed. It lives here rather than beside the driver bindings so
+// that callers can test for it in either build.
+var ErrContextClosed = errors.New("cuda: context is closed")
+
 // DevPtr is a device address (CUdeviceptr).
 type DevPtr uint64
 

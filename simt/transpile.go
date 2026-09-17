@@ -19,16 +19,29 @@ import (
 	"strings"
 )
 
+// Unit is one transpiled kernel: the generated CUDA C together with what its
+// source says about how it has to be launched.
+//
+// Those requirements are discovered while lowering -- a shared tile's extent
+// is only known there -- so they travel with the source instead of having to
+// be restated, and kept in step, at every launch site.
+type Unit struct {
+	Source        string // the generated CUDA C
+	Name          string // the Go function's name, also the C entry point
+	RequiredBlock int    // block size the kernel demands, 0 when it declares none
+	SharedBytes   int    // total statically declared __shared__ bytes
+}
+
 // Transpile type-checks every Go file in fsys as one package and lowers the
 // kernel function named fn to CUDA C.
-func Transpile(fsys fs.FS, fn string) (string, error) {
+func Transpile(fsys fs.FS, fn string) (*Unit, error) {
 	fset := token.NewFileSet()
 	names, err := fs.Glob(fsys, "*.go")
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if len(names) == 0 {
-		return "", fmt.Errorf("simt: no Go sources found")
+		return nil, fmt.Errorf("simt: no Go sources found")
 	}
 	sort.Strings(names)
 
@@ -36,11 +49,11 @@ func Transpile(fsys fs.FS, fn string) (string, error) {
 	for _, name := range names {
 		src, err := fs.ReadFile(fsys, name)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		f, err := parser.ParseFile(fset, name, src, parser.SkipObjectResolution)
 		if err != nil {
-			return "", fmt.Errorf("simt: %w", err)
+			return nil, fmt.Errorf("simt: %w", err)
 		}
 		files = append(files, f)
 	}
@@ -53,7 +66,7 @@ func Transpile(fsys fs.FS, fn string) (string, error) {
 	}
 	conf := types.Config{Importer: synthImporter{gpu: gpuPackage()}}
 	if _, err := conf.Check("kernels", fset, files, info); err != nil {
-		return "", fmt.Errorf("simt: type error in kernel source: %w", err)
+		return nil, fmt.Errorf("simt: type error in kernel source: %w", err)
 	}
 
 	var decl *ast.FuncDecl
@@ -65,15 +78,20 @@ func Transpile(fsys fs.FS, fn string) (string, error) {
 		}
 	}
 	if decl == nil {
-		return "", fmt.Errorf("simt: no function %q in kernel source", fn)
+		return nil, fmt.Errorf("simt: no function %q in kernel source", fn)
 	}
 
-	t := &transpiler{fset: fset, info: info, lens: map[string]string{}}
+	t := &transpiler{fset: fset, info: info, lens: map[types.Object]string{}}
 	t.kernel(decl)
 	if t.err != nil {
-		return "", t.err
+		return nil, t.err
 	}
-	return t.buf.String(), nil
+	return &Unit{
+		Source:        t.buf.String(),
+		Name:          fn,
+		RequiredBlock: t.requiredBlock,
+		SharedBytes:   t.sharedBytes,
+	}, nil
 }
 
 type transpiler struct {
@@ -81,9 +99,15 @@ type transpiler struct {
 	info *types.Info
 	buf  strings.Builder
 	ind  int
-	// lens maps a slice-valued name to the C expression giving its length.
-	lens map[string]string
-	err  error
+	// lens maps a slice-valued object to the C expression giving its length.
+	// The key is the checked object rather than its name, so a declaration
+	// shadowing a slice parameter cannot be mistaken for it.
+	lens map[types.Object]string
+	// requiredBlock and sharedBytes accumulate what the kernel demands of its
+	// launch; see Unit.
+	requiredBlock int
+	sharedBytes   int
+	err           error
 }
 
 func (t *transpiler) fail(pos token.Pos, format string, args ...any) {
@@ -113,6 +137,10 @@ func (t *transpiler) kernel(fd *ast.FuncDecl) {
 		t.fail(fd.Pos(), "a kernel's first parameter must be gpu.Ctx")
 		return
 	}
+	t.checkLengthNames(params[1:])
+	if t.err != nil {
+		return
+	}
 
 	var decls []string
 	for _, p := range params[1:] {
@@ -123,7 +151,7 @@ func (t *transpiler) kernel(fd *ast.FuncDecl) {
 			// A Go slice carries its length; C does not, so every slice
 			// parameter lowers to a pointer plus an explicit length.
 			decls = append(decls, fmt.Sprintf("%s* %s", elem, name), fmt.Sprintf("int %s_len", name))
-			t.lens[p.name] = name + "_len"
+			t.lens[p.obj] = name + "_len"
 		default:
 			decls = append(decls, fmt.Sprintf("%s %s", t.ctype(p.typ, p.pos), name))
 		}
@@ -134,13 +162,38 @@ func (t *transpiler) kernel(fd *ast.FuncDecl) {
 	t.block(fd.Body)
 }
 
+// checkLengthNames refuses a kernel whose own parameters clash with the length
+// parameters synthesised for its slices.
+//
+// The readable x_len spelling is worth keeping, so the clash is reported here,
+// against the Go source, rather than left to NVRTC -- which would complain
+// about a duplicate parameter in generated code the author never wrote. The
+// tile track spells lengths the same way but names its parameters p0, p1, ...
+// itself, so it has nothing to check.
+func (t *transpiler) checkLengthNames(params []param) {
+	generated := make(map[string]string, len(params))
+	for _, p := range params {
+		if _, ok := p.typ.(*types.Slice); ok {
+			generated[cname(p.name)+"_len"] = p.name
+		}
+	}
+	for _, p := range params {
+		if slice, ok := generated[cname(p.name)]; ok {
+			t.fail(p.pos, "parameter %s collides with the length generated for slice parameter %s; rename it", p.name, slice)
+			return
+		}
+	}
+}
+
 type param struct {
 	name string
+	obj  types.Object
 	typ  types.Type
 	pos  token.Pos
 }
 
-// params flattens a parameter list, resolving each name's checked type.
+// params flattens a parameter list, resolving each name's checked object. The
+// object is kept, not just its type: it is what the symbol table is keyed on.
 func (t *transpiler) params(fl *ast.FieldList) []param {
 	var out []param
 	if fl == nil {
@@ -153,7 +206,7 @@ func (t *transpiler) params(fl *ast.FieldList) []param {
 				t.fail(n.Pos(), "parameter %s has no resolved type", n.Name)
 				return out
 			}
-			out = append(out, param{name: n.Name, typ: obj.Type(), pos: n.Pos()})
+			out = append(out, param{name: n.Name, obj: obj, typ: obj.Type(), pos: n.Pos()})
 		}
 	}
 	return out

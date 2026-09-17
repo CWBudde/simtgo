@@ -10,6 +10,56 @@ import (
 	"strings"
 )
 
+// C's operator precedence, with higher numbers binding tighter.
+//
+// The generated code is C, and C's table is not Go's. Go parses `a & b == c`
+// as `(a & b) == c` while C reads the very same spelling as `a & (b == c)`,
+// and `a << b + c` differs the same way. The parse recorded in the Go AST is
+// therefore authoritative, and these levels decide how that parse has to be
+// spelled in C -- which is exactly where a parenthesis is needed, and nowhere
+// else.
+const (
+	precArg     = 2  // a call argument: everything but a bare comma operator
+	precOr      = 4  // ||
+	precAnd     = 5  // &&
+	precBitOr   = 6  // |
+	precBitXor  = 7  // ^
+	precBitAnd  = 8  // &
+	precEq      = 9  // == !=
+	precRel     = 10 // < <= > >=
+	precShift   = 11 // << >>
+	precAdd     = 12 // + -
+	precMul     = 13 // * / %
+	precPrefix  = 14 // ! - ~ and casts
+	precPostfix = 15 // a[i]
+	precAtom    = 16 // identifiers, literals and calls
+)
+
+// cexpr is a rendered C expression together with the precedence of its
+// outermost operator. Carrying the precedence alongside the text is what lets
+// the emitter parenthesise by construction instead of guessing from the
+// rendered characters.
+type cexpr struct {
+	s    string
+	prec int
+}
+
+// at renders c in a context that requires an operand binding at least as
+// tightly as min.
+func (c cexpr) at(min int) string {
+	if c.prec < min {
+		return "(" + c.s + ")"
+	}
+	return c.s
+}
+
+// atom renders an expression no operator can regroup: an identifier, a literal
+// or a call. It is also the shape of the empty result returned after a
+// failure, so that a discarded value never grows stray parentheses.
+func atom(format string, args ...any) cexpr {
+	return cexpr{fmt.Sprintf(format, args...), precAtom}
+}
+
 // gpuFuncs maps package gpu's float32 helpers to CUDA's single-precision
 // built-ins. NVRTC provides these without any header.
 var gpuFuncs = map[string]string{
@@ -27,18 +77,37 @@ var gpuFuncs = map[string]string{
 // ctxBuiltins maps gpu.Ctx methods to CUDA built-in variables. The casts keep
 // the generated arithmetic signed: CUDA's thread indices are unsigned, and
 // mixing them into Go's int expressions would silently change comparisons.
-var ctxBuiltins = map[string]string{
-	"ThreadIdx":   "(int)threadIdx.x",
-	"BlockIdx":    "(int)blockIdx.x",
-	"BlockDim":    "(int)blockDim.x",
-	"GridDim":     "(int)gridDim.x",
-	"GlobalID":    "(int)(blockIdx.x * blockDim.x + threadIdx.x)",
-	"SyncThreads": "__syncthreads()",
+//
+// Each entry carries its own precedence because the spellings differ: a cast
+// binds like a prefix operator, while a call cannot be regrouped at all.
+var ctxBuiltins = map[string]cexpr{
+	"ThreadIdx":   {"(int)threadIdx.x", precPrefix},
+	"BlockIdx":    {"(int)blockIdx.x", precPrefix},
+	"BlockDim":    {"(int)blockDim.x", precPrefix},
+	"GridDim":     {"(int)gridDim.x", precPrefix},
+	"GlobalID":    {"(int)(blockIdx.x * blockDim.x + threadIdx.x)", precPrefix},
+	"SyncThreads": {"__syncthreads()", precAtom},
 }
 
-func (t *transpiler) expr(e ast.Expr) string {
+// cBinaryPrec gives the C precedence of every binary operator the transpiler
+// emits. All of them are left-associative, so the right operand is rendered
+// one level tighter than the left.
+var cBinaryPrec = map[token.Token]int{
+	token.MUL: precMul, token.QUO: precMul, token.REM: precMul,
+	token.ADD: precAdd, token.SUB: precAdd,
+	token.SHL: precShift, token.SHR: precShift,
+	token.LSS: precRel, token.LEQ: precRel, token.GTR: precRel, token.GEQ: precRel,
+	token.EQL: precEq, token.NEQ: precEq,
+	token.AND:  precBitAnd,
+	token.XOR:  precBitXor,
+	token.OR:   precBitOr,
+	token.LAND: precAnd,
+	token.LOR:  precOr,
+}
+
+func (t *transpiler) expr(e ast.Expr) cexpr {
 	if t.err != nil {
-		return ""
+		return atom("")
 	}
 	// Anything go/types folded to a constant is emitted as a literal, which
 	// covers literals, named constants and constant arithmetic alike.
@@ -48,59 +117,64 @@ func (t *transpiler) expr(e ast.Expr) string {
 
 	switch e := e.(type) {
 	case *ast.Ident:
-		return cname(e.Name)
+		return atom("%s", cname(e.Name))
 	case *ast.ParenExpr:
-		// Binary expressions already parenthesise themselves, so Go's own
-		// grouping parentheses would only add noise.
+		// Go's own grouping parentheses carry no information the AST does not
+		// already have: the emitter derives every parenthesis it needs from
+		// the C precedence table.
 		return t.expr(e.X)
 	case *ast.BinaryExpr:
 		return t.binary(e)
 	case *ast.UnaryExpr:
 		switch e.Op {
 		case token.SUB, token.ADD, token.NOT:
-			return fmt.Sprintf("%s%s", e.Op, t.expr(e.X))
+			return cexpr{fmt.Sprintf("%s%s", e.Op, t.expr(e.X).at(precPrefix)), precPrefix}
 		case token.XOR:
-			return "~" + t.expr(e.X)
+			return cexpr{"~" + t.expr(e.X).at(precPrefix), precPrefix}
 		}
 		t.fail(e.Pos(), "unsupported unary operator %s", e.Op)
-		return ""
+		return atom("")
 	case *ast.IndexExpr:
 		if _, ok := t.info.Types[e.X].Type.Underlying().(*types.Slice); !ok {
 			t.fail(e.Pos(), "only slices can be indexed in kernels")
-			return ""
+			return atom("")
 		}
-		return fmt.Sprintf("%s[%s]", t.expr(e.X), t.expr(e.Index))
+		// The subscript itself is delimited by the brackets, so it needs no
+		// precedence of its own; what is indexed does.
+		return cexpr{fmt.Sprintf("%s[%s]", t.expr(e.X).at(precPostfix), t.expr(e.Index).s), precPostfix}
 	case *ast.CallExpr:
 		return t.call(e)
 	}
 	t.fail(e.Pos(), "unsupported expression %T", e)
-	return ""
+	return atom("")
 }
 
-func (t *transpiler) binary(e *ast.BinaryExpr) string {
-	switch e.Op {
-	case token.ADD, token.SUB, token.MUL, token.QUO, token.REM,
-		token.EQL, token.NEQ, token.LSS, token.LEQ, token.GTR, token.GEQ,
-		token.LAND, token.LOR, token.AND, token.OR, token.XOR,
-		token.SHL, token.SHR:
-		return fmt.Sprintf("(%s %s %s)", t.expr(e.X), e.Op, t.expr(e.Y))
-	case token.AND_NOT: // Go's &^ has no C equivalent
-		return fmt.Sprintf("(%s & ~%s)", t.expr(e.X), t.expr(e.Y))
+func (t *transpiler) binary(e *ast.BinaryExpr) cexpr {
+	if p, ok := cBinaryPrec[e.Op]; ok {
+		return cexpr{fmt.Sprintf("%s %s %s", t.expr(e.X).at(p), e.Op, t.expr(e.Y).at(p+1)), p}
+	}
+	if e.Op == token.AND_NOT { // Go's &^ has no C equivalent
+		return cexpr{
+			fmt.Sprintf("%s & ~%s", t.expr(e.X).at(precBitAnd), t.expr(e.Y).at(precPrefix)),
+			precBitAnd,
+		}
 	}
 	t.fail(e.Pos(), "unsupported operator %s", e.Op)
-	return ""
+	return atom("")
 }
 
-func (t *transpiler) call(c *ast.CallExpr) string {
+func (t *transpiler) call(c *ast.CallExpr) cexpr {
 	fun := unparen(c.Fun)
 
-	// A conversion such as float32(x) or int(x).
+	// A conversion such as float32(x) or int(x). The operand keeps its own
+	// parentheses: a cast binds tighter than every binary operator, so without
+	// them `(int)a + b` would cast a alone.
 	if tv, ok := t.info.Types[fun]; ok && tv.IsType() {
 		if len(c.Args) != 1 {
 			t.fail(c.Pos(), "unsupported conversion")
-			return ""
+			return atom("")
 		}
-		return fmt.Sprintf("(%s)(%s)", t.ctype(tv.Type, c.Pos()), t.expr(c.Args[0]))
+		return cexpr{fmt.Sprintf("(%s)(%s)", t.ctype(tv.Type, c.Pos()), t.expr(c.Args[0]).s), precPrefix}
 	}
 
 	switch f := fun.(type) {
@@ -109,48 +183,83 @@ func (t *transpiler) call(c *ast.CallExpr) string {
 		case "len":
 			if len(c.Args) != 1 {
 				t.fail(c.Pos(), "len takes one argument")
-				return ""
+				return atom("")
 			}
 			return t.lengthOf(c.Args[0])
 		case "min", "max":
 			// CUDA provides overloaded min/max for int and float.
-			return fmt.Sprintf("%s(%s)", f.Name, t.args(c))
+			return atom("%s(%s)", f.Name, t.args(c))
 		}
 		t.fail(c.Pos(), "calls to %s are not supported in kernels (device functions are not implemented)", f.Name)
-		return ""
+		return atom("")
 
 	case *ast.SelectorExpr:
 		if sel := t.info.Selections[f]; sel != nil && sel.Kind() == types.MethodVal && t.isCtx(sel.Recv()) {
 			name := sel.Obj().Name()
-			if name == "SharedF32" {
+			switch name {
+			case "SharedF32":
 				t.fail(c.Pos(), "SharedF32 must be assigned to a variable, e.g. `s := ctx.SharedF32(256)`")
-				return ""
+				return atom("")
+			case "AssumeBlockDim":
+				return t.assumeBlockDim(c)
 			}
 			builtin, ok := ctxBuiltins[name]
 			if !ok {
 				t.fail(c.Pos(), "gpu.Ctx.%s is not available on the device", name)
-				return ""
+				return atom("")
 			}
 			return builtin
 		}
 		if id, ok := f.X.(*ast.Ident); ok {
 			if pkg, ok := t.info.Uses[id].(*types.PkgName); ok && pkg.Imported().Path() == GPUPkgPath {
 				if cfn, ok := gpuFuncs[f.Sel.Name]; ok {
-					return fmt.Sprintf("%s(%s)", cfn, t.args(c))
+					return atom("%s(%s)", cfn, t.args(c))
 				}
 				t.fail(c.Pos(), "gpu.%s has no device equivalent", f.Sel.Name)
-				return ""
+				return atom("")
 			}
 		}
 	}
 	t.fail(c.Pos(), "unsupported call")
-	return ""
+	return atom("")
 }
 
+// assumeBlockDim records ctx.AssumeBlockDim(n) and emits nothing.
+//
+// The call is a statement about the launch, not device code: it tells the host
+// side which block size the kernel's shared tiles were sized for, so Launch
+// can refuse any other geometry instead of letting threads read past a tile.
+// Because that promise has to hold for the whole kernel it may only be made
+// once, unconditionally, with a size the type checker can fold.
+func (t *transpiler) assumeBlockDim(c *ast.CallExpr) cexpr {
+	if t.ind != 1 {
+		t.fail(c.Pos(), "AssumeBlockDim must be called at the top level of the kernel body")
+		return atom("")
+	}
+	n, ok := t.constInt(c.Args[0])
+	if !ok {
+		t.fail(c.Pos(), "AssumeBlockDim needs a constant block size (got a runtime value)")
+		return atom("")
+	}
+	if n <= 0 {
+		t.fail(c.Pos(), "AssumeBlockDim needs a positive block size, got %d", n)
+		return atom("")
+	}
+	if t.requiredBlock != 0 && t.requiredBlock != n {
+		t.fail(c.Pos(), "AssumeBlockDim already declared a block size of %d", t.requiredBlock)
+		return atom("")
+	}
+	t.requiredBlock = n
+	return atom("")
+}
+
+// args renders a call's arguments. An argument position accepts any full
+// expression -- only C's comma operator binds looser, and the transpiler never
+// emits one -- so no argument needs parentheses of its own.
 func (t *transpiler) args(c *ast.CallExpr) string {
 	parts := make([]string, len(c.Args))
 	for i, a := range c.Args {
-		parts[i] = t.expr(a)
+		parts[i] = t.expr(a).at(precArg)
 	}
 	return strings.Join(parts, ", ")
 }
@@ -158,14 +267,22 @@ func (t *transpiler) args(c *ast.CallExpr) string {
 // lengthOf resolves len(x). Slices lower to a pointer plus a length parameter,
 // and shared buffers to a fixed-size array, so the length is always known
 // without carrying a descriptor onto the device.
-func (t *transpiler) lengthOf(e ast.Expr) string {
+//
+// The lookup goes through the checked object rather than the identifier's
+// text, so a declaration shadowing a slice parameter resolves to its own
+// length and never to the outer one's.
+func (t *transpiler) lengthOf(e ast.Expr) cexpr {
 	if id, ok := unparen(e).(*ast.Ident); ok {
-		if l, ok := t.lens[id.Name]; ok {
-			return l
+		obj := t.info.Uses[id]
+		if obj == nil {
+			obj = t.info.Defs[id]
+		}
+		if l, ok := t.lens[obj]; ok {
+			return atom("%s", l)
 		}
 	}
 	t.fail(e.Pos(), "len() is only supported for slice parameters and shared buffers")
-	return "0"
+	return atom("0")
 }
 
 func (t *transpiler) constInt(e ast.Expr) (int, bool) {
@@ -177,53 +294,44 @@ func (t *transpiler) constInt(e ast.Expr) (int, bool) {
 	return int(v), ok
 }
 
-func (t *transpiler) constant(tv types.TypeAndValue, pos token.Pos) string {
+func (t *transpiler) constant(tv types.TypeAndValue, pos token.Pos) cexpr {
 	basic, ok := tv.Type.Underlying().(*types.Basic)
 	if !ok {
 		t.fail(pos, "unsupported constant of type %s", tv.Type)
-		return ""
+		return atom("")
 	}
 	switch info := basic.Info(); {
 	case info&types.IsBoolean != 0:
-		return strconv.FormatBool(constant.BoolVal(tv.Value))
+		return atom("%s", strconv.FormatBool(constant.BoolVal(tv.Value)))
 	case info&types.IsFloat != 0:
 		f, _ := constant.Float64Val(constant.ToFloat(tv.Value))
 		s := strconv.FormatFloat(f, 'g', -1, 32)
 		if !strings.ContainsAny(s, ".eE") {
 			s += ".0"
 		}
-		return s + "f"
+		return number(s + "f")
 	case info&types.IsInteger != 0:
 		v, ok := constant.Int64Val(constant.ToInt(tv.Value))
 		if !ok {
 			t.fail(pos, "constant %s does not fit in an int64", tv.Value)
-			return ""
+			return atom("")
 		}
-		return strconv.FormatInt(v, 10)
+		return number(strconv.FormatInt(v, 10))
 	}
 	t.fail(pos, "unsupported constant of type %s", tv.Type)
-	return ""
+	return atom("")
 }
 
-// paren wraps s in parentheses unless it already is a parenthesised group,
-// which keeps `if (i < n)` from being emitted as `if ((i < n))`.
-func paren(s string) string {
-	if len(s) > 1 && s[0] == '(' && s[len(s)-1] == ')' {
-		depth := 0
-		for i, c := range s {
-			switch c {
-			case '(':
-				depth++
-			case ')':
-				depth--
-				if depth == 0 && i != len(s)-1 {
-					return "(" + s + ")"
-				}
-			}
-		}
-		return s
+// number renders a folded literal. A negative one is really a minus sign
+// applied to a literal, so it is given prefix precedence rather than atom
+// precedence: contexts that demand something binding tighter than a prefix
+// operator -- what is indexed, say -- then parenthesise the sign instead of
+// absorbing it.
+func number(s string) cexpr {
+	if strings.HasPrefix(s, "-") {
+		return cexpr{s, precPrefix}
 	}
-	return "(" + s + ")"
+	return cexpr{s, precAtom}
 }
 
 func unparen(e ast.Expr) ast.Expr {

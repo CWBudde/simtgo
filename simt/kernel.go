@@ -1,6 +1,7 @@
 package simt
 
 import (
+	"fmt"
 	"io/fs"
 
 	"github.com/CWBudde/gocuda/cuda"
@@ -14,6 +15,11 @@ type Kernel struct {
 	PTX    []byte // what NVRTC produced
 	Log    string // NVRTC's compiler log, usually empty
 
+	// RequiredBlock and SharedBytes are what the kernel's source demands of a
+	// launch; see Unit.
+	RequiredBlock int
+	SharedBytes   int
+
 	fn *cuda.Function
 }
 
@@ -24,21 +30,43 @@ func SetCacheDir(dir string) { jit.CacheDir = dir }
 // Build transpiles the named Go kernel from fsys, compiles it with NVRTC and
 // loads it into ctx: the whole SIMT pipeline, Go source to CUDA C to PTX.
 func Build(ctx *cuda.Context, fsys fs.FS, name string) (*Kernel, error) {
-	src, err := Transpile(fsys, name)
+	u, err := Transpile(fsys, name)
 	if err != nil {
 		return nil, err
 	}
-	res, err := jit.Load(ctx, src, name)
+	// A tile larger than the device's limit is rejected by cuModuleLoadData
+	// with nothing but a generic error code, so it is worth catching here,
+	// where both the total and the kernel's name are still at hand.
+	if limit := ctx.MaxSharedMemPerBlock(); limit > 0 && u.SharedBytes > limit {
+		return nil, fmt.Errorf("simt: %s declares %d bytes of shared memory, but this device offers %d per block",
+			name, u.SharedBytes, limit)
+	}
+	res, err := jit.Load(ctx, u.Source, name)
 	if err != nil {
 		return nil, err
 	}
-	return &Kernel{Name: name, Source: src, PTX: res.PTX, Log: res.Log, fn: res.Func}, nil
+	return &Kernel{
+		Name:          name,
+		Source:        u.Source,
+		PTX:           res.PTX,
+		Log:           res.Log,
+		RequiredBlock: u.RequiredBlock,
+		SharedBytes:   u.SharedBytes,
+		fn:            res.Func,
+	}, nil
 }
 
 // Launch runs the kernel over grid blocks of block threads. Arguments are
 // given as Go values -- device slices, float32, int32 -- in the same order as
 // the Go kernel's parameters, minus the gpu.Ctx.
+//
+// A kernel that declared its block size with gpu.Ctx.AssumeBlockDim is refused
+// at any other size: its shared tiles are sized for that one geometry, so a
+// different block would stage the wrong number of samples and read past them.
 func (k *Kernel) Launch(grid, block int, args ...any) error {
+	if k.RequiredBlock != 0 && block != k.RequiredBlock {
+		return fmt.Errorf("simt: %s requires block == %d, got %d", k.Name, k.RequiredBlock, block)
+	}
 	flat, err := cuda.BuildArgs(args...)
 	if err != nil {
 		return err

@@ -21,6 +21,12 @@ func NewContext(device int) (*Context, error) { return nil, ErrNoCUDA }
 // Arch reports the virtual architecture of the device.
 func (c *Context) Arch() string { return "" }
 
+// MaxSharedMemPerBlock reports how much shared memory a single block may use,
+// in bytes. Without a device to ask there is no limit to report, so this build
+// always answers zero, which callers must read as "unknown, skip the check"
+// rather than as a device offering no shared memory at all.
+func (c *Context) MaxSharedMemPerBlock() int { return 0 }
+
 // Name reports the device name.
 func (c *Context) Name() string { return "" }
 
@@ -39,11 +45,20 @@ func (c *Context) Free(p DevPtr) error { return ErrNoCUDA }
 // LoadPTX loads a PTX module.
 func (c *Context) LoadPTX(ptx []byte) (*Module, error) { return nil, ErrNoCUDA }
 
+// LoadPTXCached loads a module into the context at most once per key. Since
+// nothing can be loaded here, build is never called.
+func (c *Context) LoadPTXCached(key string, build func() (ptx []byte, extra any, err error)) (*Module, any, error) {
+	return nil, nil, ErrNoCUDA
+}
+
 // Module is a placeholder for a loaded PTX module.
 type Module struct{}
 
 // Function looks up a kernel by name.
 func (m *Module) Function(name string) (*Function, error) { return nil, ErrNoCUDA }
+
+// Unload releases the module ahead of its context's Close.
+func (m *Module) Unload() error { return ErrNoCUDA }
 
 // Function is a placeholder for a kernel entry point.
 type Function struct{}

@@ -46,10 +46,33 @@ func Available() bool {
 // The driver API binds contexts to OS threads, and goroutines migrate between
 // them, so every method calls cuCtxSetCurrent before touching the driver
 // rather than relying on runtime.LockOSThread.
+//
+// A context also owns every module loaded into it, including the compilation
+// cache behind LoadPTXCached. A CUmodule is only meaningful inside the context
+// it was loaded into, so that cache has to live here rather than in a
+// package-level map: a process-wide cache outlives the contexts it caches for
+// and would hand out handles belonging to a context that has already been
+// released. Close unloads what is left, so no module can survive its context.
 type Context struct {
-	dev  C.CUdevice
-	ctx  C.CUcontext
-	arch string
+	dev       C.CUdevice
+	ctx       C.CUcontext
+	arch      string
+	maxShared int
+
+	// mu guards the module bookkeeping below. It is also held across the
+	// build callback of LoadPTXCached, so one source is compiled once
+	// however many goroutines ask for it at the same moment.
+	mu      sync.Mutex
+	modules []*Module             // every module loaded here, in load order
+	cache   map[string]cacheEntry // the subset loaded through LoadPTXCached
+	closed  bool
+}
+
+// cacheEntry is one cached module together with the value its builder attached
+// to it. The extra value is opaque to this package; see LoadPTXCached.
+type cacheEntry struct {
+	mod   *Module
+	extra any
 }
 
 // NewContext retains the primary context of the given device ordinal.
@@ -72,6 +95,11 @@ func NewContext(device int) (*Context, error) {
 		return nil, err
 	}
 	c.arch = fmt.Sprintf("compute_%d%d", int(major), int(minor))
+	var shared C.int
+	if err := check(C.cuDeviceGetAttribute(&shared, C.CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK, c.dev), "cuDeviceGetAttribute"); err != nil {
+		return nil, err
+	}
+	c.maxShared = int(shared)
 	return c, c.bind()
 }
 
@@ -82,6 +110,16 @@ func (c *Context) bind() error {
 // Arch reports the virtual architecture of the device, e.g. "compute_75".
 func (c *Context) Arch() string { return c.arch }
 
+// MaxSharedMemPerBlock reports how much shared memory a single block may use,
+// in bytes (CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK); 48 KiB on most
+// devices, and the ceiling a generated kernel's tile buffers have to fit into.
+//
+// Zero means "unknown" and is what a build without the "cuda" tag always
+// reports, since there is no device to ask. Callers that size or validate a
+// kernel against this limit must treat zero as "skip the check" rather than as
+// a device with no shared memory at all.
+func (c *Context) MaxSharedMemPerBlock() int { return c.maxShared }
+
 // Name reports the device name.
 func (c *Context) Name() string {
 	buf := make([]C.char, 256)
@@ -91,9 +129,41 @@ func (c *Context) Name() string {
 	return C.GoString(&buf[0])
 }
 
-// Close releases the primary context.
+// Close unloads every module the context owns and then releases the primary
+// context.
+//
+// The order matters: a CUmodule lives inside the context, so once the last
+// reference to the primary context is gone there is nothing left to unload it
+// from and the modules leak until the process exits.
+//
+// Close is idempotent. Tests release their context from t.Cleanup while other
+// code may still defer a Close of its own, and cuDevicePrimaryCtxRelease
+// decrements a reference count the driver shares with everything else in the
+// process: releasing twice would tear down a primary context that another part
+// of the program still believes it holds.
 func (c *Context) Close() error {
-	return check(C.cuDevicePrimaryCtxRelease(c.dev), "cuDevicePrimaryCtxRelease")
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil
+	}
+	c.closed = true
+
+	// Unload in reverse load order, and keep going after a failure: every
+	// module has to be dealt with before the context goes away, so the first
+	// error is reported but none of the others are allowed to stop the walk.
+	var firstErr error
+	for i := len(c.modules) - 1; i >= 0; i-- {
+		if err := c.modules[i].unloadLocked(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	c.modules, c.cache = nil, nil
+
+	if err := check(C.cuDevicePrimaryCtxRelease(c.dev), "cuDevicePrimaryCtxRelease"); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
 }
 
 // Sync blocks until all work on the context has completed.
@@ -138,14 +208,30 @@ func (c *Context) copyDtoH(dst unsafe.Pointer, src DevPtr, n int) error {
 	return check(C.cuMemcpyDtoH(dst, C.CUdeviceptr(src), C.size_t(n)), "cuMemcpyDtoH")
 }
 
-// Module is a loaded PTX module.
+// Module is a loaded PTX module. It belongs to the context it was loaded into
+// and becomes invalid when that context is closed.
 type Module struct {
 	c C.CUmodule
 	x *Context
 }
 
 // LoadPTX loads PTX (NUL-terminated on the C side) into the context.
+//
+// The context takes ownership of the module: Close unloads it, so a caller
+// only needs Module.Unload to drop one earlier than that.
 func (c *Context) LoadPTX(ptx []byte) (*Module, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.loadPTXLocked(ptx)
+}
+
+// loadPTXLocked does the driver call and the bookkeeping with c.mu held, so
+// that LoadPTXCached can load a module without dropping the lock it compiled
+// under.
+func (c *Context) loadPTXLocked(ptx []byte) (*Module, error) {
+	if c.closed {
+		return nil, ErrContextClosed
+	}
 	if err := c.bind(); err != nil {
 		return nil, err
 	}
@@ -155,7 +241,88 @@ func (c *Context) LoadPTX(ptx []byte) (*Module, error) {
 	if err := check(C.cuModuleLoadData(&m.c, unsafe.Pointer(src)), "cuModuleLoadData"); err != nil {
 		return nil, err
 	}
+	c.modules = append(c.modules, m)
 	return m, nil
+}
+
+// LoadPTXCached loads a module into the context at most once per key, and is
+// how a JIT layer avoids recompiling and reloading a source it has already
+// seen without ever caching a module beyond the life of its context.
+//
+// build runs only on a miss, with the context's lock held, so concurrent
+// callers asking for the same key compile once and share the result. Besides
+// the PTX to load, build returns a value this package stores but never looks
+// at and hands back on every subsequent hit: internal/jit uses it to carry the
+// generated PTX and the NVRTC log, so a cache hit can report exactly what the
+// original miss reported. The split is deliberate -- the caller keeps the
+// compile and dump policy, the context keeps the module's lifetime.
+func (c *Context) LoadPTXCached(key string, build func() (ptx []byte, extra any, err error)) (*Module, any, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil, nil, ErrContextClosed
+	}
+	if e, ok := c.cache[key]; ok {
+		return e.mod, e.extra, nil
+	}
+	ptx, extra, err := build()
+	if err != nil {
+		return nil, nil, err
+	}
+	m, err := c.loadPTXLocked(ptx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if c.cache == nil {
+		c.cache = make(map[string]cacheEntry)
+	}
+	c.cache[key] = cacheEntry{mod: m, extra: extra}
+	return m, extra, nil
+}
+
+// Unload releases the module ahead of its context's Close, which is the only
+// reason to call it: Close unloads whatever is still loaded anyway.
+//
+// It is idempotent, so unloading a module that Close has already dealt with
+// (or unloading twice) is a no-op rather than a second cuModuleUnload on a
+// stale handle. Functions looked up in the module do not survive it.
+func (m *Module) Unload() error {
+	m.x.mu.Lock()
+	defer m.x.mu.Unlock()
+	m.x.forgetLocked(m)
+	return m.unloadLocked()
+}
+
+// unloadLocked unloads the module once, with its context's lock held. Clearing
+// the handle first is what makes a second call, from Close or from the caller,
+// harmless.
+func (m *Module) unloadLocked() error {
+	if m.c == nil {
+		return nil
+	}
+	h := m.c
+	m.c = nil
+	if err := m.x.bind(); err != nil {
+		return err
+	}
+	return check(C.cuModuleUnload(h), "cuModuleUnload")
+}
+
+// forgetLocked drops every reference the context holds to m, so that an
+// explicitly unloaded module is neither unloaded again by Close nor served
+// from the cache afterwards; the next request for that key rebuilds.
+func (c *Context) forgetLocked(m *Module) {
+	for i, other := range c.modules {
+		if other == m {
+			c.modules = append(c.modules[:i], c.modules[i+1:]...)
+			break
+		}
+	}
+	for key, e := range c.cache {
+		if e.mod == m {
+			delete(c.cache, key)
+		}
+	}
 }
 
 // Function is an entry point inside a Module.

@@ -4,6 +4,6 @@ extern "C" __global__ void VecAdd(float* c, int c_len, float* a, int a_len, floa
 	int i = (int)(blockIdx.x * blockDim.x + threadIdx.x);
 	if (i < c_len)
 	{
-		c[i] = (a[i] + b[i]);
+		c[i] = a[i] + b[i];
 	}
 }

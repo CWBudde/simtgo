@@ -4,6 +4,6 @@ extern "C" __global__ void Scale(float* y, int y_len, float* x, int x_len, float
 	int i = (int)(blockIdx.x * blockDim.x + threadIdx.x);
 	if (i < y_len)
 	{
-		y[i] = (k * x[i]);
+		y[i] = k * x[i];
 	}
 }

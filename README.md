@@ -38,6 +38,7 @@ A kernel is an ordinary Go function:
 
 ```go
 func FIR(ctx gpu.Ctx, y, x, h []float32) {
+	ctx.AssumeBlockDim(FIRBlock)
 	tile := ctx.SharedF32(FIRBlock + FIRMaxTaps)
 	taps := len(h)
 	base := ctx.BlockIdx() * ctx.BlockDim()
@@ -64,13 +65,13 @@ extern "C" __global__ void FIR(float* y, int y_len, float* x, int x_len, float* 
 {
 	__shared__ float tile[320];
 	int taps = h_len;
-	int base = ((int)blockIdx.x * (int)blockDim.x);
+	int base = (int)blockIdx.x * (int)blockDim.x;
 	int t = (int)threadIdx.x;
-	for (int k = t; (k < (((int)blockDim.x + taps) - 1)); k += (int)blockDim.x)
+	for (int k = t; k < (int)blockDim.x + taps - 1; k += (int)blockDim.x)
 	{
-		int src = ((base + k) - (taps - 1));
+		int src = base + k - (taps - 1);
 		float v = 0.0f;
-		if ((src >= 0) && (src < x_len))
+		if (src >= 0 && src < x_len)
 		{
 			v = x[src];
 		}
@@ -101,6 +102,12 @@ assignment, `if`/`else`, three-clause `for`, `for i := range`, `break`,
 `gpu.Sqrt`, `gpu.Hypot` and friends become `sqrtf`, `hypotf`; `ctx.GlobalID()`
 becomes `blockIdx.x * blockDim.x + threadIdx.x`; `ctx.SharedF32(n)` becomes a
 `__shared__` array.
+
+A kernel that sizes shared memory against a fixed block size says so with
+`ctx.AssumeBlockDim(n)`. It emits no code; it records the requirement, so that
+`Kernel.Launch` and the CPU emulator both refuse a mismatched launch instead of
+quietly reading the wrong stretch of memory. `Build` likewise refuses a kernel
+whose shared memory exceeds what the device offers per block.
 
 Everything else is **refused with a file and line**, never mistranslated:
 allocation, interfaces, goroutines, multiple assignment, calls to other Go

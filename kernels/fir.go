@@ -15,6 +15,11 @@ const FIRMaxTaps = 64
 // into shared memory, so every sample is read from global memory once instead
 // of once per tap. Samples before the start of the signal read as zero.
 func FIR(ctx gpu.Ctx, y, x, h []float32) {
+	// The tile below is sized for FIRBlock threads, so any other block size
+	// would stage the wrong stretch of signal. Saying so here lets both
+	// backends refuse a mismatched launch instead of silently reading past it.
+	ctx.AssumeBlockDim(FIRBlock)
+
 	tile := ctx.SharedF32(FIRBlock + FIRMaxTaps)
 	taps := len(h)
 	base := ctx.BlockIdx() * ctx.BlockDim()
