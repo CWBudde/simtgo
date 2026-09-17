@@ -137,13 +137,15 @@ A kernel may call another function in its package, which is emitted as a
 reaches, then the definitions, then the entry point. Slice parameters split
 into a pointer and a length there too, so the call passes both. Recursion is
 refused — there is no stack depth on the device to spend on it — and so are
-methods, generics, variadics and more than one result. A function taking a
-`gpu.Ctx` **is** a kernel by the rule above, so calling one is refused unless
-it carries `//gocuda:ignore`, which already means "not a kernel"; the `Ctx`
-then vanishes from the C signature as the kernel's own does, and shared memory
-and `AssumeBlockDim` stay refused inside it, because both are promises about a
-launch. The CPU side needs nothing at all for any of this: a device function
-is ordinary Go, so `RunCPU` runs the very code the device compiles.
+methods, generics, variadics, more than one result, and a *named* result,
+which would be a local the body assigns to and a bare return that carries it.
+A function taking a `gpu.Ctx` **is** a kernel by the rule above, so calling
+one is refused unless it carries `//gocuda:ignore`, which already means
+"not a kernel"; the `Ctx` then vanishes from the C signature as the kernel's
+own does, and shared memory and `AssumeBlockDim` stay refused inside it,
+because both are promises about a launch. The CPU side needs nothing at all
+for any of this: a device function is ordinary Go, so `RunCPU` runs the very
+code the device compiles.
 
 Everything else is **refused with a file and line**, never mistranslated:
 allocation, interfaces, goroutines, multiple assignment, `float64` (1/32 rate

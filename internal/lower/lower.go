@@ -317,12 +317,27 @@ func (t *transpiler) deviceFunc(pos token.Pos, obj *types.Func) (string, bool) {
 		t.fail(pos, "%s is generic; a device function must not be generic", obj.Name())
 		return "", false
 	}
-	if sig, ok := obj.Type().(*types.Signature); ok && sig.Variadic() {
+	sig, ok := obj.Type().(*types.Signature)
+	if !ok {
+		t.fail(pos, "%s has no resolved signature", obj.Name())
+		return "", false
+	}
+	if sig.Variadic() {
 		t.fail(pos, "%s must not be variadic", obj.Name())
 		return "", false
 	}
-	if fd.Type.Results != nil && len(fd.Type.Results.List) > 1 {
+	// The checked signature, not the AST: `(a, b float32)` is one result
+	// field holding two values, so counting fields would let a two-result
+	// function through and then render it as a scalar-returning C one.
+	if sig.Results().Len() > 1 {
 		t.fail(pos, "%s must return at most one value", obj.Name())
+		return "", false
+	}
+	if namedResult(fd) {
+		// A named result is a local the body may assign to and a bare return
+		// that carries it. Neither is emitted, so the C would reference an
+		// identifier that was never declared -- refused rather than written.
+		t.fail(pos, "%s must not name its result", obj.Name())
 		return "", false
 	}
 
@@ -338,8 +353,8 @@ func (t *transpiler) deviceFunc(pos token.Pos, obj *types.Func) (string, bool) {
 	savedCurrent, savedDevice, savedResult, savedNames := t.current, t.inDevice, t.result, t.names
 	t.current, t.inDevice, t.names = obj, true, collectNames(fd)
 	t.result = nil
-	if fd.Type.Results != nil && len(fd.Type.Results.List) == 1 {
-		t.result = t.typeOf(fd.Type.Results.List[0].Type)
+	if sig.Results().Len() == 1 {
+		t.result = sig.Results().At(0).Type()
 	}
 
 	ret := "void"
@@ -366,6 +381,19 @@ func (t *transpiler) deviceFunc(pos token.Pos, obj *types.Func) (string, bool) {
 	t.deviceProtos = append(t.deviceProtos, proto)
 	t.deviceDefs = append(t.deviceDefs, def)
 	return name, true
+}
+
+// namedResult reports whether fd gives its result a name.
+func namedResult(fd *ast.FuncDecl) bool {
+	if fd.Type.Results == nil {
+		return false
+	}
+	for _, f := range fd.Type.Results.List {
+		if len(f.Names) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // declOf finds the declaration obj was checked from.

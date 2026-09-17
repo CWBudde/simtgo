@@ -447,12 +447,23 @@ func (t *transpiler) takeLabel() *labelState {
 // The target belongs at the very end of the body rather than after the loop,
 // because falling off the end of a C for body still runs the post clause --
 // which is exactly what Go's labelled continue does.
+//
+// The statements then need a scope of their own, so that the goto leaves that
+// scope instead of jumping forward within it. C++ refuses a jump that enters
+// the scope of an initialised variable without running its initialiser, and
+// `if c { continue outer }; v := float32(1)` is exactly that shape: valid Go
+// that NVRTC would reject with an error about generated code.
 func (t *transpiler) loopBody(b *ast.BlockStmt, head string, lbl *labelState) {
 	t.breakables = append(t.breakables, breakLoop)
 	defer func() { t.breakables = t.breakables[:len(t.breakables)-1] }()
 
+	scoped := lbl != nil && lbl.usesContinue
 	t.line("{")
 	t.ind++
+	if scoped {
+		t.line("{")
+		t.ind++
+	}
 	if head != "" {
 		t.line("%s", head)
 	}
@@ -460,7 +471,9 @@ func (t *transpiler) loopBody(b *ast.BlockStmt, head string, lbl *labelState) {
 		t.mark = len(t.diags)
 		t.stmt(s)
 	}
-	if lbl != nil && lbl.usesContinue {
+	if scoped {
+		t.ind--
+		t.line("}")
 		t.line("%s_continue: ;", lbl.name)
 	}
 	t.ind--
@@ -532,9 +545,17 @@ func (t *transpiler) rangeStmt(s *ast.RangeStmt) {
 	// and stepped past anything the kernel already spells that way, so it can
 	// neither collide with nor shadow a variable the author wrote.
 	name := cname(key.Name)
-	synthesised := key.Name == "_"
-	if synthesised {
-		name = t.reserve(cname(value.Name) + "_i")
+	if key.Name == "_" {
+		// Named after the value, which is what makes the generated index
+		// readable. Go rejects a range clause that declares neither variable,
+		// so there is always a value here -- but the name is chosen without
+		// relying on that, because a nil dereference is a poor way to find
+		// out otherwise.
+		base := "range"
+		if value != nil {
+			base = cname(value.Name)
+		}
+		name = t.reserve(base + "_i")
 		defer t.release(name)
 	}
 
@@ -662,6 +683,12 @@ func (t *transpiler) cSwitch(s *ast.SwitchStmt) {
 			n, _ := t.constInt(e)
 			t.line("case %d:", n)
 		}
+		// Each clause is braced, as a Go case clause already is: two clauses
+		// may declare the same name, and C++ refuses both that redeclaration
+		// and any jump to a later case across an initialisation in an
+		// earlier one.
+		t.ind++
+		t.line("{")
 		t.ind++
 		body, falls := trimFallthrough(clause.Body)
 		for _, st := range body {
@@ -674,18 +701,39 @@ func (t *transpiler) cSwitch(s *ast.SwitchStmt) {
 			t.line("break;")
 		}
 		t.ind--
+		t.line("}")
+		t.ind--
 	}
 	t.line("}")
 }
 
 // chainSwitch renders every other form as the if/else chain Go describes.
 //
-// The tag is re-evaluated once per comparison. Nothing in the supported subset
-// has side effects, so that is a matter of arithmetic rather than semantics,
-// and it keeps the generated code readable.
+// The tag is bound to a local first, and the comparisons test that local. Go
+// evaluates a switch tag exactly once, and a tag can now call a device
+// function that writes through a slice parameter, so comparing the expression
+// itself in every arm would run those writes once per arm and could pick a
+// different branch than Go does.
 func (t *transpiler) chainSwitch(s *ast.SwitchStmt) {
 	t.breakables = append(t.breakables, breakIfSwitch)
 	defer func() { t.breakables = t.breakables[:len(t.breakables)-1] }()
+
+	tag := ""
+	if s.Tag != nil {
+		typ := t.typeOf(s.Tag)
+		if typ == nil {
+			return
+		}
+		tag = t.reserve("switch_tag")
+		defer t.release(tag)
+		t.line("{")
+		t.ind++
+		defer func() {
+			t.ind--
+			t.line("}")
+		}()
+		t.line("%s %s = %s;", t.ctype(typ, s.Tag.Pos()), tag, t.expr(s.Tag).s)
+	}
 
 	var dflt *ast.CaseClause
 	emitted := 0
@@ -704,7 +752,7 @@ func (t *transpiler) chainSwitch(s *ast.SwitchStmt) {
 		if emitted > 0 {
 			t.line("else")
 		}
-		t.line("if (%s)", t.caseCond(s.Tag, clause.List))
+		t.line("if (%s)", t.caseCond(tag, clause.List))
 		t.clauseBlock(clause.Body)
 		emitted++
 	}
@@ -718,15 +766,16 @@ func (t *transpiler) chainSwitch(s *ast.SwitchStmt) {
 }
 
 // caseCond renders one clause's condition: the case values or-ed together,
-// each compared against the tag when there is one.
-func (t *transpiler) caseCond(tag ast.Expr, list []ast.Expr) string {
+// each compared against the local holding the tag. An empty tag is a tagless
+// switch, whose cases are conditions in their own right.
+func (t *transpiler) caseCond(tag string, list []ast.Expr) string {
 	parts := make([]string, 0, len(list))
 	for _, e := range list {
-		if tag == nil {
+		if tag == "" {
 			parts = append(parts, t.expr(e).at(precOr+1))
 			continue
 		}
-		eq := cexpr{fmt.Sprintf("%s == %s", t.expr(tag).at(precEq), t.expr(e).at(precEq+1)), precEq}
+		eq := cexpr{fmt.Sprintf("%s == %s", tag, t.expr(e).at(precEq+1)), precEq}
 		parts = append(parts, eq.at(precOr+1))
 	}
 	return strings.Join(parts, " || ")

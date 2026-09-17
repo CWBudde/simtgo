@@ -28,18 +28,26 @@ extern "C" __global__ void Classify(float* out, int out_len, float* x, int x_len
 	switch (band)
 	{
 	case 0:
-		gain = 0.25f;
-		break;
+		{
+			gain = 0.25f;
+			break;
+		}
 	case 1:
 	case 2:
-		gain = 0.5f;
-		break;
+		{
+			gain = 0.5f;
+			break;
+		}
 	case 3:
-		gain = 0.75f;
-		break;
+		{
+			gain = 0.75f;
+			break;
+		}
 	default:
-		gain = 1.0f;
-		break;
+		{
+			gain = 1.0f;
+			break;
+		}
 	}
 	float bias = 0.0f;
 	for (int e_i = 0; e_i < edges_len; e_i++)

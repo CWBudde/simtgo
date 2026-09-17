@@ -297,6 +297,19 @@ after it. `AssumeBlockDim` counting the whole block rather than `blockDim.x`
 is not in that list — it was not wrong while blocks were one-dimensional, it
 was a question that only arose once they were not.
 
+Review found four more, and they are worth naming because three share a shape
+the golden and parity tests cannot see: valid Go lowering to C++ that does not
+compile. A labelled `continue` jumped into the scope of a later declaration,
+two `case` clauses declaring one name collided in the switch's scope, and a
+device function with a named result referred to a local nobody emitted. The
+fourth is the one to remember: the if/else chain re-evaluated the switch tag
+in every arm, which was harmless when it was written — nothing in the subset
+had side effects — and stopped being harmless one commit later, when device
+functions arrived and a tag could write through a slice. Two features, each
+correct alone. `simt/nvrtc_cuda_test.go` now puts the emitter's sharp edges
+through NVRTC, which is the question the other tests never asked: is the
+generated C something a compiler accepts?
+
 What these three left behind, as items rather than as prose:
 
 - [ ] **Multiple assignment**, and with it the tuple-returning

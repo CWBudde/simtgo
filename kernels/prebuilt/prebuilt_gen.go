@@ -53,7 +53,7 @@ var ptxTranspose []byte
 func init() {
 	simt.RegisterPrebuilt(simt.Prebuilt{
 		Name:         "Classify",
-		SourceSHA256: "429f5a395a1ce94ac51f234d80233a1eee0db124a462d28b3a9b84653895dfc8",
+		SourceSHA256: "e3028060d7d017aa7a9ac12aa82b3ea795e7fcc9106e5b64af960d86f8d4fab3",
 		Arch:         "compute_75",
 		PTX:          ptxClassify,
 	})

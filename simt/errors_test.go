@@ -56,6 +56,18 @@ func TestUnsupported(t *testing.T) {
 		body: "func two(x float32) (float32, float32) { return x, x }\n\nfunc K(ctx gpu.Ctx, a []float32) { two(a[0]); a[0] = 1 }",
 		want: "must return at most one value",
 	}, {
+		// (a, b float32) is one result field holding two values, so counting
+		// fields rather than the checked signature would let it through.
+		name: "a device function returning two named values",
+		body: "func two(x float32) (a, b float32) { a = x\nb = x\nreturn }\n\nfunc K(ctx gpu.Ctx, a []float32) { two(a[0]); a[0] = 1 }",
+		want: "must return at most one value",
+	}, {
+		// A named result is a local the body assigns to and a bare return
+		// that carries it; neither is emitted, so it is refused instead.
+		name: "a device function naming its result",
+		body: "func one(x float32) (r float32) { r = x\nreturn }\n\nfunc K(ctx gpu.Ctx, a []float32) { a[0] = one(a[1]) }",
+		want: "must not name its result",
+	}, {
 		name: "a variadic device function",
 		body: "func any(xs ...float32) float32 { return xs[0] }\n\nfunc K(ctx gpu.Ctx, a []float32) { a[0] = any(a[1]) }",
 		want: "must not be variadic",

@@ -174,7 +174,7 @@ func TestSwitch(t *testing.T) {
 	}, {
 		name: "a non-constant case becomes an if/else chain against the tag",
 		body: decl + "{ switch a { case b: y[0] = 1\ndefault: y[0] = 2 } }",
-		want: []string{"if (a == b)", "else"},
+		want: []string{"int switch_tag = a;", "if (switch_tag == b)", "else"},
 		// A C switch case label must be a constant expression.
 		absent: []string{"switch ("},
 	}, {
@@ -182,7 +182,7 @@ func TestSwitch(t *testing.T) {
 		// the comparisons stand as they are.
 		name: "a case with several values tests each of them",
 		body: decl + "{ switch a { case b, b + 1: y[0] = 1 } }",
-		want: []string{"if (a == b || a == b + 1)"},
+		want: []string{"if (switch_tag == b || switch_tag == b + 1)"},
 	}, {
 		name: "an initialiser gets its own scope",
 		body: decl + "{ switch c := a + b; c { case 1: y[0] = 1 } }",
@@ -425,4 +425,58 @@ func TestAxisBuiltins(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestChainSwitchBindsTheTagOnce pins what Go guarantees: a switch evaluates
+// its tag exactly once. The if/else chain a non-constant switch lowers to
+// would otherwise re-evaluate the expression in every arm, and a tag calling
+// a device function that writes through a slice would then do that write once
+// per arm and could select a different branch than Go does.
+func TestChainSwitchBindsTheTagOnce(t *testing.T) {
+	u := transpile(t, "func bump(xs []float32) int32 { xs[0] = xs[0] + 1\n\treturn int32(xs[0]) }\n\n"+
+		"func K(ctx gpu.Ctx, y, x []float32) { switch bump(x) {\n"+
+		"case int32(len(y)):\n\ty[0] = 1\n"+
+		"case int32(len(x)):\n\ty[0] = 2\n"+
+		"default:\n\ty[0] = 3\n} }")
+	entry := u.Source[strings.Index(u.Source, "__global__"):]
+	if n := strings.Count(entry, "bump("); n != 1 {
+		t.Errorf("the tag is evaluated %d times in the entry point, want 1:\n%s", n, u.Source)
+	}
+	if !strings.Contains(entry, "int switch_tag = bump(x, x_len);") {
+		t.Errorf("the tag was not bound to a local:\n%s", u.Source)
+	}
+}
+
+// TestGeneratedCScopes covers the two places the emitter has to open a scope
+// it has no Go counterpart for. Both are invisible in Go and fatal in C++:
+// a jump may not enter the scope of an initialised variable, and two case
+// clauses may not declare the same name in one switch scope.
+func TestGeneratedCScopes(t *testing.T) {
+	t.Run("the continue target is not jumped to across a declaration", func(t *testing.T) {
+		got := transpile(t, "func K(ctx gpu.Ctx, y []float32, n int32) {\n"+
+			"outer:\n"+
+			"\tfor i := 0; i < int(n); i++ {\n"+
+			"\t\tif i == 1 {\n\t\t\tcontinue outer\n\t\t}\n"+
+			"\t\tv := float32(1)\n\t\ty[i] = v\n"+
+			"\t}\n}").Source
+		// The declaration has to sit inside a scope the goto leaves, so the
+		// target must follow that scope's closing brace.
+		decl := strings.Index(got, "float v = 1.0f;")
+		closing := strings.Index(got[decl:], "}")
+		target := strings.Index(got, "outer_continue: ;")
+		if decl < 0 || target < 0 || target < decl+closing {
+			t.Errorf("the continue target does not follow the body's own scope:\n%s", got)
+		}
+	})
+
+	t.Run("each case clause gets its own scope", func(t *testing.T) {
+		got := transpile(t, "func K(ctx gpu.Ctx, y []float32, a int32) { switch a {\n"+
+			"case 1:\n\tv := float32(1)\n\ty[0] = v\n"+
+			"case 2:\n\tv := float32(2)\n\ty[0] = v\n} }").Source
+		for _, want := range []string{"case 1:\n\t\t{", "case 2:\n\t\t{"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("generated CUDA does not brace the clause after %q:\n%s", strings.TrimSuffix(want, "\n\t\t{"), got)
+			}
+		}
+	})
 }
