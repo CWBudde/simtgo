@@ -15,7 +15,19 @@ package gocuda
 import (
 	"embed"
 	"io/fs"
+
+	// Linking the generated package is what runs its init and registers the
+	// ahead-of-time PTX. It is imported here, beside the embed that feeds the
+	// transpiler, so that anything using Kernels() gets both halves.
+	_ "github.com/CWBudde/gocuda/kernels/prebuilt"
 )
+
+// Regenerating writes kernels/prebuilt: the CUDA C, the PTX, and the constants
+// that make a kernel which cannot be lowered fail "go build". It needs NVRTC;
+// without a toolkit, "gocuda generate -no-ptx" refreshes everything but the
+// PTX.
+//
+//go:generate go run ./cmd/gocuda generate -pkg ./kernels -out ./kernels/prebuilt -arch compute_75
 
 // Kernel sources are embedded rather than read from disk so that a binary
 // carries everything the transpiler needs, in the same spirit as CUDA Rust

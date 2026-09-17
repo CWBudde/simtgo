@@ -1,0 +1,5 @@
+# PTX is generated, and NVRTC stamps its own version into it, so its diff says
+# nothing a reviewer wants to read -- the generated CUDA C beside it does.
+*.ptx -diff linguist-generated=true
+*.ptx text eol=lf
+kernels/prebuilt/prebuilt_gen.go linguist-generated=true

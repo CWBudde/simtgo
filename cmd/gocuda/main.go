@@ -38,6 +38,8 @@ func main() {
 	case len(args) > 0 && args[0] == "vet":
 		os.Args = append([]string{os.Args[0] + " vet"}, args[1:]...)
 		singlechecker.Main(simtcheck.Analyzer)
+	case len(args) > 0 && args[0] == "generate":
+		os.Exit(generate(args[1:]))
 	case len(args) == 0, args[0] == "help", args[0] == "-h", args[0] == "--help":
 		usage(os.Stdout)
 	default:
@@ -53,6 +55,7 @@ func usage(w *os.File) {
 Usage:
 
 	gocuda vet [packages]    report kernels that cannot be lowered to CUDA C
+	gocuda generate [flags]  lower kernels ahead of time and embed their PTX
 
 It also implements the go vet tool protocol:
 
