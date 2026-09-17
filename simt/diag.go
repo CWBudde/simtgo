@@ -50,10 +50,16 @@ func (e *UnsupportedError) Unwrap() []error {
 	return errs
 }
 
+// newUnsupportedError resolves positions against fset, which is nil for
+// diagnostics raised before a file set existed -- those already carry whatever
+// location they have in their message.
 func newUnsupportedError(fset *token.FileSet, kernel string, diags []lower.Diagnostic) *UnsupportedError {
 	out := make([]Diagnostic, len(diags))
 	for i, d := range diags {
-		out[i] = Diagnostic{Pos: fset.Position(d.Pos), Msg: d.Msg}
+		out[i] = Diagnostic{Msg: d.Msg}
+		if fset != nil && d.Pos.IsValid() {
+			out[i].Pos = fset.Position(d.Pos)
+		}
 	}
 	return &UnsupportedError{Kernel: kernel, Diags: out}
 }

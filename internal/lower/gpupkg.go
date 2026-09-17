@@ -1,8 +1,10 @@
 package lower
 
 import (
+	"go/ast"
 	"go/token"
 	"go/types"
+	"strconv"
 )
 
 // GPUPkgPath is the import path of the kernel vocabulary package.
@@ -83,5 +85,48 @@ func (im SynthImporter) Import(path string) (*types.Package, error) {
 type unsupportedImportError struct{ path string }
 
 func (e *unsupportedImportError) Error() string {
-	return "simt: kernels may not import " + e.path + " (only " + GPUPkgPath + " is available on the device)"
+	return importRefusal(e.path)
+}
+
+func importRefusal(path string) string {
+	return "kernels may not import " + path + " (only " + GPUPkgPath + " is available on the device)"
+}
+
+// CheckImports refuses every import a kernel source may not have.
+//
+// When simt type-checks kernel sources itself the rule is enforced by
+// SynthImporter, which simply cannot resolve anything else. An analyzer is
+// handed a package the real compiler already built, where importing "math" is
+// perfectly legal Go, so the rule has to exist as a check in its own right --
+// and it has to be this one, not a second opinion about it.
+func CheckImports(f *ast.File) []Diagnostic {
+	var diags []Diagnostic
+	for _, spec := range f.Imports {
+		path, err := strconv.Unquote(spec.Path.Value)
+		if err != nil || path == GPUPkgPath {
+			continue
+		}
+		diags = append(diags, Diagnostic{Pos: spec.Path.Pos(), Msg: importRefusal(path)})
+	}
+	return diags
+}
+
+// IsKernelDecl reports whether fd is a kernel: a plain function whose first
+// parameter is a gpu.Ctx.
+//
+// Taking a Ctx is what a kernel is for, and nothing else in this repository
+// does it at the top level -- the CPU emulator is driven by function literals,
+// which are not declarations. Making the marker the signature rather than a
+// comment is deliberate: an opt-in directive that someone forgets restores
+// exactly the "compiles fine, dies in main()" failure this phase removes.
+func IsKernelDecl(info *types.Info, fd *ast.FuncDecl) bool {
+	if fd.Recv != nil || fd.Body == nil || fd.Type.Params == nil || len(fd.Type.Params.List) == 0 {
+		return false
+	}
+	first := fd.Type.Params.List[0]
+	if len(first.Names) == 0 {
+		return false
+	}
+	obj := info.Defs[first.Names[0]]
+	return obj != nil && IsCtx(obj.Type())
 }

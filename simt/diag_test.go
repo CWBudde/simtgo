@@ -160,3 +160,63 @@ func TestGenericKernelRefused(t *testing.T) {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
+
+// TestImportRefusedWithPosition covers the rule that used to be enforced by
+// the importer alone. It now lives in the walk, because an analyzer is handed a
+// package the real compiler built, where importing "math" is legal Go -- and
+// reporting it directly gets the import's own position rather than burying it
+// in the type checker's complaint about an unresolvable package.
+func TestImportRefusedWithPosition(t *testing.T) {
+	src := "package kernels\n\nimport (\n\t\"math\"\n\n\t\"github.com/CWBudde/gocuda/gpu\"\n)\n\n" +
+		"func K(ctx gpu.Ctx, a []float32) { a[0] = float32(math.Pi) }\n"
+	_, err := simt.Transpile(fstest.MapFS{"k.go": &fstest.MapFile{Data: []byte(src)}}, "K")
+	if err == nil {
+		t.Fatal("expected the import to be refused")
+	}
+	const want = "simt: k.go:4:2: kernels may not import math"
+	if !strings.HasPrefix(err.Error(), want) {
+		t.Errorf("got  %q\nwant prefix %q", err.Error(), want)
+	}
+}
+
+// TestSeveralTypeErrors: go/types stops at the first error unless asked not to,
+// so a kernel with three mistakes used to report one.
+func TestSeveralTypeErrors(t *testing.T) {
+	diags := refuse(t, `func K(ctx gpu.Ctx, a []float32) {
+	a[0] = undefinedOne
+	a[1] = undefinedTwo
+	a[2] = undefinedThree
+}`)
+	if len(diags) != 3 {
+		t.Fatalf("got %d diagnostics, want 3:\n%s", len(diags), render(diags))
+	}
+}
+
+// TestTestFilesAreNotKernelSources: go:embed's kernels/*.go matches a _test.go
+// too, and it would then join the type-check and fail on "testing" -- so a
+// kernel package could not have tests at all.
+func TestTestFilesAreNotKernelSources(t *testing.T) {
+	fsys := fstest.MapFS{
+		"k.go":      &fstest.MapFile{Data: []byte(diagPrelude + "func K(ctx gpu.Ctx, a []float32) { a[0] = 1 }\n")},
+		"k_test.go": &fstest.MapFile{Data: []byte("package kernels\n\nimport \"testing\"\n\nfunc TestNothing(t *testing.T) {}\n")},
+	}
+	if _, err := simt.Transpile(fsys, "K"); err != nil {
+		t.Fatalf("a _test.go file must not be treated as kernel source: %v", err)
+	}
+}
+
+// TestUnknownKernelNamesTheOnesThatExist turns a typo from a bare "not found"
+// into something actionable.
+func TestUnknownKernelNamesTheOnesThatExist(t *testing.T) {
+	src := diagPrelude + "func K(ctx gpu.Ctx, a []float32) { a[0] = 1 }\n" +
+		"func Other(ctx gpu.Ctx, a []float32) { a[0] = 2 }\n"
+	_, err := simt.Transpile(fstest.MapFS{"k.go": &fstest.MapFile{Data: []byte(src)}}, "Kay")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	for _, want := range []string{`no kernel named "Kay"`, "K, Other"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+}
