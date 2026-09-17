@@ -72,17 +72,32 @@ func TestNVRTCCandidatesPreferConfiguredRoot(t *testing.T) {
 	}
 }
 
-func TestNVRTCCandidatesNewestMajorFirst(t *testing.T) {
+func TestNVRTCCandidatesNewestFirst(t *testing.T) {
 	clearEnv(t)
 	got := nvrtcCandidates()
 	v13 := slices.Index(got, "libnvrtc.so.13")
 	v12 := slices.Index(got, "libnvrtc.so.12")
-	v11 := slices.Index(got, "libnvrtc.so.11")
+	v11 := slices.Index(got, "libnvrtc.so.11.2")
 	if v13 < 0 || v12 < 0 || v11 < 0 {
 		t.Fatalf("missing sonames in %v", got)
 	}
 	if v13 > v12 || v12 > v11 {
 		t.Errorf("sonames out of order in %v", got)
+	}
+}
+
+// TestNVRTCCandidatesUseRealSonames pins the one that is easy to get wrong.
+// NVRTC's soname was MAJOR.MINOR until CUDA 11.2 and frozen at "11.2" for
+// every 11.x since, so "libnvrtc.so.11" names nothing that was ever shipped
+// and a CUDA 11 runtime install would go unfound.
+func TestNVRTCCandidatesUseRealSonames(t *testing.T) {
+	clearEnv(t)
+	got := nvrtcCandidates()
+	if slices.Contains(got, "libnvrtc.so.11") {
+		t.Errorf("libnvrtc.so.11 is not a real soname; candidates: %v", got)
+	}
+	if !slices.Contains(got, "libnvrtc.so.11.2") {
+		t.Errorf("libnvrtc.so.11.2 (CUDA 11.2-11.8) missing from %v", got)
 	}
 }
 

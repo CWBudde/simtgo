@@ -82,8 +82,18 @@ func nvrtcCandidates() []string {
 		return []string{p}
 	}
 
-	// Newest first: NVRTC's soname carries the CUDA major version.
-	sonames := []string{"libnvrtc.so.13", "libnvrtc.so.12", "libnvrtc.so.11", "libnvrtc.so"}
+	// Newest first. NVRTC's soname carries the CUDA version, but not always
+	// just the major one: it was MAJOR.MINOR until CUDA 11.2 and has been
+	// frozen at "11.2" for every 11.x release since 11.3, so libnvrtc.so.11 is
+	// not the soname of any CUDA that ever shipped. From 12 onwards it is the
+	// major alone again. A runtime-only CUDA 11 install has the .so.11.2 file
+	// and no unversioned symlink -- that one is part of the toolkit -- so
+	// leaving it out would fail to find an NVRTC that is present and usable.
+	//
+	// CUDA 11.0 and 11.1 predate the freeze and carry their own MAJOR.MINOR
+	// sonames; they are old enough not to be worth a candidate each, and
+	// GOCUDA_LIBNVRTC names one outright.
+	sonames := []string{"libnvrtc.so.13", "libnvrtc.so.12", "libnvrtc.so.11.2", "libnvrtc.so"}
 
 	var out []string
 	add := func(p string) {
