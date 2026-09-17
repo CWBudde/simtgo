@@ -82,10 +82,21 @@ var gpuFuncs = map[string]string{
 // binds like a prefix operator, while a call cannot be regrouped at all.
 var ctxBuiltins = map[string]cexpr{
 	"ThreadIdx":   {"(int)threadIdx.x", precPrefix},
+	"ThreadIdxY":  {"(int)threadIdx.y", precPrefix},
+	"ThreadIdxZ":  {"(int)threadIdx.z", precPrefix},
 	"BlockIdx":    {"(int)blockIdx.x", precPrefix},
+	"BlockIdxY":   {"(int)blockIdx.y", precPrefix},
+	"BlockIdxZ":   {"(int)blockIdx.z", precPrefix},
 	"BlockDim":    {"(int)blockDim.x", precPrefix},
+	"BlockDimY":   {"(int)blockDim.y", precPrefix},
+	"BlockDimZ":   {"(int)blockDim.z", precPrefix},
 	"GridDim":     {"(int)gridDim.x", precPrefix},
+	"GridDimY":    {"(int)gridDim.y", precPrefix},
+	"GridDimZ":    {"(int)gridDim.z", precPrefix},
 	"GlobalID":    {"(int)(blockIdx.x * blockDim.x + threadIdx.x)", precPrefix},
+	"GlobalIDX":   {"(int)(blockIdx.x * blockDim.x + threadIdx.x)", precPrefix},
+	"GlobalIDY":   {"(int)(blockIdx.y * blockDim.y + threadIdx.y)", precPrefix},
+	"GlobalIDZ":   {"(int)(blockIdx.z * blockDim.z + threadIdx.z)", precPrefix},
 	"SyncThreads": {"__syncthreads()", precAtom},
 }
 

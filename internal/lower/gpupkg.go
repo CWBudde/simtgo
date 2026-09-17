@@ -41,7 +41,17 @@ func GPUPackage() *types.Package {
 		return []*types.Var{types.NewVar(token.NoPos, pkg, "", t)}
 	}
 
-	for _, name := range []string{"ThreadIdx", "BlockIdx", "BlockDim", "GridDim", "GlobalID"} {
+	// One accessor per axis rather than a tuple: each is a single CUDA
+	// built-in, and the emitter's table maps a method to exactly one C
+	// expression. The unsuffixed names are the x axis, which is CUDA's own
+	// spelling and what every one-dimensional kernel already uses.
+	for _, name := range []string{
+		"ThreadIdx", "ThreadIdxY", "ThreadIdxZ",
+		"BlockIdx", "BlockIdxY", "BlockIdxZ",
+		"BlockDim", "BlockDimY", "BlockDimZ",
+		"GridDim", "GridDimY", "GridDimZ",
+		"GlobalID", "GlobalIDX", "GlobalIDY", "GlobalIDZ",
+	} {
 		method(name, nil, ret(intT))
 	}
 	method("SyncThreads", nil, nil)

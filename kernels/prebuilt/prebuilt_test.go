@@ -31,7 +31,7 @@ func TestGateListsEveryKernel(t *testing.T) {
 	for _, n := range prebuilt.Names() {
 		gated[n] = true
 	}
-	for _, name := range []string{"VecAdd", "Magnitude", "Scale", "FIR", "Classify", "Softclip"} {
+	for _, name := range []string{"VecAdd", "Magnitude", "Scale", "FIR", "Classify", "Softclip", "Transpose"} {
 		if !gated[name] {
 			t.Errorf("kernel %s is not listed in gate.go, so nothing makes it fail the build", name)
 		}

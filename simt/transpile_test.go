@@ -14,7 +14,7 @@ import (
 // TestGolden pins the generated CUDA for every example kernel. Run with
 // GOCUDA_UPDATE=1 to refresh the golden files after an intentional change.
 func TestGolden(t *testing.T) {
-	for _, name := range []string{"VecAdd", "Magnitude", "Scale", "FIR", "Classify", "Softclip"} {
+	for _, name := range []string{"VecAdd", "Magnitude", "Scale", "FIR", "Classify", "Softclip", "Transpose"} {
 		t.Run(name, func(t *testing.T) {
 			u, err := simt.Transpile(gocuda.Kernels(), name)
 			if err != nil {
@@ -397,5 +397,32 @@ func TestUncalledFunctionIsNotEmitted(t *testing.T) {
 		"func K(ctx gpu.Ctx, y []float32) { y[0] = 1 }")
 	if strings.Contains(u.Source, "unused") {
 		t.Errorf("an uncalled function was emitted:\n%s", u.Source)
+	}
+}
+
+// TestAxisBuiltins pins the per-axis accessors against the CUDA built-ins
+// they stand for. Getting an axis wrong is silent: the kernel compiles and
+// reads the wrong neighbour.
+func TestAxisBuiltins(t *testing.T) {
+	cases := []struct{ call, want string }{
+		{"ThreadIdxY()", "(int)threadIdx.y"},
+		{"ThreadIdxZ()", "(int)threadIdx.z"},
+		{"BlockIdxY()", "(int)blockIdx.y"},
+		{"BlockIdxZ()", "(int)blockIdx.z"},
+		{"BlockDimY()", "(int)blockDim.y"},
+		{"BlockDimZ()", "(int)blockDim.z"},
+		{"GridDimY()", "(int)gridDim.y"},
+		{"GridDimZ()", "(int)gridDim.z"},
+		{"GlobalIDX()", "(int)(blockIdx.x * blockDim.x + threadIdx.x)"},
+		{"GlobalIDY()", "(int)(blockIdx.y * blockDim.y + threadIdx.y)"},
+		{"GlobalIDZ()", "(int)(blockIdx.z * blockDim.z + threadIdx.z)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.call, func(t *testing.T) {
+			got := transpile(t, "func K(ctx gpu.Ctx, y []float32) { y[0] = float32(ctx."+tc.call+") }").Source
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("generated CUDA does not contain %q:\n%s", tc.want, got)
+			}
+		})
 	}
 }

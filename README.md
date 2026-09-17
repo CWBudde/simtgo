@@ -105,6 +105,16 @@ arithmetic, comparisons, indexing and conversions all translate.
 becomes `blockIdx.x * blockDim.x + threadIdx.x`; `ctx.SharedF32(n)` becomes a
 `__shared__` array.
 
+Grids and blocks have three axes. The unsuffixed accessors are `x`, which is
+CUDA's own spelling, and `ThreadIdxY`, `BlockIdxZ`, `GlobalIDY` and the rest
+are the other two; `GlobalID` also answers to `GlobalIDX`, because next to
+`GlobalIDY` the bare name reads like an oversight. Each is one built-in rather
+than a tuple — `x, y := ctx.GlobalID2()` would need multiple assignment, which
+the subset does not have. The host side matches: `Kernel.LaunchDim` and
+`gpu.RunCPUDim` take a three-axis extent, `Launch` and `RunCPU` stay the
+one-dimensional spelling, and `AssumeBlockDim` counts threads per block across
+all three axes, so a 16×16 block satisfies `AssumeBlockDim(256)`.
+
 Two of those need a word, because Go and C disagree about what the spelling
 means. A `switch` whose cases are all constant becomes a C `switch`, with an
 explicit `break` closing each clause because Go does not fall through;
@@ -283,8 +293,9 @@ Honest limits, not papered over:
 - **No recursion.** A kernel may call another Go function, but not one that
   reaches itself. That is a deliberate refusal rather than a gap: device
   stack depth is a launch-configuration problem, not a language one.
-- **One dimension.** Grids and blocks are 1-D; 2-D and 3-D indexing is
-  unimplemented, not impossible.
+- **No multiple assignment**, so no tuple-returning intrinsic: the axes are
+  read one accessor at a time. It is a limit of the emitter, not of the
+  device.
 - **No chained windowed operations** in the tile track: the halo of the outer
   window would need values the inner one does not have at those indices.
 - **Source-level, not IR-level.** Without a real backend there is no

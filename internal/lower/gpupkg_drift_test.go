@@ -106,7 +106,12 @@ func TestGPUPackageMatchesReal(t *testing.T) {
 // have no place on a device, so the synthetic model deliberately omits them.
 // Anything not listed here is kernel vocabulary and must be modelled.
 var hostOnly = map[string]string{
-	"RunCPU": "runs a kernel on the CPU; a kernel cannot launch itself",
+	"RunCPU":    "runs a kernel on the CPU; a kernel cannot launch itself",
+	"RunCPUDim": "runs a kernel on the CPU; a kernel cannot launch itself",
+	"Dim":       "launch geometry, which a kernel reads one axis at a time instead",
+	"D1":        "builds a Dim",
+	"D2":        "builds a Dim",
+	"D3":        "builds a Dim",
 }
 
 // deviceNames lists the exported members of s that a kernel may use.

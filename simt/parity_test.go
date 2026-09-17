@@ -3,6 +3,7 @@
 package simt_test
 
 import (
+	"errors"
 	"math"
 	"math/rand/v2"
 	"testing"
@@ -287,4 +288,73 @@ func TestSoftclipParity(t *testing.T) {
 		t.Fatalf("Download: %v", err)
 	}
 	assertClose(t, got, want, 1e-6)
+}
+
+// TestTransposeParity is the two-dimensional launch end to end: a 2-D grid of
+// 2-D blocks, staged through shared memory, emulated by RunCPUDim and
+// launched by LaunchDim.
+func TestTransposeParity(t *testing.T) {
+	ctx := device(t)
+	// Deliberately not multiples of the tile, so the ragged edges of the grid
+	// are covered on both axes.
+	const w, h = 133, 71
+	const tile = kernels.TransposeTile
+	in := randomSignal(w * h)
+
+	grid := gpu.D2((w+tile-1)/tile, (h+tile-1)/tile)
+	block := gpu.D2(tile, tile)
+
+	want := make([]float32, w*h)
+	gpu.RunCPUDim(grid, block, func(c gpu.Ctx) { kernels.Transpose(c, want, in, w, h) })
+
+	// An independent reference: the transpose written the obvious way.
+	ref := make([]float32, w*h)
+	for y := range h {
+		for x := range w {
+			ref[x*h+y] = in[y*w+x]
+		}
+	}
+	assertClose(t, want, ref, 0)
+
+	k, err := simt.Build(ctx, gocuda.Kernels(), "Transpose")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	dout, _ := cuda.NewSlice[float32](ctx, w*h)
+	din, _ := cuda.Upload(ctx, in)
+	defer dout.Free()
+	defer din.Free()
+
+	if err := k.LaunchDim(cuda.D2(grid.X, grid.Y), cuda.D2(tile, tile), dout, din, int32(w), int32(h)); err != nil {
+		t.Fatalf("LaunchDim: %v", err)
+	}
+	got, err := dout.Download()
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	assertClose(t, got, want, 0)
+}
+
+// TestLaunchDimCountsTheWholeBlock pins the launch contract against a 2-D
+// block: AssumeBlockDim counts threads, not the x extent, so a 16x16 block
+// satisfies a kernel that asked for 256 and a 16x8 one does not.
+func TestLaunchDimCountsTheWholeBlock(t *testing.T) {
+	ctx := device(t)
+	k, err := simt.Build(ctx, gocuda.Kernels(), "Transpose")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	dout, _ := cuda.NewSlice[float32](ctx, 16)
+	din, _ := cuda.Upload(ctx, make([]float32, 16))
+	defer dout.Free()
+	defer din.Free()
+
+	err = k.LaunchDim(cuda.D1(1), cuda.D2(16, 8), dout, din, int32(4), int32(4))
+	var bad *simt.BlockSizeError
+	if !errors.As(err, &bad) {
+		t.Fatalf("launching a 128-thread block gave %v, want a BlockSizeError", err)
+	}
+	if bad.Want != 256 || bad.Got != 128 {
+		t.Errorf("BlockSizeError says want %d got %d, expected 256 and 128", bad.Want, bad.Got)
+	}
 }

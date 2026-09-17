@@ -22,6 +22,7 @@ var Gate = []Lowered{
 	Magnitude,
 	Scale,
 	Softclip,
+	Transpose,
 }
 
 // Names returns Gate as plain strings, for simt.VerifyPrebuilt.

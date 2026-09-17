@@ -26,6 +26,9 @@ const Scale Lowered = "Scale"
 // Softclip reports that the kernel of that name lowered to CUDA C.
 const Softclip Lowered = "Softclip"
 
+// Transpose reports that the kernel of that name lowered to CUDA C.
+const Transpose Lowered = "Transpose"
+
 //go:embed Classify.compute_75.ptx
 var ptxClassify []byte
 
@@ -43,6 +46,9 @@ var ptxScale []byte
 
 //go:embed Softclip.compute_75.ptx
 var ptxSoftclip []byte
+
+//go:embed Transpose.compute_75.ptx
+var ptxTranspose []byte
 
 func init() {
 	simt.RegisterPrebuilt(simt.Prebuilt{
@@ -82,5 +88,13 @@ func init() {
 		SourceSHA256: "e301c0219effdb34fc61c4157818a70bd4542be3d3f429538ed88b7a91b1713b",
 		Arch:         "compute_75",
 		PTX:          ptxSoftclip,
+	})
+	simt.RegisterPrebuilt(simt.Prebuilt{
+		Name:          "Transpose",
+		SourceSHA256:  "12cb95ae7abf5fc85843bc6970e7f5c19caf741f90335190dae3a5b77b4b013e",
+		Arch:          "compute_75",
+		PTX:           ptxTranspose,
+		RequiredBlock: 256,
+		SharedBytes:   1024,
 	})
 }
