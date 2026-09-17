@@ -22,7 +22,7 @@ What the PoC is not:
 | Types | `float32`, `int32`/`int` | integers, `float64`, structs, fixed arrays |
 | Kernel calls | none — a kernel cannot call a Go function | `__device__` functions |
 | Errors | surface at **run time**, inside `main()` | at **build time** |
-| Toolchain | hard-coded `/usr/local/cuda` (`cuda/driver_cuda.go:6`) | discovery, or no build-time CUDA at all |
+| Toolchain | ~~hard-coded `/usr/local/cuda`~~ run-time `dlopen`, no cgo | Windows |
 | Tile ops | 7, one windowed, no reductions | reductions, 2-D, fusion planning |
 
 ## The decision that gates everything else
@@ -152,14 +152,57 @@ from **28.7 ms to 0.9 ms** when the PTX is prebuilt.
 
 ### 1.2 Toolchain discovery and portability (M)
 
-- [ ] Replace the hard-coded paths in `cuda/driver_cuda.go` with `CUDA_PATH` /
-      `pkg-config` / a documented override.
-- [ ] Load `libcuda` and `libnvrtc` at run time (`dlopen`, or `purego` to drop
+- [x] Replace the hard-coded paths in `cuda/driver_cuda.go` with `CUDA_PATH` /
+      `pkg-config` / a documented override. (2026-09-17) — the question moved
+      from build time to run time, so the answer did too: `cuda/library.go`
+      decides which *file* to open, honouring `GOCUDA_LIBCUDA` /
+      `GOCUDA_LIBNVRTC` outright and, for NVRTC alone, `CUDA_PATH` /
+      `CUDA_HOME` ahead of the system library — the driver is not part of the
+      toolkit, so a toolkit root says nothing about where it is. `pkg-config` is deliberately **not** used: it configures
+      a link, and there is no link left to configure. The policy is untagged,
+      loading-free Go, so `cuda/library_test.go` checks the search order on a
+      machine with no CUDA — the machine where a path bug actually bites.
+- [x] Load `libcuda` and `libnvrtc` at run time (`dlopen`, or `purego` to drop
       cgo entirely) so a binary **builds and ships without CUDA installed** and
       degrades gracefully on a machine with no GPU. This is what makes the
-      library distributable.
+      library distributable. (2026-09-17) — purego; the module has no cgo left
+      at all and `CGO_ENABLED=0 go build -tags cuda ./...` passes. The two
+      libraries load independently, which is what lets a kernel with prebuilt
+      PTX run with **no toolkit present**: with `GOCUDA_LIBNVRTC` pointed at a
+      file that does not exist, `examples/fir` still computes on the GPU. A
+      missing driver is a `*LibraryError` naming every candidate tried, not a
+      link failure the caller could never have recovered from.
 - [ ] Windows support; document macOS as unsupported (no CUDA).
-- [ ] Keep the `cuda` build tag working as the no-GPU fallback.
+      Unblocked by the above — there is no C toolchain in the way any more —
+      but it cannot be *claimed* without a Windows host or Phase 1.4's CI, so
+      it is left open rather than written blind.
+- [x] Keep the `cuda` build tag working as the no-GPU fallback. (2026-09-17) —
+      kept as it was, and now enforced: `cuda/surface_test.go` type-checks the
+      package under both tags and fails if the exported surfaces drift. That
+      test was impossible before, because loading the tagged half needed a
+      toolkit — so the machine that most needed the check was the one that
+      could not run it.
+- [ ] **Collapse `cmd/gocuda-nvrtc` into `cmd/gocuda`.** The child process
+      exists only because `simt` used to be cgo while `cmd/gocuda` had to build
+      without a toolkit (`cmd/gocuda-nvrtc/main.go` says so itself). Nothing is
+      cgo now, so `generate` could call NVRTC directly and drop the JSON
+      protocol, the `go run` of a second binary, and the build-tag split.
+
+One finding worth writing down, because it is silent when wrong: the driver's
+exported symbols are not the names in `cuda.h`. The header `#define`s
+`cuMemAlloc` to `cuMemAlloc_v2`, and the same for `cuMemFree`, `cuMemcpyHtoD`,
+`cuMemcpyDtoH` and `cuDevicePrimaryCtxRelease`. `libcuda` exports **both**, and
+the unsuffixed ones are the pre-CUDA-3.2 API taking 32-bit sizes, so a `dlsym`
+port that trusts the header names links successfully, passes every small test,
+and truncates any allocation or copy above 4 GiB. The bindings name the `_v2`
+symbols explicitly.
+
+Kernel parameters no longer go through C `malloc`/`free` per launch: the driver
+is handed pointers into Go memory held still by a `runtime.Pinner`, which is
+what that type is for. This is a wash rather than a win — two C allocations
+become two Go ones — and the FIR example measures the same as before
+(1.1 ms kernel, 9.4 ms transfers), which is the point: the launch path was
+never where its 10 ms went.
 
 ### 1.3 Error model and API review (S)
 

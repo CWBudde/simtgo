@@ -280,13 +280,13 @@ Go function that both backends run, so correctness is testable without a GPU.
 ## Layout
 
 ```
-cuda/          cgo bindings: CUDA driver API + NVRTC   (build tag "cuda")
+cuda/          CUDA driver API + NVRTC, loaded at run time (build tag "cuda")
 gpu/           kernel vocabulary + CPU grid emulator
 simt/          transpile, build and launch             (track 1)
 tile/          lazy graph -> one fused kernel          (track 2)
 internal/lower/   Go AST -> CUDA C; the one definition of the subset
 analysis/simtcheck/  the go/analysis Analyzer behind "gocuda vet"
-cmd/gocuda/    vet and generate                        (no cgo)
+cmd/gocuda/    vet and generate                        (no driver needed)
 cmd/gocuda-nvrtc/  the NVRTC child process             (build tag "cuda")
 kernels/       the example kernels, embedded as source
 kernels/prebuilt/  generated: CUDA C, PTX, and the build gate
@@ -294,8 +294,12 @@ internal/jit/  compile, cache and load, shared by both tracks
 examples/      vecadd, fir, magnitude, tilefir
 ```
 
-All cgo sits behind the `cuda` build tag, so the transpiler and its tests
-build and run on a machine with no CUDA toolchain at all.
+There is no cgo. `libcuda` and `libnvrtc` are opened with `dlopen` at run
+time (through [purego](https://github.com/ebitengine/purego)), so the whole
+module — driver bindings included — compiles with `CGO_ENABLED=0` on a machine
+that has never had a CUDA toolkit installed. The `cuda` build tag still selects
+between the driver and `cuda/stub.go`, whose calls all return `ErrNoCUDA`, so
+the transpiler and its tests need neither a tag nor a GPU.
 
 ## Running it
 
@@ -314,6 +318,21 @@ Generated `.cu` and `.ptx` land in `.gocuda-cache/` for inspection. Pass
 `simt.WithCacheDir("elsewhere")` to `simt.Build` to point it somewhere else, or
 `simt.WithCacheDir("")` to turn it off.
 
-Requires a CUDA installation at `/usr/local/cuda` (headers and `libnvrtc`) and
-an NVIDIA driver; adjust the `#cgo` flags in `cuda/driver_cuda.go` if yours
-lives elsewhere.
+Nothing is needed at build time: no headers, no libraries, no toolkit. At run
+time a `-tags cuda` binary wants an NVIDIA driver (`libcuda.so.1`, installed
+with the driver) and, only if it has to compile a kernel, `libnvrtc` from the
+toolkit — a kernel whose PTX is prebuilt runs with no toolkit present at all.
+
+The two are searched for differently, because they come from different
+places. The **driver** is installed by the driver package and lands in the
+dynamic linker's default path, so only `libcuda.so.1` and `libcuda.so` are
+tried — a toolkit root is not consulted, and the toolkit's own
+`lib64/stubs/libcuda.so` is deliberately never a candidate, since it exists to
+satisfy a linker and fails every call. **NVRTC** is part of the toolkit, so
+`$CUDA_PATH` and `$CUDA_HOME` are tried first (an explicitly configured
+installation wins over the system one), then the linker's default path, then
+`/usr/local/cuda` and `/opt/cuda`.
+
+`GOCUDA_LIBCUDA` and `GOCUDA_LIBNVRTC` each name a file outright and replace
+that search rather than heading it. When nothing is found, the error lists
+every path tried.
