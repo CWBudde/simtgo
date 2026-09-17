@@ -1,4 +1,4 @@
-package simt
+package lower
 
 import (
 	"fmt"
@@ -106,7 +106,7 @@ var cBinaryPrec = map[token.Token]int{
 }
 
 func (t *transpiler) expr(e ast.Expr) cexpr {
-	if t.err != nil {
+	if t.failed() {
 		return atom("")
 	}
 	// Anything go/types folded to a constant is emitted as a literal, which
@@ -194,7 +194,7 @@ func (t *transpiler) call(c *ast.CallExpr) cexpr {
 		return atom("")
 
 	case *ast.SelectorExpr:
-		if sel := t.info.Selections[f]; sel != nil && sel.Kind() == types.MethodVal && t.isCtx(sel.Recv()) {
+		if sel := t.info.Selections[f]; sel != nil && sel.Kind() == types.MethodVal && IsCtx(sel.Recv()) {
 			name := sel.Obj().Name()
 			switch name {
 			case "SharedF32":

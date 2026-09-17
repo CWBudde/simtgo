@@ -1,4 +1,4 @@
-package simt
+package lower
 
 import (
 	"go/token"
@@ -8,7 +8,7 @@ import (
 // GPUPkgPath is the import path of the kernel vocabulary package.
 const GPUPkgPath = "github.com/CWBudde/gocuda/gpu"
 
-// gpuPackage builds a types.Package describing package gpu by hand.
+// GPUPackage builds a types.Package describing package gpu by hand.
 //
 // Kernel sources are type-checked at run time, where neither the module graph
 // nor compiled export data is guaranteed to be available. Since the kernel
@@ -16,7 +16,7 @@ const GPUPkgPath = "github.com/CWBudde/gocuda/gpu"
 // the toolchain to import the real package: nothing outside the standard
 // library is needed, and the transpiler's view of gpu cannot drift from the
 // symbols it knows how to lower.
-func gpuPackage() *types.Package {
+func GPUPackage() *types.Package {
 	pkg := types.NewPackage(GPUPkgPath, "gpu")
 	scope := pkg.Scope()
 
@@ -69,13 +69,13 @@ func gpuPackage() *types.Package {
 	return pkg
 }
 
-// synthImporter serves package gpu from memory and refuses everything else,
+// SynthImporter serves package gpu from memory and refuses everything else,
 // which keeps the supported kernel vocabulary explicit.
-type synthImporter struct{ gpu *types.Package }
+type SynthImporter struct{ GPU *types.Package }
 
-func (im synthImporter) Import(path string) (*types.Package, error) {
+func (im SynthImporter) Import(path string) (*types.Package, error) {
 	if path == GPUPkgPath {
-		return im.gpu, nil
+		return im.GPU, nil
 	}
 	return nil, &unsupportedImportError{path: path}
 }

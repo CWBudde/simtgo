@@ -1,4 +1,4 @@
-package simt
+package lower
 
 import (
 	"fmt"
@@ -12,7 +12,7 @@ func (t *transpiler) block(b *ast.BlockStmt) {
 	t.line("{")
 	t.ind++
 	for _, s := range b.List {
-		if t.err != nil {
+		if t.failed() {
 			return
 		}
 		t.stmt(s)
@@ -133,7 +133,7 @@ func (t *transpiler) sharedSize(e ast.Expr) (int, bool) {
 		return 0, false
 	}
 	s := t.info.Selections[sel]
-	if s == nil || s.Kind() != types.MethodVal || !t.isCtx(s.Recv()) || s.Obj().Name() != "SharedF32" {
+	if s == nil || s.Kind() != types.MethodVal || !IsCtx(s.Recv()) || s.Obj().Name() != "SharedF32" {
 		return 0, false
 	}
 	if len(call.Args) != 1 {
