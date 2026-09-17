@@ -18,9 +18,9 @@ What the PoC is not:
 | | Current | Needed |
 |---|---|---|
 | Driver API | 18 calls, fully synchronous | streams, events, async copies, pinned memory |
-| Grids | 1-D only | 1-D/2-D/3-D |
+| Grids | ~~1-D only~~ 1-D/2-D/3-D | — |
 | Types | `float32`, `int32`/`int` | integers, `float64`, structs, fixed arrays |
-| Kernel calls | none — a kernel cannot call a Go function | `__device__` functions |
+| Kernel calls | ~~none~~ `__device__` functions, recursion refused | — |
 | Errors | surface at **run time**, inside `main()` | at **build time** |
 | Toolchain | ~~hard-coded `/usr/local/cuda`~~ run-time `dlopen`, no cgo | Windows |
 | Tile ops | 7, one windowed, no reductions | reductions, 2-D, fusion planning |
@@ -235,12 +235,37 @@ Nothing below is verifiable without this.
 
 ## Phase 2 — Language coverage (L)
 
-Each item means: a spec entry, a golden test, and a CPU/GPU parity test.
+Each item means: a spec entry, a golden test, and a CPU/GPU parity test. Until
+Phase 3 writes the subset spec, "a spec entry" is the README's *The supported
+subset* section — the plan files the real grammar-and-semantics document under
+Phase 3, so pulling it forward would be doing that item, not this one.
 
-- [ ] **Device functions.** A kernel cannot call another Go function. This
+- [x] **Device functions.** A kernel cannot call another Go function. This
       blocks most real kernels; emit `__device__` functions or inline them.
-- [ ] **Multi-dimensional indexing.** `ctx.GlobalID2()`, `ctx.ThreadIdx3()`;
-      the host side already has `Dim3`.
+      (2026-09-17) — emitted, not inlined: every function the kernel reaches
+      becomes a `__device__` function in the same translation unit, prototypes
+      first so the order of the Go declarations does not matter. The CPU side
+      needed nothing at all — a device function is ordinary Go, so `RunCPU`
+      runs the very code the device compiles, and parity came for free.
+      Recursion is refused (direct and mutual): there is no device stack depth
+      to spend on it. `lower.Kernel` now takes the package's files, because
+      resolving a call needs the declarations; both callers already had them,
+      so the analyzer gained device functions in the same commit rather than
+      afterwards.
+- [x] **Multi-dimensional indexing.** `ctx.GlobalID2()`, `ctx.ThreadIdx3()`;
+      the host side already has `Dim3`. (2026-09-17) — landed as **per-axis
+      accessors**, not the tuple-returning spelling this line proposed:
+      `ctx.ThreadIdxY()`, `ctx.BlockIdxZ()`, `ctx.GlobalIDY()` and the rest.
+      `x, y := ctx.GlobalID2()` needs multiple assignment, which is a pinned
+      refusal, so the spelling would have dragged a second and larger feature
+      in with it; one CUDA built-in per accessor is what the emitter's table
+      can express today. The unsuffixed names stay the x axis, so no existing
+      kernel changed. `gpu` grew its own `Dim` — a kernel may import nothing
+      but `gpu`, so the geometry it can talk about cannot be `cuda.Dim3` —
+      plus `RunCPUDim`; `simt` grew `Kernel.LaunchDim`. `AssumeBlockDim` now
+      counts threads per block across all three axes on both sides.
+      `kernels.Transpose` is the proof, verified exactly against an
+      independent reference.
 - [ ] **Types.** `int32`/`uint32`/`int64` slices, opt-in `float64`, `bool`,
       structs of scalars → CUDA structs, fixed-size arrays.
 - [ ] **Shared memory.** Typed (`SharedI32`, …) and dynamically sized at launch.
@@ -248,11 +273,47 @@ Each item means: a spec entry, a golden test, and a CPU/GPU parity test.
       that the emulator implements faithfully.
 - [ ] **Warp-level primitives.** Shuffle, ballot, `__activemask`, warp
       reductions — the basis of every fast reduction.
-- [ ] **Missing statements.** `switch`, labelled `break`/`continue`,
-      `for i, v := range`.
+- [x] **Missing statements.** `switch`, labelled `break`/`continue`,
+      `for i, v := range`. (2026-09-17) — `switch` has two lowerings, because
+      C's switch and Go's are not the same statement: all-constant cases over
+      an integral tag become a C `switch` with an explicit `break` per clause
+      (and `fallthrough` honoured by leaving it out), everything else becomes
+      the `if`/`else` chain Go's semantics actually describe. A bare `break`
+      inside that chain is refused, because in C it would leave the enclosing
+      loop. Labelled branches lower to a `goto`. `for i, v := range` binds the
+      value as the copy Go makes it.
 - [ ] **`const` / `__restrict__`.** Mark non-aliased read-only slice
       parameters; it is both a correctness contract and a real speed-up.
 - [ ] **Opt-in fast math** and `#pragma unroll` hints for tap-style loops.
+
+Three items done, and one of them started as a bug rather than a feature.
+`*ast.BranchStmt` was lowered as `t.line("%s;", s.Tok)` and never looked at
+`s.Label`, so `break outer` inside a nested loop emitted a bare `break;` and
+left the **inner** loop: the kernel compiled and computed something else. That
+is the failure "refuse, never mistranslate" exists to rule out, and it had
+been there since the first commit. A smaller one went with it: `params()`
+contributed nothing for an unnamed parameter, silently shifting every argument
+after it. `AssumeBlockDim` counting the whole block rather than `blockDim.x`
+is not in that list — it was not wrong while blocks were one-dimensional, it
+was a question that only arose once they were not.
+
+What these three left behind, as items rather than as prose:
+
+- [ ] **Multiple assignment**, and with it the tuple-returning
+      `ctx.GlobalID2()` / `ctx.ThreadIdx3()` this phase chose not to build.
+      It is one feature, not two: the emitter needs `a, b := f()` before any
+      intrinsic can return a pair.
+- [ ] **A `//gocuda:device` marker.** A helper that takes a `gpu.Ctx` is a
+      kernel by the signature rule, so calling one needs `//gocuda:ignore` —
+      which says what it is not, rather than what it is.
+- [ ] **Shared memory in a device function.** Refused today, because the size
+      and the block size it implies are accounted on the kernel and enforced
+      at its launch. Lifting that means propagating the accounting through the
+      call graph.
+
+One caveat on the evidence, since Phase 1.4 is still open: all of the above is
+verified on **one** GPU — a T550, `sm_75`, CUDA 12.8. The parity tests do not
+need CI to run, but they need CI to have run anywhere else.
 
 ## Phase 3 — Correctness at scale (L)
 

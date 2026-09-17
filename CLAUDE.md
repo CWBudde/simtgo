@@ -124,8 +124,14 @@ reference, so a shared misunderstanding cannot pass as agreement.
 - **Go `int` narrows to C `int`** (32-bit). This is the one deliberate
   infidelity; indices are bounded by the grid.
 - `ctx.AssumeBlockDim(n)` emits no code; it records a launch requirement that
-  both `Kernel.Launch` and `RunCPU` enforce. `Build` also refuses a kernel
-  whose shared memory exceeds the device limit.
+  both `Kernel.Launch` and `RunCPU` enforce. What it counts is threads per
+  block across all three axes, so a 16×16 block satisfies `AssumeBlockDim(256)`.
+  `Build` also refuses a kernel whose shared memory exceeds the device limit.
+- A kernel may call other functions in its package; each one it reaches is
+  emitted into the same translation unit as a `__device__` function. That is
+  why `lower.Kernel` takes the package's files and not just the entry point.
+  Recursion is refused, and so is calling a kernel — a function taking a
+  `gpu.Ctx` is one, unless it carries `//gocuda:ignore`.
 - Kernel packages may import **only** `github.com/CWBudde/gocuda/gpu`, and only
   `float32`/`int32`-shaped types exist on the device.
 - `cuda.Result` sentinels and `errors.Is` work in `!cuda` builds too — error
@@ -135,10 +141,13 @@ reference, so a shared misunderstanding cannot pass as agreement.
 
 1. Write it in `kernels/` (first param `gpu.Ctx`, `gpu` the only import).
 2. Add its name to `Gate` in `kernels/prebuilt/gate.go`.
-3. `go generate ./...` (or `gocuda generate -no-ptx` without a toolkit).
-4. Add it to the list in `simt/transpile_test.go`'s `TestGolden` and run with
+3. Add it to the list in `kernels/prebuilt/prebuilt_test.go`'s
+   `TestGateListsEveryKernel`, which is what catches a kernel missing from the
+   gate.
+4. `go generate ./...` (or `gocuda generate -no-ptx` without a toolkit).
+5. Add it to the list in `simt/transpile_test.go`'s `TestGolden` and run with
    `GOCUDA_UPDATE=1` to create `simt/testdata/<Name>.cu`.
-5. Add a CPU/GPU parity test in `simt/parity_test.go` with an independent Go
+6. Add a CPU/GPU parity test in `simt/parity_test.go` with an independent Go
    reference.
 
 Changing the emitter changes every `SourceHash`, so goldens *and*
