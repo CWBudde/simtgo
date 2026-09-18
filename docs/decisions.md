@@ -217,7 +217,7 @@ and never shipped, so the license covers only what the repository contains.
 Keep it that way — vendoring a toolkit library would make the license question
 somebody else's problem to answer.
 
-## Linting is `golangci-lint` and `treefmt`, with seven linters left off
+## Linting is `golangci-lint` and `treefmt`, and the seven deferred linters are on
 
 Trunk was dropped rather than migrated. An earlier version of the plan described
 a `.trunk/trunk.yaml` pinning `go@1.21.0` against a `go 1.26` module; that file
@@ -226,12 +226,76 @@ to fix. Recorded as a correction rather than a silent edit, because a plan that
 describes files it cannot see is the same failure as a README that describes
 code it does not have.
 
-Seven linters are enabled beyond the standard set, each measured clean before it
-was turned on. Seven more are left **off rather than suppressed** —
-`errorlint`, `perfsprint`, `predeclared`, `gocritic`, `intrange`,
-`wastedassign`, `revive` — because their findings are real and fixing them is a
-change to the emitter and the driver that belongs in its own commit. A config
-that excluded them would say the code is clean when it is not.
+Seven linters were enabled with the scaffolding, each measured clean first.
+Seven more were left **off rather than suppressed** — `errorlint`,
+`perfsprint`, `predeclared`, `gocritic`, `intrange`, `wastedassign`, `revive` —
+on the grounds that their findings were real and that fixing them belonged in
+its own commit rather than in an exclusion list. Those commits are in
+(2026-09-19); all fourteen are on, and what the seven actually found is below,
+because the count is the interesting part of the answer either way.
+
+**Seventy-one findings across the two build configurations, one of them a
+latent defect.** `simt/transpile_test.go` sliced a string at
+`strings.Index`'s result without testing it for −1, so a transpile that emitted
+no entry point would have panicked in the slice instead of failing with the
+source attached — in the one test that most needs to report what it got. The
+same shape sat twelve lines below, where the author had already written
+`decl < 0` into the assertion but the slice ran first. `gocritic`'s `offBy1`
+flags the first spelling and not the second.
+
+One more was wrong rather than merely untidy: `internal/fuzz`'s binary-chain
+generator wrote its bound as `i < 2+g.r.IntN(3)` and so re-rolled it on every
+iteration. The chain length was still 2 to 4, but not for the reason the code
+appeared to give, and each re-roll consumed a draw. Seeds map to different
+programs since; nothing pins that mapping, and the test that does pin
+determinism — same seed, same program — still holds.
+
+The seven `redefines-builtin-id` sites were not bugs and are worth naming
+anyway: `cmd/gocuda`'s `renderGen` declared `any := len(compiled) > 0` and used
+it twice, thirty lines apart, in a repository whose entire subject is which
+type a value has.
+
+The rest were what the deferral predicted, and the shape of the count is worth
+recording:
+
+| linter         |  n  | what it mostly was                                             |
+| -------------- | :-: | -------------------------------------------------------------- |
+| `perfsprint`   | 30  | `fmt.Sprintf` formatting one number, in the fuzz source writer |
+| `revive`       | 29  | 13 `unused-parameter`, 8 `exported`, 7 `redefines-builtin-id`  |
+| `intrange`     |  5  | `for i := 0; i < n; i++`                                       |
+| `gocritic`     |  3  | the `offBy1` above, an `appendAssign`, an `ifElseChain`        |
+| `errorlint`    |  3  | a type assertion where `errors.As` belongs                     |
+| `wastedassign` |  1  | a value overwritten before anything read it                    |
+
+`predeclared` reports nothing in that table and not because it found nothing:
+it flags the same seven positions as `revive`'s `redefines-builtin-id`, and
+`golangci-lint` deduplicates findings that share a position. Enabling it is
+still worth doing — it is the rule that survives if `revive` is ever narrowed —
+but it adds no coverage while `revive` is on.
+
+**Two findings were excluded rather than fixed, and the reasons are in
+`.golangci.yml` next to each.** `gocritic`'s `ifElseChain` is scoped out of
+`kernels/`: those files are input to the emitter, so rewriting an if/else chain
+as a tagless `switch` — which `SPEC.md` §3 says lowers back to an if/else chain
+anyway — would change the generated CUDA C, every `SourceHash` with it, and so
+every file under `simt/testdata/` and `kernels/prebuilt/`. Regenerating the
+whole artifact set for a cosmetic rule is the wrong trade. `revive`'s
+`unused-parameter` is scoped out of `cuda/stub.go`, where every parameter is
+unused by construction and the names are the whole of the godoc a machine with
+no CUDA gets: `Alloc(n int)` documents itself and `Alloc(_ int)` does not.
+`cuda/surface_test.go` compares exported _names_ and would have passed either
+spelling, which is exactly why the choice had to be argued rather than left to
+the linter.
+
+**A lint run sees one build configuration, and it is not the tagged one.**
+Three of the seventy-one were invisible to `golangci-lint run ./...` and were
+found only by passing `--build-tags cuda` by hand: a shadowed `min` in the
+NVRTC version call, a hand-counted loop and a `vote[i] += 1` in the parity
+tests. `just lint-cuda` is that run. It is not in CI, and while it is not, the
+driver's own half is linted by nobody unless somebody remembers — which is why
+running it before a release is written down here rather than assumed. That run
+also reports two `errcheck` findings in `cuda/driver_cuda.go` that predate all
+of this and are open work, not a decision.
 
 `golangci-lint` must be built with this module's own Go: the version check
 compares the toolchain that built the linter against `go.mod`, and a release

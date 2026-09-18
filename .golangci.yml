@@ -1,16 +1,22 @@
 # golangci-lint configuration.
 #
-# The set below is the tool's default plus a handful of linters that were
-# measured to be clean on this tree; nothing here is aspirational. A linter
-# that would need its findings silenced across the repository is left off
-# rather than enabled and muzzled, because a config that reports zero issues
-# only because it was told to is worse than no config at all.
+# The set below is the tool's default plus fourteen linters, every one of them
+# measured clean on this tree before it was turned on; nothing here is
+# aspirational. A linter that would need its findings silenced across the
+# repository is left off rather than enabled and muzzled, because a config that
+# reports zero issues only because it was told to is worse than no config at
+# all. Exactly two findings are scoped out, each next to the rule it belongs to
+# and each with the argument in full -- if a third ever wants to join them, the
+# bar is that same paragraph, not a path.
 #
 # Not covered: the `cuda`-tagged half of the tree. A single run sees one build
 # configuration, and the untagged one is where the transpiler, the analyzer and
 # the CPU emulator live -- the bulk of the code and all of the logic a lint can
 # reason about. The driver and NVRTC bindings behind //go:build cuda are
 # reached by `go vet -tags cuda ./...` in CI instead, which is weaker but real.
+# `just lint-cuda` is the full run for that half, and it is not automated:
+# three of the fourteen's findings were only ever visible there, and two
+# errcheck findings are open there now.
 version: "2"
 
 linters:
@@ -47,7 +53,7 @@ linters:
     # strings.Index's result without testing it for -1, two lines above a guard
     # the author had already written for exactly that case.
     - gocritic
-    # `for i := range n` is the spelling this module's Go has, and the four
+    # `for i := range n` is the spelling this module's Go has, and the five
     # loops it found were the only ones left writing the old one. One of them
     # re-evaluated its own bound on every iteration, which is what a C-style
     # loop lets you not notice.

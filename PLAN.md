@@ -401,17 +401,32 @@ reductions and 2-D tiling are a rewrite of it rather than an extension.
 - [ ] Device-resident tensors with explicit materialisation points (Phase 4).
 - [ ] Generic element types; richer shape diagnostics.
 
-## Phase 7 — Release engineering (S–M) — 2 of 7
+## Phase 7 — Release engineering (S–M) — 4 of 9
 
 - [x] LICENSE and the redistribution position. (2026-09-18) — MIT; `libnvrtc` is
       `dlopen`'d and never shipped.
       [Why MIT](docs/decisions.md#mit-and-libnvrtc-is-never-shipped).
 - [x] Repository scaffolding: `.golangci.yml`, `treefmt.toml`, CI. (2026-09-18)
-      — [what was left off and why](docs/decisions.md#linting-is-golangci-lint-and-treefmt-with-seven-linters-left-off).
-- [ ] The seven linters left off rather than suppressed — `errorlint`,
+      — [what was left off and why](docs/decisions.md#linting-is-golangci-lint-and-treefmt-and-the-seven-deferred-linters-are-on).
+- [x] The seven linters left off rather than suppressed — `errorlint`,
       `perfsprint`, `predeclared`, `gocritic`, `intrange`, `wastedassign`,
-      `revive`. Each is a real change to the emitter or the driver and belongs in
-      its own commit.
+      `revive`. (2026-09-19) — all seven on, one commit each; 71 findings across
+      both build configurations, of which one was a latent panic in
+      `simt/transpile_test.go` and one a fuzz loop that re-rolled its own bound.
+      Two excluded rather than fixed, each argued in `.golangci.yml`:
+      `ifElseChain` in `kernels/` (the rewrite would move every `SourceHash`)
+      and `unused-parameter` in `cuda/stub.go` (the names are that build's
+      godoc).
+      [What the seven found](docs/decisions.md#linting-is-golangci-lint-and-treefmt-and-the-seven-deferred-linters-are-on).
+- [x] A `justfile` for the local checks. (2026-09-19) — `just check` is the
+      non-GPU CI sequence in CI's order; `just lint-cuda` is the tagged half
+      nothing else lints. It mirrors the workflow rather than being called by
+      it, so no runner needs `just`. `sanitize` ships unexercised: no device
+      here.
+- [ ] Lint the `cuda`-tagged half in CI. Three of the seven linters' findings
+      were visible only under `--build-tags cuda`, and two `errcheck` findings
+      in `cuda/driver_cuda.go` are open there now. A second `golangci-lint` job
+      with the tag would close the gap the config's own header admits.
 - [ ] Semantic versioning, a v1 API freeze and a deprecation policy.
 - [ ] Godoc with runnable `Example` functions; `SPEC.md` as the reference.
 - [ ] CHANGELOG and release automation.
@@ -454,7 +469,7 @@ Naming these keeps the scope honest:
 | 4 Host runtime        | M    | 0 of 8   | 1.3        | streams change ownership semantics; the context bug is live   |
 | 5 Performance         | M    | 0 of 4   | 2, 4       | may expose NVRTC as the ceiling → revisit the PTX decision    |
 | 6 Tile maturity       | L    | 0 of 7   | 2, 4       | reductions and 2-D tiling are a rewrite of the code generator |
-| 7 Release             | S–M  | 2 of 7   | all        | —                                                             |
+| 7 Release             | S–M  | 4 of 9   | all        | —                                                             |
 
 The critical path is **1.4 → 3 → 5**. Phases 4 and 6 can run in parallel; 1.2's
 Windows leg is independent of everything else.
