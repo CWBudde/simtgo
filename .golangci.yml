@@ -34,6 +34,10 @@ linters:
     # `!cuda` build too. A bare type assertion is the one shape that keeps
     # working until somebody wraps the error once, and then stops.
     - errorlint
+    # The fuzz harness builds Go source one literal at a time, so formatting a
+    # number is not an incidental cost there; and fmt.Errorf with no verb is
+    # errors.New wearing a disguise, which is worth catching for its own sake.
+    - perfsprint
 
   settings:
     errcheck:

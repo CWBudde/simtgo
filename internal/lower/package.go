@@ -65,7 +65,7 @@ func LoadPackage(fsys fs.FS) (*Package, []Diagnostic, error) {
 		files = append(files, f)
 	}
 	if len(files) == 0 {
-		return nil, nil, fmt.Errorf("no Go source files in the kernel package")
+		return nil, nil, errors.New("no Go source files in the kernel package")
 	}
 
 	// The import rule is checked before type-checking so that it is reported

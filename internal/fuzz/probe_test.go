@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -66,23 +67,23 @@ func fieldText(f StructField, buf any, i int) string {
 	case KF64:
 		return f64text(f.get.(func(any, int) float64)(buf, i))
 	case KI32:
-		return fmt.Sprintf("%d", f.get.(func(any, int) int32)(buf, i))
+		return strconv.Itoa(int(f.get.(func(any, int) int32)(buf, i)))
 	case KI64:
-		return fmt.Sprintf("%d", f.get.(func(any, int) int64)(buf, i))
+		return strconv.FormatInt(f.get.(func(any, int) int64)(buf, i), 10)
 	case KU32:
-		return fmt.Sprintf("%d", f.get.(func(any, int) uint32)(buf, i))
+		return strconv.FormatUint(uint64(f.get.(func(any, int) uint32)(buf, i)), 10)
 	case KU64:
-		return fmt.Sprintf("%d", f.get.(func(any, int) uint64)(buf, i))
+		return strconv.FormatUint(f.get.(func(any, int) uint64)(buf, i), 10)
 	case KBool:
-		return fmt.Sprintf("%t", f.get.(func(any, int) bool)(buf, i))
+		return strconv.FormatBool(f.get.(func(any, int) bool)(buf, i))
 	case KI8:
-		return fmt.Sprintf("%d", f.get.(func(any, int) int8)(buf, i))
+		return strconv.Itoa(int(f.get.(func(any, int) int8)(buf, i)))
 	case KI16:
-		return fmt.Sprintf("%d", f.get.(func(any, int) int16)(buf, i))
+		return strconv.Itoa(int(f.get.(func(any, int) int16)(buf, i)))
 	case KU8:
-		return fmt.Sprintf("%d", f.get.(func(any, int) uint8)(buf, i))
+		return strconv.FormatUint(uint64(f.get.(func(any, int) uint8)(buf, i)), 10)
 	case KU16:
-		return fmt.Sprintf("%d", f.get.(func(any, int) uint16)(buf, i))
+		return strconv.FormatUint(uint64(f.get.(func(any, int) uint16)(buf, i)), 10)
 	}
 	panic("fuzz: cannot encode a struct field of kind " + f.Kind.goName())
 }
@@ -113,7 +114,7 @@ func fieldLiteral(f StructField, buf any, i int) string {
 	case KF64:
 		return fmt.Sprintf("math.Float64frombits(%#x)", math.Float64bits(f.get.(func(any, int) float64)(buf, i)))
 	case KBool:
-		return fmt.Sprintf("%t", f.get.(func(any, int) bool)(buf, i))
+		return strconv.FormatBool(f.get.(func(any, int) bool)(buf, i))
 	}
 	return fieldText(f, buf, i)
 }
@@ -131,39 +132,39 @@ func encodeSlice(v any) string {
 		}
 	case []bool:
 		for _, x := range v {
-			parts = append(parts, fmt.Sprintf("%t", x))
+			parts = append(parts, strconv.FormatBool(x))
 		}
 	case []int32:
 		for _, x := range v {
-			parts = append(parts, fmt.Sprintf("%d", x))
+			parts = append(parts, strconv.Itoa(int(x)))
 		}
 	case []int64:
 		for _, x := range v {
-			parts = append(parts, fmt.Sprintf("%d", x))
+			parts = append(parts, strconv.FormatInt(x, 10))
 		}
 	case []uint32:
 		for _, x := range v {
-			parts = append(parts, fmt.Sprintf("%d", x))
+			parts = append(parts, strconv.FormatUint(uint64(x), 10))
 		}
 	case []uint64:
 		for _, x := range v {
-			parts = append(parts, fmt.Sprintf("%d", x))
+			parts = append(parts, strconv.FormatUint(x, 10))
 		}
 	case []int8:
 		for _, x := range v {
-			parts = append(parts, fmt.Sprintf("%d", x))
+			parts = append(parts, strconv.Itoa(int(x)))
 		}
 	case []int16:
 		for _, x := range v {
-			parts = append(parts, fmt.Sprintf("%d", x))
+			parts = append(parts, strconv.Itoa(int(x)))
 		}
 	case []uint8:
 		for _, x := range v {
-			parts = append(parts, fmt.Sprintf("%d", x))
+			parts = append(parts, strconv.FormatUint(uint64(x), 10))
 		}
 	case []uint16:
 		for _, x := range v {
-			parts = append(parts, fmt.Sprintf("%d", x))
+			parts = append(parts, strconv.FormatUint(uint64(x), 10))
 		}
 	default:
 		panic(fmt.Sprintf("fuzz: cannot encode %T", v))
@@ -216,25 +217,25 @@ func goLiteral(v any) string {
 	case float64:
 		return fmt.Sprintf("math.Float64frombits(%#x)", math.Float64bits(v))
 	case []bool:
-		return sliceLiteral("bool", len(v), func(i int) string { return fmt.Sprintf("%t", v[i]) })
+		return sliceLiteral("bool", len(v), func(i int) string { return strconv.FormatBool(v[i]) })
 	case []int32:
-		return sliceLiteral("int32", len(v), func(i int) string { return fmt.Sprintf("%d", v[i]) })
+		return sliceLiteral("int32", len(v), func(i int) string { return strconv.Itoa(int(v[i])) })
 	case []int64:
-		return sliceLiteral("int64", len(v), func(i int) string { return fmt.Sprintf("%d", v[i]) })
+		return sliceLiteral("int64", len(v), func(i int) string { return strconv.FormatInt(v[i], 10) })
 	case []uint32:
-		return sliceLiteral("uint32", len(v), func(i int) string { return fmt.Sprintf("%d", v[i]) })
+		return sliceLiteral("uint32", len(v), func(i int) string { return strconv.FormatUint(uint64(v[i]), 10) })
 	case []uint64:
-		return sliceLiteral("uint64", len(v), func(i int) string { return fmt.Sprintf("%d", v[i]) })
+		return sliceLiteral("uint64", len(v), func(i int) string { return strconv.FormatUint(v[i], 10) })
 	case []int8:
-		return sliceLiteral("int8", len(v), func(i int) string { return fmt.Sprintf("%d", v[i]) })
+		return sliceLiteral("int8", len(v), func(i int) string { return strconv.Itoa(int(v[i])) })
 	case []int16:
-		return sliceLiteral("int16", len(v), func(i int) string { return fmt.Sprintf("%d", v[i]) })
+		return sliceLiteral("int16", len(v), func(i int) string { return strconv.Itoa(int(v[i])) })
 	case []uint8:
-		return sliceLiteral("uint8", len(v), func(i int) string { return fmt.Sprintf("%d", v[i]) })
+		return sliceLiteral("uint8", len(v), func(i int) string { return strconv.FormatUint(uint64(v[i]), 10) })
 	case []uint16:
-		return sliceLiteral("uint16", len(v), func(i int) string { return fmt.Sprintf("%d", v[i]) })
+		return sliceLiteral("uint16", len(v), func(i int) string { return strconv.FormatUint(uint64(v[i]), 10) })
 	case bool:
-		return fmt.Sprintf("%t", v)
+		return strconv.FormatBool(v)
 	case int:
 		return fmt.Sprintf("int(%d)", v)
 	case int32:
