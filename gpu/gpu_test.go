@@ -600,3 +600,52 @@ func TestFminFmaxFollowTheBuiltinTheyClaimToBe(t *testing.T) {
 		t.Error("Fmax(+0, -0) should be +0")
 	}
 }
+
+// TestFmin64Fmax64FollowTheBuiltinTheyClaimToBe is the double-precision half,
+// which was left wrapping math.Min and math.Max when the float32 pair stopped.
+//
+// The float32 functions had to be written out because there is no float32
+// math.Min to call; that these could still call one is why they kept the NaN
+// behaviour the float32 pair was corrected for. Everything below the NaNs is
+// math.Min's and agrees with fmin already -- Go documents Min(-0, +0) = -0 --
+// so only the NaN cases changed and only they need a test of their own.
+func TestFmin64Fmax64FollowTheBuiltinTheyClaimToBe(t *testing.T) {
+	nan := math.NaN()
+
+	cases := []struct {
+		name string
+		got  float64
+		want float64
+	}{
+		{name: "Fmin64 ignores a NaN on the right", got: gpu.Fmin64(1, nan), want: 1},
+		{name: "Fmin64 ignores a NaN on the left", got: gpu.Fmin64(nan, 1), want: 1},
+		{name: "Fmax64 ignores a NaN on the right", got: gpu.Fmax64(1, nan), want: 1},
+		{name: "Fmax64 ignores a NaN on the left", got: gpu.Fmax64(nan, 1), want: 1},
+		{name: "Fmin64 of two", got: gpu.Fmin64(2, 3), want: 2},
+		{name: "Fmax64 of two", got: gpu.Fmax64(2, 3), want: 3},
+		{name: "Fmin64 takes -Inf", got: gpu.Fmin64(math.Inf(-1), 1), want: math.Inf(-1)},
+		{name: "Fmax64 takes +Inf", got: gpu.Fmax64(math.Inf(1), 1), want: math.Inf(1)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.got != tc.want {
+				t.Errorf("got %v, want %v", tc.got, tc.want)
+			}
+		})
+	}
+
+	if !math.IsNaN(gpu.Fmin64(nan, nan)) {
+		t.Errorf("Fmin64(NaN, NaN) = %v, want NaN", gpu.Fmin64(nan, nan))
+	}
+	if !math.IsNaN(gpu.Fmax64(nan, nan)) {
+		t.Errorf("Fmax64(NaN, NaN) = %v, want NaN", gpu.Fmax64(nan, nan))
+	}
+
+	negZero := math.Copysign(0, -1)
+	if !math.Signbit(gpu.Fmin64(negZero, 0)) || !math.Signbit(gpu.Fmin64(0, negZero)) {
+		t.Error("Fmin64 of the two zeros should be -0 either way round")
+	}
+	if math.Signbit(gpu.Fmax64(negZero, 0)) || math.Signbit(gpu.Fmax64(0, negZero)) {
+		t.Error("Fmax64 of the two zeros should be +0 either way round")
+	}
+}

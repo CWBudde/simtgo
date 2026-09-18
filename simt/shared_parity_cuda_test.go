@@ -9,6 +9,7 @@ import (
 
 	"github.com/CWBudde/gocuda"
 	"github.com/CWBudde/gocuda/cuda"
+	"github.com/CWBudde/gocuda/internal/tolerance"
 	"github.com/CWBudde/gocuda/simt"
 )
 
@@ -104,7 +105,7 @@ func TestHistogramParity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Download: %v", err)
 	}
-	assertEqual(t, "bins", got, histogram(x, bins))
+	tolerance.AssertEqual(t, "bins", got, histogram(x, bins))
 }
 
 // dynProbe privatises a histogram in shared memory, with the tile sized at
@@ -175,7 +176,7 @@ func TestDynamicSharedTileParity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Download: %v", err)
 	}
-	assertEqual(t, "bins", got, histogram(x, bins))
+	tolerance.AssertEqual(t, "bins", got, histogram(x, bins))
 }
 
 // TestLaunchRefusesTheWrongSharedSpelling pins the two typed errors, which
@@ -308,5 +309,5 @@ func TestTypedSharedTileParity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Download: %v", err)
 	}
-	assertEqual(t, "out", got, want)
+	tolerance.AssertEqual(t, "out", got, want)
 }

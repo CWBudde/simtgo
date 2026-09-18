@@ -234,6 +234,19 @@ func TestGeneratedCCompiles(t *testing.T) {
 		// these are the unsuffixed names, and an unsuffixed name that NVRTC
 		// resolved to the float overload instead would compile silently and
 		// halve the precision the kernel asked for.
+		// The float32 half of the same question, and it was the half with a
+		// hole in it. fabsf and hypotf reach NVRTC through the committed
+		// kernels and sqrtf through a golden, but sinf, cosf, expf, logf,
+		// fminf and fmaxf sat in the name table in internal/lower with no
+		// compiler between them and a claim.
+		name: "the float32 gpu helpers with no headers included",
+		body: "func K(ctx gpu.Ctx, out, a, b []float32) {\n" +
+			"\ti := ctx.GlobalID()\n" +
+			"\tif i < len(out) {\n" +
+			"\t\tout[i] = gpu.Fmax(gpu.Hypot(gpu.Sqrt(gpu.Abs(a[i])), b[i]),\n" +
+			"\t\t\tgpu.Fmin(gpu.Log(gpu.Exp(a[i])), gpu.Sin(a[i])+gpu.Cos(b[i])))\n" +
+			"\t}\n}",
+	}, {
 		name: "the float64 gpu helpers with no headers included",
 		body: "//gocuda:float64\n" +
 			"func K(ctx gpu.Ctx, out, a, b []float64) {\n" +

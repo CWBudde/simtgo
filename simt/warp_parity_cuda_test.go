@@ -9,6 +9,7 @@ import (
 	"github.com/CWBudde/gocuda"
 	"github.com/CWBudde/gocuda/cuda"
 	"github.com/CWBudde/gocuda/gpu"
+	"github.com/CWBudde/gocuda/internal/tolerance"
 	"github.com/CWBudde/gocuda/kernels"
 	"github.com/CWBudde/gocuda/simt"
 )
@@ -57,7 +58,7 @@ func TestWarpReduceSumParity(t *testing.T) {
 
 	cpu := make([]float32, warps)
 	gpu.RunCPU(grid, block, func(c gpu.Ctx) { kernels.WarpReduceSum(c, cpu, x) })
-	assertEqual(t, "cpu sums", cpu, want)
+	tolerance.AssertEqual(t, "cpu sums", cpu, want)
 
 	k, err := simt.Build(ctx, gocuda.Kernels(), "WarpReduceSum")
 	if err != nil {
@@ -75,7 +76,7 @@ func TestWarpReduceSumParity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Download: %v", err)
 	}
-	assertEqual(t, "sums", got, want)
+	tolerance.AssertEqual(t, "sums", got, want)
 }
 
 // TestWarpVocabularyParity is the rest of the vocabulary, as a probe kernel
@@ -179,8 +180,8 @@ func WarpProbe(ctx gpu.Ctx, bcast, up []float32, mask, vote []int32, x []float32
 	gv, _ := dvote.Download()
 	// Exact: every one of these moves a value or a bit, and none of them does
 	// any arithmetic that could round.
-	assertEqual(t, "broadcast", gb, bcast)
-	assertEqual(t, "shuffle up", gu, up)
-	assertEqual(t, "ballot", gm, mask)
-	assertEqual(t, "votes", gv, vote)
+	tolerance.AssertEqual(t, "broadcast", gb, bcast)
+	tolerance.AssertEqual(t, "shuffle up", gu, up)
+	tolerance.AssertEqual(t, "ballot", gm, mask)
+	tolerance.AssertEqual(t, "votes", gv, vote)
 }
