@@ -51,6 +51,7 @@ package hostrun
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -62,6 +63,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/CWBudde/gocuda/gpu"
 	"github.com/CWBudde/gocuda/internal/lower"
@@ -105,6 +107,41 @@ func (e *CompileError) Error() string {
 }
 
 func (e *CompileError) Unwrap() error { return e.Err }
+
+// runTimeout bounds how long the compiled driver may take.
+//
+// A kernel that does not terminate is a case this oracle has to report rather
+// than sit in. The fuzzer produced one: a generated program whose C looped for
+// good, and because nothing bounded the child, that single input took a whole
+// fuzz worker with it -- no diagnosis, no failing case recorded, and a run
+// that spent its budget waiting. It is the reasoning gpu.warpStallTimeout is
+// written from: a deadlock is the worst thing a test suite can be handed, so
+// the wait gives up and says so.
+//
+// The bound is generous on purpose, because this is the wrong place to be
+// clever. The driver runs the whole grid one thread at a time, and every
+// program the committed kernels and the generator produce finishes in
+// milliseconds, so anything near this is not slow but stuck. It is a variable
+// rather than a constant only so the tests can make the wait short.
+var runTimeout = 20 * time.Second
+
+// A TimeoutError is the compiled driver still running when the bound expired.
+//
+// It is its own type because it is its own finding. A CompileError is a defect
+// in the translation and a RunError is the program failing; this is a kernel
+// that does not finish, which may be either -- the generator writing a loop
+// nothing ends, or the emitter lowering a loop that does end into one that
+// does not -- and a caller has to be able to tell it apart to say which.
+type TimeoutError struct {
+	Kernel string
+	After  time.Duration
+}
+
+func (e *TimeoutError) Error() string {
+	return fmt.Sprintf("hostrun: the driver for %s was still running after %s; "+
+		"a kernel that does not terminate is a finding rather than something to wait for",
+		e.Kernel, e.After)
+}
 
 // A RunError is the compiled driver failing to run to completion.
 type RunError struct {
@@ -150,12 +187,23 @@ func Run(u *lower.Unit, grid, block gpu.Dim, args ...any) error {
 		return err
 	}
 
+	// CommandContext kills the child when the bound expires. WaitDelay gives
+	// it a moment to die before the pipes are closed out from under it, so a
+	// killed run is reported as the timeout it was rather than as a broken
+	// pipe from a process nobody is talking to any more.
+	ctx, cancel := context.WithTimeout(context.Background(), runTimeout)
+	defer cancel()
+
 	var stdout, stderr bytes.Buffer
-	cmd := exec.Command(bin)
+	cmd := exec.CommandContext(ctx, bin)
+	cmd.WaitDelay = time.Second
 	cmd.Stdin = bytes.NewReader(encode(grid, block, slots))
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return &TimeoutError{Kernel: u.Name, After: runTimeout}
+		}
 		return &RunError{Kernel: u.Name, Stderr: stderr.String(), Err: err}
 	}
 	return decode(u.Name, stdout.Bytes(), slots)

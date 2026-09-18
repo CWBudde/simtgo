@@ -697,7 +697,31 @@ A transpiler is trusted through evidence, not review.
       There is no struct node in the IR, which leaves the padding members, the
       `sizeof` assertion standing in for offsets NVRTC cannot assert, and the
       `ctype`/`ctypeElem` split untested by this route. That is the next thing
-      the generator wants.
+      the generator wants, and the design is settled even though the code is
+      not:
+
+      - **A fixed catalogue of shapes, declared as real Go types** in
+        `internal/fuzz`, rather than shapes invented at run time. The closure
+        renderer has to hold real values and there is no way to make a Go type
+        at run time, so the catalogue is what lets both renderings be the same
+        type. Pick the shapes for their holes: `{int8; float32}` pads three
+        bytes, `{float32; int64}` pads four to reach an alignment of eight, and
+        a trailing hole needs a wide field first and a narrow one last.
+      - **Field access, not struct values.** A `Field` node -- base, index,
+        field -- whose `kind()` is the *field's* kind. That is what keeps the
+        change confined: every existing per-kind compiler in `closure.go` then
+        handles the result unchanged, and the struct never has to become a kind
+        of its own in the ~200 `case K…` sites those compilers are made of.
+      - **`hostrun` needs nothing.** It already marshals a struct slice as its
+        Go bytes, which is sound exactly because the emitter asserts the C
+        struct's size; that assertion is most of what this would be testing.
+      - The cost is per-(shape, field) typed accessors so the closure stays
+        unboxed, which is the property `closure.go`'s frame exists to have.
+
+      **NVRTC is the oracle that matters here**, and it needs no execution: the
+      emitter writes a `static_assert` on the struct's size, so a wrong layout
+      fails to compile. A generated struct reaching `cuda.Compile` is the whole
+      test.
 
       41.1% of generated programs are in the host oracle's scope — a barrier, a
       warp primitive, an atomic or a shared tile means something a sequential
