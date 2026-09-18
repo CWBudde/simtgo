@@ -67,7 +67,11 @@ jobs:
         env:
           FUZZTIME: ${{ inputs.fuzztime || '20m' }}
         run: |
-          go test -run '^$' -fuzz '^${{ matrix.target }}$' -fuzztime "$FUZZTIME" ./simt/
+          # -timeout 0 because go test's own default is ten minutes and the
+          # search is twenty: without it the binary panics halfway through and
+          # the job reports a timeout rather than whatever the fuzzer had found.
+          # The search is bounded by -fuzztime, and the job by the runner.
+          go test -timeout 0 -run '^$' -fuzz '^${{ matrix.target }}$' -fuzztime "$FUZZTIME" ./simt/
 
       # A failure writes the input that caused it into the package's testdata,
       # where it is the whole of what somebody needs to reproduce the case.

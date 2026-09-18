@@ -205,18 +205,25 @@ documents the remaining special values; **[cited]** Go specifies
 
 ### Go's `min` and `max` are a different function
 
-**[measured]** The builtins lower to CUDA's `min`/`max`
-(`internal/lower/expr.go`), and NVRTC compiles `min(a, b)` and `fminf(a, b)` to
-the **same** PTX instruction — a probe containing both emits one `min.f32` and
-stores its result twice.
+**[cited]** In Go they are not the same function as CUDA's: the specification
+says a builtin `min` with a NaN operand returns NaN, and CUDA's `fminf` follows
+IEEE `minNum`, which ignores a NaN operand and returns the number.
 
-**[cited]** In Go they are not the same function: the specification says a
-builtin `min` with a NaN operand returns NaN.
+**[measured]** So a kernel written with `min(a, b)` agreed with itself on both
+backends for ordinary numbers and disagreed the moment a NaN reached it. This
+section used to end "nothing currently tests this"; the differential fuzzer
+tested it, in six seconds, by putting NaN in the input distribution and
+generating `min(0.0/0.0, x)`.
 
-So a kernel written with `min(a, b)` agrees with itself on both backends for
-ordinary numbers and disagrees the moment a NaN reaches it — the emulator
-propagates and the device does not. Nothing currently tests this, and no kernel
-in `kernels/` is affected. Prefer `gpu.Fmin` where a NaN is possible.
+**The float builtins are now refused**, pointing at `gpu.Fmin`/`gpu.Fmax`,
+which mean the device's answer on both backends — see `SPEC.md`. The _integer_
+overloads still lower to CUDA's `min`/`max` and are untouched, no integer being
+a NaN.
+
+**[measured]** For the record, since it is what made the disagreement invisible:
+NVRTC compiles `min(a, b)` and `fminf(a, b)` to the **same** PTX instruction. A
+probe containing both emits one `min.f32` and stores its result twice, so the
+generated code gave no sign that the two languages disagreed about it.
 
 ## Converting a float to an integer it does not fit
 

@@ -836,6 +836,19 @@ A transpiler is trusted through evidence, not review.
       which wraps at 64 bits where the device wraps at 32; and `MinInt / -1` is
       still undefined on the device, which routing through unsigned cannot fix.
 
+- [ ] **Signed zero, host against emulator.** The fuzzer's next find after the
+      wrapping went in, and **not** caused by it: `fuzz.Generate(620)` with
+      inputs `77` writes `+0` on the host where the emulator writes `-0`, and
+      it reproduces identically on the commit before. `internal/tolerance`
+      deliberately treats the two zeros as different results rather than a
+      rounding — a relative bound cannot tell them apart, their difference
+      being zero while their bits are not — so the differential reports it.
+      What is not yet established is which side is right, and whether it is a
+      constant-folding difference (Go folds a float constant expression at
+      arbitrary precision and rounds once) or something in the translation.
+      Not committed as a corpus entry, because an entry is a test and this one
+      fails.
+
       **Seven defects in all, in roughly half an hour of searching**, five of
       them in the emitter and two in the oracle. That ratio is worth
       recording: an oracle this young has its own bugs, and a differential
