@@ -67,6 +67,10 @@ func (t *Tensor) run() (*cuda.Slice[float32], func(), error) {
 		args = append(args, s)
 	}
 
+	if err := checkAliasing(args); err != nil {
+		return nil, cleanup, err
+	}
+
 	flat, err := cuda.BuildArgs(args...)
 	if err != nil {
 		return nil, cleanup, err

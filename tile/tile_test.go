@@ -112,3 +112,37 @@ func TestChainedWindowRejected(t *testing.T) {
 		t.Fatalf("got %v, want a chaining error", err)
 	}
 }
+
+// TestStepwiseSharesOneBufferBetweenTwoInputs is the live case for the
+// launch-time aliasing check, and it is an accepted one.
+//
+// MaterializeStepwise caches a materialised node's buffer, so a node feeding
+// both operands of a binary op is handed to the kernel twice: p0 and p1 are
+// one allocation. Both are read-only and the output is a fresh buffer, which
+// is exactly what restrict allows, so the launch must go through and compute
+// the right numbers rather than be refused for looking suspicious. The fused
+// path cannot reach this at all -- generate emits one parameter per distinct
+// node -- so stepwise is the only way to ask the question.
+func TestStepwiseSharesOneBufferBetweenTwoInputs(t *testing.T) {
+	ctx := device(t)
+	const n = 1 << 12
+	xs := signal(n, 7)
+
+	g := tile.New(ctx)
+	doubled := tile.Scale(g.Input(xs), 2)
+	out := tile.Mul(doubled, doubled)
+
+	got, launches, err := out.MaterializeStepwise()
+	if err != nil {
+		t.Fatalf("MaterializeStepwise: %v", err)
+	}
+	if launches != 2 {
+		t.Errorf("launched %d kernels, want 2 (the scale, then the square)", launches)
+	}
+
+	want := make([]float32, n)
+	for i, x := range xs {
+		want[i] = (2 * x) * (2 * x)
+	}
+	tolerance.AssertClose(t, "square of a scaled signal", want, got, 1e-6)
+}
