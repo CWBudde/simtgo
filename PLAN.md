@@ -19,7 +19,7 @@ What the PoC is not:
 | ------------ | ---------------------------------------------------------- | -------------------------------------------- |
 | Driver API   | 18 calls, fully synchronous                                | streams, events, async copies, pinned memory |
 | Grids        | ~~1-D only~~ 1-D/2-D/3-D                                   | —                                            |
-| Types        | `float32`, `int32`/`int`                                   | integers, `float64`, structs, fixed arrays   |
+| Types        | ~~`float32`, `int32`/`int`~~ scalars, structs, arrays      | narrow integers, `float64` math              |
 | Kernel calls | ~~none~~ `__device__` functions, recursion refused         | —                                            |
 | Errors       | surface at **run time**, inside `main()`                   | at **build time**                            |
 | Toolchain    | ~~hard-coded `/usr/local/cuda`~~ run-time `dlopen`, no cgo | Windows                                      |
@@ -266,8 +266,73 @@ Phase 3, so pulling it forward would be doing that item, not this one.
       counts threads per block across all three axes on both sides.
       `kernels.Transpose` is the proof, verified exactly against an
       independent reference.
-- [ ] **Types.** `int32`/`uint32`/`int64` slices, opt-in `float64`, `bool`,
-      structs of scalars → CUDA structs, fixed-size arrays.
+- [x] **Types.** `int32`/`uint32`/`int64` slices, opt-in `float64`, `bool`,
+      structs of scalars → CUDA structs, fixed-size arrays. (2026-09-18) —
+      `uint32` and `bool` turned out to lower already, with nothing testing
+      that they did and a refusal still reading "float32/int32 only"; they now
+      have both. `int64`/`uint64` are `long long`, never `long`, which is 4
+      bytes on Windows. `float64` is opt-in through `//gocuda:float64` on the
+      kernel or its file, read exactly as `//gocuda:ignore` is; the permission
+      covers the whole translation unit and a device function may not carry its
+      own, for the reason `SharedF32` may not either. A struct's layout is
+      stated by `go/types` and checked by NVRTC — `static_assert` on `sizeof`
+      and `alignof`, the emitter never modelling the C ABI itself. Arrays are
+      storage: declared, indexed, `len`, `range`, and nothing that moves one as
+      a value.
+
+      Three defects were found rather than designed, and the first was live.
+
+      **`[]int` was corrupting.** `ctype` mapped Go's `int` to C's, a narrowing
+      that is fine for a value passed on its own and is a different *stride*
+      for an element: `cuda.Upload` copies 8 bytes each and the kernel read 4.
+      On the T550, doubling `[1 2 3 4 5 6 7 8]` returned `[2 4 6 8 0 0 0 0]`.
+      It lowered, compiled, launched and answered wrongly, which is exactly
+      what "refuse, never mistranslate" exists to rule out — and it had been
+      there since the narrowing was written. `int` in any position with a
+      layout is refused now.
+
+      **`LaunchSync` gave every parameter a fixed 8-byte slot.** Latent, since
+      nothing wider existed; a 16-byte struct by value would have had its tail
+      dropped. Reverting the fix makes `TestStructLayoutRoundTrip` report
+      `Bias` as 0 and `TestBandGainParity` miss by exactly `Bias*Count`, so
+      both are regression tests for it rather than tests that happen to pass.
+
+      **`constant()` rendered every float at 32 bits** with an `f` suffix,
+      which would have rounded every double silently and turned anything past a
+      float's range into `+Inf`, and refused a legal `uint64` above `MaxInt64`
+      as "does not fit in an int64".
+
+      What the measurements settled, rather than the reasoning: NVRTC has no
+      `offsetof` and no `__builtin_offsetof`, because it compiles a string with
+      no include path — `nvcc -ptx` accepts the former and would have given the
+      wrong answer. So the assertions reach `sizeof` and `alignof`, and the
+      offsets are pinned by reading every field back through the device, which
+      tests the `cuda.Upload` copy path rather than the compiler's opinion of
+      it. `min`/`max` on `double` do resolve under NVRTC; `expr.go` claimed so
+      in a comment and now there is a test.
+
+      `gpu` needed no change at all: global memory in the emulator is an
+      ordinary Go slice, so `[]int64`, `[]float64` and `[]Band` ran under
+      `RunCPU` before any of this. The seven existing kernels' generated C is
+      byte-identical, so the regeneration added two `.cu`, two `.ptx` and two
+      constants and rewrote nothing.
+
+      Left behind, as items rather than as prose:
+
+      - [ ] **Double-precision `gpu` math** — `Sqrt64`, `Hypot64` and the rest,
+            mapping to CUDA's unsuffixed `sqrt`/`hypot` and legal only under
+            `//gocuda:float64`. A `float64` kernel currently gets arithmetic,
+            comparison and conversion and nothing from `gpu`, which `go/types`
+            reports as an ordinary type error rather than as a missing feature.
+      - [ ] **Narrow integer storage** — `[]uint8` image buffers and the like.
+            The widths already agree; the arithmetic does not, because C
+            promotes to `int` and Go does not. The honest design is a
+            storage-only type that forces a conversion to `int32` before any
+            operator, which is a feature rather than a line in a switch.
+      - [ ] **Array-typed struct fields.** Refused today because `sizeof` and
+            `alignof` cannot say where inside the struct the array begins.
+            Lifting it belongs with offset checking, not with the field rule.
+
 - [ ] **Shared memory.** Typed (`SharedI32`, …) and dynamically sized at launch.
 - [ ] **Atomics.** `atomicAdd`/`Min`/`Max`/`CAS`, with a Go-side vocabulary
       that the emulator implements faithfully.
