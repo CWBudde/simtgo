@@ -905,7 +905,7 @@ func (c *compiler) minmax(e *MinMax) code {
 }
 
 // goMinMax is Go's builtin, called as Go's builtin. It is deliberately not
-// gpu.Fmin: PLAN.md records that the two disagree about a NaN operand, and the
+// gpu.Fmin: NUMERICS.md records that the two disagree about a NaN operand, and the
 // oracle has to compute what the generated Go source says rather than what the
 // device is expected to answer.
 func goMinMax[T ordered](hi bool, x, y func(*frame) T) func(*frame) T {

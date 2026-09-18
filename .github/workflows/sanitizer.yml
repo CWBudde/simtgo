@@ -13,7 +13,7 @@
 # has no self-hosted one registered. The job is written against the runner
 # PLAN.md's Phase 1.4 will provide, and workflow_dispatch keeps it from queueing
 # forever in the meantime. Until then the sweep is a local command, recorded in
-# CLAUDE.md, and its results are in PLAN.md rather than in a badge.
+# CLAUDE.md, and its results are in docs/verification.md rather than in a badge.
 
 name: compute-sanitizer
 

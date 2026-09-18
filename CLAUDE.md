@@ -4,15 +4,33 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A proof of concept for writing CUDA kernels in Go, answering NVIDIA's _CUDA
-Rust_ post with two Go analogues: a **SIMT track** (`simt`) that lowers a Go
-subset to CUDA C at the source level, and a **tile track** (`tile`) that
-records a graph of ops and fuses it into one generated kernel. `README.md` is
-the full design rationale; `PLAN.md` is the roadmap from PoC to 1.0 and tracks
-which phases are done. `SPEC.md` is the contract — what the subset accepts and
-refuses, checked against `simt/errors_test.go` by `simt/spec_test.go` — and
-`NUMERICS.md` says what the device does to a `float32` and what a test may
-therefore assert.
+A library for writing CUDA kernels in Go, answering NVIDIA's _CUDA Rust_ post
+with two Go analogues: a **SIMT track** (`simt`) that lowers a Go subset to
+CUDA C at the source level, and a **tile track** (`tile`) that records a graph
+of ops and fuses it into one generated kernel.
+
+Where things are written down, because a claim in the wrong file drifts:
+
+- `README.md` — what this is, the two tracks, the subset, how to run it.
+- `SPEC.md` — the contract: what the subset accepts and refuses, checked
+  against `simt/errors_test.go` by `simt/spec_test.go`, which fails in both
+  directions.
+- `NUMERICS.md` — what the device does to a `float32` and what a test may
+  therefore assert.
+- `PLAN.md` — the roadmap: **open work only**, plus a short note per phase.
+  Findings do not go here.
+- `docs/` — the engineering record, filed by subject:
+  [`decisions.md`](docs/decisions.md) (settled questions and why),
+  [`emitter-defects.md`](docs/emitter-defects.md) (every mistranslation found
+  and what catches it now), [`verification.md`](docs/verification.md) (the
+  layers of checking and what each cannot see),
+  [`toolchain.md`](docs/toolchain.md) (measured driver/NVRTC/PTX behaviour),
+  [`tile.md`](docs/tile.md).
+
+**When a piece of work turns up a durable finding — a measurement, a defect
+post-mortem, a reason a design had to be that way — it belongs in `docs/`, and
+`PLAN.md` gets one line and a link.** A closed roadmap item should shrink the
+plan, not grow it.
 
 ## Commands
 
@@ -230,5 +248,6 @@ Changing the emitter changes every `SourceHash`, so goldens _and_
 
 Technical content is English. Comments here explain _why_ a thing is the way it
 is — including honest limits — rather than restating the code; match that
-register. `README.md` and `PLAN.md` state measured numbers and explicit
-non-goals; do not let a claim drift from what the code does.
+register. `README.md`, `PLAN.md` and `docs/` state measured numbers and
+explicit non-goals; do not let a claim drift from what the code does, and say
+where a number was measured — one machine is one machine.

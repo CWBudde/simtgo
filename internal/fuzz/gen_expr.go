@@ -579,7 +579,7 @@ func (g *gen) conv(k Kind, d int) Expr {
 // same expression computes two different things.
 //
 // The generator used to emit the builtins on floats deliberately, with a
-// comment saying PLAN.md recorded the disagreement as untested. It is tested
+// comment saying NUMERICS.md recorded the disagreement as untested. It is tested
 // now -- the host differential found it in six seconds -- and the subset
 // refuses the shape, so generating it would only be generating a refusal.
 func (g *gen) minMax(k Kind, x, y Expr) Expr {
