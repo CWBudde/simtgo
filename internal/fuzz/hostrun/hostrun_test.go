@@ -539,47 +539,83 @@ func same(got, want any, tol float64) bool { return tolerance.Agree(got, want, t
 // not open -- gpu.Fmin returns -0 and gpu.Fmax +0 -- so the shim pins it, and
 // this is what says it stayed pinned.
 //
-// Every case runs both ways and the two must agree bit for bit, which is why
-// the comparison is on the bits rather than on the values: +0 == -0 is true in
-// both languages, so an == here would pass whatever the shim did.
+// Both precisions run, because the shim wraps fminf and fmin separately: a
+// regression in the doubles' zero handling would leave the floats' wrappers
+// untouched, and a test of one alone would call that fixed.
 func TestFminFmaxAgreeOnTheZeros(t *testing.T) {
 	if err := hostrun.Available(); err != nil {
 		t.Skipf("no host C++ compiler: %v", err)
 	}
-	const src = "package kernels\n\nimport \"github.com/CWBudde/gocuda/gpu\"\n\n" +
+	const prelude = "package kernels\n\nimport \"github.com/CWBudde/gocuda/gpu\"\n\n"
+	const single = prelude +
 		"func Zeros(ctx gpu.Ctx, y []float32, a, b float32) {\n" +
 		"\ty[0] = gpu.Fmin(a, b)\n" +
 		"\ty[1] = gpu.Fmax(a, b)\n" +
 		"\ty[2] = gpu.Fmin(b, a)\n" +
 		"\ty[3] = gpu.Fmax(b, a)\n}\n"
+	const double = prelude + "//gocuda:float64\n" +
+		"func Zeros(ctx gpu.Ctx, y []float64, a, b float64) {\n" +
+		"\ty[0] = gpu.Fmin64(a, b)\n" +
+		"\ty[1] = gpu.Fmax64(a, b)\n" +
+		"\ty[2] = gpu.Fmin64(b, a)\n" +
+		"\ty[3] = gpu.Fmax64(b, a)\n}\n"
+
+	t.Run("float32", func(t *testing.T) {
+		zerosStayPinned(t, single, func(x float32) uint64 { return uint64(math.Float32bits(x)) }, 1<<31,
+			func(a, b float32) (out [4]float32) {
+				gpu.RunCPU(1, 1, func(c gpu.Ctx) {
+					out[0], out[1] = gpu.Fmin(a, b), gpu.Fmax(a, b)
+					out[2], out[3] = gpu.Fmin(b, a), gpu.Fmax(b, a)
+				})
+				return out
+			})
+	})
+	t.Run("float64", func(t *testing.T) {
+		zerosStayPinned(t, double, math.Float64bits, 1<<63,
+			func(a, b float64) (out [4]float64) {
+				gpu.RunCPU(1, 1, func(c gpu.Ctx) {
+					out[0], out[1] = gpu.Fmin64(a, b), gpu.Fmax64(a, b)
+					out[2], out[3] = gpu.Fmin64(b, a), gpu.Fmax64(b, a)
+				})
+				return out
+			})
+	})
+}
+
+// zerosStayPinned runs one Zeros kernel on the host and in the emulator and
+// holds the four answers to each other, then to the direction the shim pins.
+//
+// Every case runs both ways and the two must agree bit for bit, which is why
+// the comparison is on the bits rather than on the values: +0 == -0 is true in
+// both languages, so an == here would pass whatever the shim did. negZero is
+// the sign bit of the width under test, and +0 is zero in either.
+func zerosStayPinned[T float32 | float64](t *testing.T, src string,
+	bits func(T) uint64, negZero uint64, emulate func(a, b T) [4]T,
+) {
+	t.Helper()
 	u, err := simt.Transpile(fstest.MapFS{"k.go": &fstest.MapFile{Data: []byte(src)}}, "Zeros")
 	if err != nil {
 		t.Fatalf("Transpile: %v", err)
 	}
 
-	pos, neg := float32(0), float32(math.Copysign(0, -1))
-	host := make([]float32, 4)
+	pos, neg := T(0), T(math.Copysign(0, -1))
+	host := make([]T, 4)
 	if err := hostrun.Run(u, gpu.D1(1), gpu.D1(1), host, pos, neg); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	cpu := make([]float32, 4)
-	gpu.RunCPU(1, 1, func(c gpu.Ctx) {
-		cpu[0], cpu[1] = gpu.Fmin(pos, neg), gpu.Fmax(pos, neg)
-		cpu[2], cpu[3] = gpu.Fmin(neg, pos), gpu.Fmax(neg, pos)
-	})
+	cpu := emulate(pos, neg)
 
 	for i, name := range []string{"Fmin(+0,-0)", "Fmax(+0,-0)", "Fmin(-0,+0)", "Fmax(-0,+0)"} {
-		h, c := math.Float32bits(host[i]), math.Float32bits(cpu[i])
-		if h != c {
-			t.Errorf("%s: host %#08x, emulator %#08x", name, h, c)
+		if h, c := bits(host[i]), bits(cpu[i]); h != c {
+			t.Errorf("%s: host %#x, emulator %#x", name, h, c)
 		}
 	}
 	// And the direction, so that a shim which merely made them agree on the
 	// wrong answer would still fail: the smaller zero is negative.
-	if got := math.Float32bits(host[0]); got != 0x80000000 {
-		t.Errorf("Fmin of the two zeros is %#08x on the host, want -0", got)
+	if got := bits(host[0]); got != negZero {
+		t.Errorf("Fmin of the two zeros is %#x on the host, want -0", got)
 	}
-	if got := math.Float32bits(host[1]); got != 0 {
-		t.Errorf("Fmax of the two zeros is %#08x on the host, want +0", got)
+	if got := bits(host[1]); got != 0 {
+		t.Errorf("Fmax of the two zeros is %#x on the host, want +0", got)
 	}
 }

@@ -3,7 +3,6 @@ package fuzz
 import (
 	"fmt"
 	"reflect"
-	"strconv"
 
 	"github.com/CWBudde/gocuda/internal/tolerance"
 )
@@ -56,7 +55,9 @@ func compareStructs(spec ParamSpec, got, want any, tol float64) []Mismatch {
 			if tolerance.Agree(g, w, tol) {
 				continue
 			}
-			out = append(out, Mismatch{Param: spec.Name + "[" + strconv.Itoa(i) + "]." + f.Name,
+			// The field path carries no index: String appends one, and a
+			// path that spelled it too would report p[3].B as p[3].B[3].
+			out = append(out, Mismatch{Param: spec.Name + "." + f.Name,
 				Index: i, Got: g, Want: w})
 			if len(out) >= maxMismatches {
 				return out
