@@ -46,8 +46,15 @@ func (t *transpiler) structType(named *types.Named, pos token.Pos) string {
 	fmt.Fprintf(&b, "struct %s\n{\n", name)
 	fields := make([]*types.Var, st.NumFields())
 	for i := range fields {
-		f := st.Field(i)
-		fields[i] = f
+		fields[i] = st.Field(i)
+	}
+	// Where Go puts each field, which is the thing the C++ compiler has to be
+	// made to agree with. See padding below for what is done with it.
+	offsets := t.sizes.Offsetsof(fields)
+	layout := structLayout{padBefore: make([]bool, len(fields))}
+	next, pads := int64(0), 0
+
+	for i, f := range fields {
 		if f.Embedded() {
 			// A promoted field is selected through a path rather than a name,
 			// and flattening that buys nothing a named field does not.
@@ -63,7 +70,16 @@ func (t *transpiler) structType(named *types.Named, pos token.Pos) string {
 			t.fail(f.Pos(), "%s has a blank field; the device struct would need a name for it, so call it Pad or similar", named.Obj().Name())
 			continue
 		}
+		if gap := offsets[i] - next; gap > 0 {
+			fmt.Fprintf(&b, "\tunsigned char %s%d[%d];\n", padPrefix, pads, gap)
+			layout.padBefore[i], pads = true, pads+1
+		}
+		next = offsets[i] + t.sizes.Sizeof(f.Type())
 		fmt.Fprintf(&b, "\t%s;\n", t.cfield(named, f))
+	}
+	if gap := t.sizes.Sizeof(named) - next; gap > 0 {
+		fmt.Fprintf(&b, "\tunsigned char %s%d[%d];\n", padPrefix, pads, gap)
+		layout.padTail = true
 	}
 	b.WriteString("};\n")
 
@@ -72,11 +88,30 @@ func (t *transpiler) structType(named *types.Named, pos token.Pos) string {
 	// Go's numbers and lets NVRTC refuse them, which makes the guarantee hold
 	// on every architecture and CUDA version rather than on this one.
 	//
-	// Only size and alignment, because NVRTC compiles a string with no include
-	// path: it has no <cstddef> and so no offsetof, and __builtin_offsetof is
-	// an nvcc spelling its frontend does not define. Field offsets are pinned
-	// by a round-trip test instead, which exercises the cuda.Upload copy path
-	// the assertion could only have had an opinion about.
+	// Together with the padding above, sizeof is the offset check. NVRTC has no
+	// offsetof to assert one directly -- it compiles a string with no include
+	// path, so there is no <cstddef>, and __builtin_offsetof is an nvcc
+	// spelling its frontend does not define; both were measured again against
+	// NVRTC 12.9 rather than taken on trust. What is left is an argument about
+	// sizes. Every hole in Go's layout, and the trailing one, is declared as an
+	// unsigned char array, so the members this struct declares occupy exactly
+	// the number of bytes Go's struct does. C++ lays members out in declaration
+	// order, each at or after the end of the one before it, so if the compiler
+	// inserted a single byte anywhere the last member would end past Go's size
+	// and sizeof would exceed it. sizeof agreeing therefore means nothing was
+	// inserted, which means every field sits at the offset Go gave it.
+	//
+	// Padding is what makes that argument available, and nothing else here
+	// would: alignas can only raise a field's alignment, so it cannot describe
+	// a hole; a pack pragma would change the struct's alignment and take the
+	// assertion below with it. An unsigned char array has alignment 1, so it
+	// adds nothing to alignof and the second assertion still means what it
+	// always meant.
+	//
+	// A struct whose Go layout has no holes and no trailing slack emits nothing
+	// new, which is most of them -- the two structs committed in kernels/ are
+	// both in that case -- so this does not churn the generated C to say
+	// something it was already saying.
 	fmt.Fprintf(&b, "static_assert(sizeof(%s) == %d, \"gocuda: %s is a different size in CUDA than in Go\");\n",
 		name, t.sizes.Sizeof(named), named.Obj().Name())
 	fmt.Fprintf(&b, "static_assert(alignof(%s) == %d, \"gocuda: %s is differently aligned in CUDA than in Go\");\n",
@@ -85,8 +120,27 @@ func (t *transpiler) structType(named *types.Named, pos token.Pos) string {
 	if len(t.diags) > before {
 		return "void"
 	}
+	if t.structLayouts == nil {
+		t.structLayouts = map[*types.Named]structLayout{}
+	}
+	t.structLayouts[named] = layout
 	t.structDefs = append(t.structDefs, b.String())
 	return name
+}
+
+// padPrefix names the members gocuda emits to fill Go's holes. A field spelled
+// this way is refused rather than renamed, because two members with one name is
+// an NVRTC error about generated code and a silently renamed field is worse.
+const padPrefix = "gocuda_pad"
+
+// structLayout records where those members sit, so that a positional literal
+// can step over them. C++17 has no designated initialisers -- which is why
+// composite writes every field out in order -- so the padding has to be
+// initialised by position too, and the emitter is the only thing that knows
+// where it went.
+type structLayout struct {
+	padBefore []bool // one entry per Go field
+	padTail   bool
 }
 
 // cfield renders one struct field's declaration.
@@ -96,16 +150,20 @@ func (t *transpiler) structType(named *types.Named, pos token.Pos) string {
 // is nothing to narrow it at -- cuda.Upload would copy Go's offsets into a
 // struct C reads with its own.
 //
-// An array field is refused for now. The plan asks for structs of scalars, and
-// while a [4]float32 member would lay out identically in both languages, the
-// size and alignment assertions below cannot pin where inside the struct it
-// begins. Lifting that belongs with the offset checking, not here.
+// An array field goes through cdecl, because C puts the extent after the name.
+// It was refused until the padding above existed: a [4]float32 member lays out
+// identically in both languages, but nothing could say where inside the struct
+// it began, and a field the assertions cannot reach is a field that can quietly
+// move. It can be reached now, so the rule that stood in for the check goes.
 func (t *transpiler) cfield(named *types.Named, f *types.Var) string {
-	if isArray(f.Type()) {
-		t.fail(f.Pos(), "field %s of %s is an array; a device struct holds scalars, so pass the array as a slice instead", f.Name(), named.Obj().Name())
+	name := cname(f.Name())
+	if strings.HasPrefix(name, padPrefix) {
+		t.fail(f.Pos(), "field %s of %s is spelled like the padding gocuda emits to pin the field offsets; rename it", f.Name(), named.Obj().Name())
 		return ""
 	}
-	name := cname(f.Name())
+	if isArray(f.Type()) {
+		return t.cdecl(f.Type(), name, f.Pos())
+	}
 	return t.ctypeElem(f.Type(), f.Pos()) + " " + name
 }
 
@@ -198,7 +256,28 @@ func (t *transpiler) composite(e *ast.CompositeLit) cexpr {
 		}
 		values[i] = t.fieldValue(st.Field(i), elt)
 	}
-	return cexpr{fmt.Sprintf("%s{%s}", name, strings.Join(values, ", ")), precPostfix}
+	return cexpr{fmt.Sprintf("%s{%s}", name, strings.Join(t.withPadding(named, values), ", ")), precPostfix}
+}
+
+// withPadding interleaves an empty initialiser for each padding member the
+// struct carries, so that a positional literal lines up with the C declaration
+// rather than putting the first field's value into a hole.
+func (t *transpiler) withPadding(named *types.Named, values []string) []string {
+	layout, ok := t.structLayouts[named]
+	if !ok {
+		return values
+	}
+	out := make([]string, 0, len(values)+len(layout.padBefore)+1)
+	for i, v := range values {
+		if i < len(layout.padBefore) && layout.padBefore[i] {
+			out = append(out, "{}")
+		}
+		out = append(out, v)
+	}
+	if layout.padTail {
+		out = append(out, "{}")
+	}
+	return out
 }
 
 // fieldValue renders one field's initialiser.

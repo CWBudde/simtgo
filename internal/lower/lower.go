@@ -179,6 +179,9 @@ type transpiler struct {
 	// prototypes, because a prototype may name one.
 	structNames map[*types.Named]string
 	structDefs  []string
+	// structLayouts records the padding members emitted for each struct, which
+	// is what a positional literal has to step over.
+	structLayouts map[*types.Named]structLayout
 	// deviceProtos and deviceDefs accumulate the emitted device functions.
 	// Prototypes are written before any definition, which is what makes the
 	// order of the Go declarations irrelevant.

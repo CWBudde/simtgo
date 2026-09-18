@@ -141,9 +141,12 @@ func TestUnsupported(t *testing.T) {
 		body: "type P struct{ N int }\n\nfunc K(ctx gpu.Ctx, y []float32, ps []P) { y[0] = float32(ps[0].N) }",
 		want: "cannot cross to the device",
 	}, {
-		name: "an array field in a struct",
-		body: "type P struct{ Taps [4]float32 }\n\nfunc K(ctx gpu.Ctx, y []float32, ps []P) { y[0] = ps[0].Taps[0] }",
-		want: "a device struct holds scalars",
+		// An array field lowers now; what cannot is a field spelled like the
+		// padding the emitter adds to pin the offsets, because two members
+		// with one name is an NVRTC error about code nobody wrote.
+		name: "a field named like the emitted padding",
+		body: "type P struct{ gocuda_pad0 int32 }\n\nfunc K(ctx gpu.Ctx, y []float32, ps []P) { y[0] = float32(ps[0].gocuda_pad0) }",
+		want: "spelled like the padding gocuda emits",
 	}, {
 		name: "an embedded field",
 		body: "type Inner struct{ X float32 }\ntype Outer struct{ Inner }\n\nfunc K(ctx gpu.Ctx, y []float32, os []Outer) { y[0] = os[0].X }",

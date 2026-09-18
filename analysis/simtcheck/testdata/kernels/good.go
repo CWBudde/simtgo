@@ -73,3 +73,18 @@ func Luma(ctx gpu.Ctx, out, rgb []uint8) {
 	v := int32(rgb[3*i]) + int32(rgb[3*i+1]) + int32(rgb[3*i+2])
 	out[i] = uint8(v / 3)
 }
+
+// Weights reaches the struct shapes the offset padding was added for: an array
+// field, and a narrow field that leaves a hole after it.
+type Weights struct {
+	N uint8
+	W [3]float32
+}
+
+// Weighted lowers a struct carrying both.
+func Weighted(ctx gpu.Ctx, y []float32, ws []Weights) {
+	i := ctx.GlobalID()
+	if i < len(y) {
+		y[i] = ws[0].W[2] * float32(int32(ws[0].N))
+	}
+}

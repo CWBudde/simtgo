@@ -572,13 +572,17 @@ func TestFloat64Directive(t *testing.T) {
 // holds on whatever architecture and CUDA version the kernel is built for
 // rather than on the one it was written on. Offsets are missing from the
 // assertions because NVRTC compiles a string with no include path and so has no
-// offsetof; TestStructLayoutRoundTrip in the parity tests pins those instead.
+// offsetof; the padding this emits is what makes sizeof cover them, and
+// TestStructLayoutRoundTrip in the parity tests measures them on a device.
 func TestStructLayoutIsAsserted(t *testing.T) {
 	u := transpile(t, "type Shape struct {\n\tFloor float32\n\tCount int32\n\tBias  float64\n}\n\n"+
 		"//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float32, cfg Shape) { y[0] = cfg.Floor }")
 	for _, want := range []string{
-		// Mixed widths, which is the case where the two languages have
-		// something to disagree about at all.
+		// Nothing but the three fields. Floor ends at 4, Count ends at 8 and
+		// Bias starts there, and 8 + 8 is the whole struct, so this is a Go
+		// layout with no hole anywhere in it and the emitter must add nothing:
+		// padding a struct that needs none would churn every artifact it
+		// appears in to say what was already being said.
 		"struct Shape\n{\n\tfloat Floor;\n\tint Count;\n\tdouble Bias;\n};",
 		`static_assert(sizeof(Shape) == 16,`,
 		`static_assert(alignof(Shape) == 8,`,
@@ -826,6 +830,77 @@ func TestNarrowStorage(t *testing.T) {
 				t.Errorf("generated CUDA does not contain %q:\n%s", tc.want, got)
 			}
 		})
+	}
+}
+
+// TestStructPadding pins the offset check.
+//
+// NVRTC has no offsetof, so the assertion that can be written is about sizes.
+// Filling every hole in Go's layout -- and the trailing one -- with an unsigned
+// char array makes the declared members occupy exactly Go's size, and C++ lays
+// members out in order at or after the end of the one before, so sizeof
+// agreeing is only possible if nothing was inserted and every field therefore
+// sits where Go put it. What is pinned here is that the padding appears where
+// Go has a hole and nowhere else, and that a positional literal steps over it
+// rather than initialising a field into it.
+func TestStructPadding(t *testing.T) {
+	cases := []struct{ name, body, want string }{{
+		name: "an internal hole is declared",
+		body: "type S struct{ A int32; B float64 }\n\n" +
+			"//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float32, s S) { y[0] = float32(s.A) + float32(s.B) }",
+		want: "struct S\n{\n\tint A;\n\tunsigned char gocuda_pad0[4];\n\tdouble B;\n};",
+	}, {
+		// The blind spot the trailing member closes: a byte inserted earlier
+		// could hide inside the slack at the end and leave sizeof unchanged.
+		name: "trailing slack is declared too",
+		body: "type S struct{ A float64; B int32 }\n\n" +
+			"//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float32, s S) { y[0] = float32(s.A) + float32(s.B) }",
+		want: "struct S\n{\n\tdouble A;\n\tint B;\n\tunsigned char gocuda_pad0[4];\n};",
+	}, {
+		name: "a layout with no holes gets no padding",
+		body: "type S struct{ A, B float32 }\n\n" +
+			"func K(ctx gpu.Ctx, y []float32, s S) { y[0] = s.A + s.B }",
+		want: "struct S\n{\n\tfloat A;\n\tfloat B;\n};",
+	}, {
+		name: "a positional literal steps over the padding",
+		body: "type S struct{ A int32; B float64 }\n\n" +
+			"//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float32) { s := S{1, 2}; y[0] = float32(s.A) + float32(s.B) }",
+		want: "S s = S{1, {}, 2.0};",
+	}, {
+		// An over-aligned field, where the hole is larger than the field before
+		// it rather than a leftover byte or two.
+		name: "a one-byte field before an eight-byte one",
+		body: "type S struct{ A uint8; B float64 }\n\n" +
+			"//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float32, s S) { y[0] = float32(int32(s.A)) + float32(s.B) }",
+		want: "\tunsigned char A;\n\tunsigned char gocuda_pad0[7];\n\tdouble B;\n",
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := transpile(t, tc.body).Source
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("generated CUDA does not contain %q:\n%s", tc.want, got)
+			}
+		})
+	}
+}
+
+// TestArrayStructField covers the field shape that was refused until the
+// offsets could be pinned: C puts an array's extent after the name, so the
+// field goes through cdecl like every other declaration, and the struct it
+// sits in is asserted the same way as any other.
+func TestArrayStructField(t *testing.T) {
+	u := transpile(t, "type Taps struct {\n\tGain float32\n\tW    [3]float32\n}\n\n"+
+		"func K(ctx gpu.Ctx, y []float32, ts []Taps) { y[0] = ts[0].Gain * ts[0].W[2] }")
+	for _, want := range []string{
+		"struct Taps\n{\n\tfloat Gain;\n\tfloat W[3];\n};",
+		"static_assert(sizeof(Taps) == 16,",
+		"static_assert(alignof(Taps) == 4,",
+		"y[0] = ts[0].Gain * ts[0].W[2];",
+	} {
+		if !strings.Contains(u.Source, want) {
+			t.Errorf("missing %q in:\n%s", want, u.Source)
+		}
 	}
 }
 
