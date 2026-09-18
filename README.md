@@ -62,7 +62,7 @@ It compiles with the rest of the module, runs on the CPU through
 `gpu.RunCPU`, and is lowered to this:
 
 ```cuda
-extern "C" __global__ void FIR(float* y, int y_len, float* x, int x_len, float* h, int h_len)
+extern "C" __global__ void FIR(float* __restrict__ y, int y_len, const float* __restrict__ x, int x_len, const float* __restrict__ h, int h_len)
 {
 	__shared__ float tile[320];
 	int taps = h_len;
@@ -103,7 +103,9 @@ assignment, parallel assignment (`a, b = b, a`), `if`/`else`, three-clause
 `for i, v := range`, `switch`, `break`, `continue`, their labelled forms,
 arithmetic, comparisons, indexing and conversions all translate.
 `gpu.Sqrt`, `gpu.Hypot` and friends become `sqrtf`, `hypotf`; `ctx.GlobalID()`
-becomes `blockIdx.x * blockDim.x + threadIdx.x`; `ctx.SharedF32(n)` becomes a
+becomes `(int)(blockIdx.x * blockDim.x + threadIdx.x)` — the cast is
+load-bearing, because CUDA's built-ins are unsigned and mixing them into Go's
+`int` comparisons would change answers; `ctx.SharedF32(n)` becomes a
 `__shared__` array. Struct literals and field access translate too.
 
 Grids and blocks have three axes. The unsuffixed accessors are `x`, which is
@@ -236,7 +238,8 @@ code the device compiles.
 | --------------------------- | ----------------------------------------------- |
 | `float32`                   | `float`                                         |
 | `float64`                   | `double`, opt-in                                |
-| `int`, `int32`              | `int`                                           |
+| `int32`                     | `int`                                           |
+| `int`                       | `int`, **by value only**                        |
 | `int64`                     | `long long`                                     |
 | `uint32`                    | `unsigned int`                                  |
 | `uint64`                    | `unsigned long long`                            |
@@ -292,7 +295,12 @@ nothing while retracting an acceptance costs a release.
 what `go/types` says about the type:
 
 ```c
-struct Shape { float Floor; int Count; double Bias; };
+struct Shape
+{
+	float Floor;
+	int Count;
+	double Bias;
+};
 static_assert(sizeof(Shape) == 16, "gocuda: Shape is a different size in CUDA than in Go");
 static_assert(alignof(Shape) == 8, "gocuda: Shape is differently aligned in CUDA than in Go");
 ```
@@ -332,7 +340,25 @@ operator at all.
 
 Everything else is **refused with a file and line**, never mistranslated:
 allocation, interfaces, goroutines, tuple assignment from a call, methods,
-embedded fields, and any import other than package `gpu`. `simt/errors_test.go` pins
+embedded fields, and any import other than package `gpu`. That list is
+illustrative rather than closed — the emitter carries some forty distinct
+refusal rules, and a few are worth knowing because nothing about the Go source
+suggests them:
+
+- A variable spelled like a name the emitter generates. A slice `y` brings an
+  `y_len` with it, and a C++ keyword is emitted with a trailing underscore, so
+  a local called `y_len`, or one called `int_` beside a parameter called `int`,
+  would be the same C variable as the generated one. Both compiled and returned
+  wrong numbers until they were refused.
+- `&^=`, though `&^` itself lowers — Go's only operator with no C spelling
+  becomes `a & ~b`, and the compound form has no such rewriting.
+- Parallel assignment in a `for` clause. It works as a statement; in an
+  init or post clause it does not, because the temporaries the semantics
+  require are declarations and C's comma operator carries only expressions.
+- A negative constant lane offset to a shuffle: CUDA reads those as unsigned,
+  so `-1` is lane 4294967295 rather than the neighbour the minus sign implies.
+
+`simt/errors_test.go` pins
 that boundary.
 
 ### Errors before `main()`

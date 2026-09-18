@@ -83,9 +83,12 @@ package by go/analysis). Never re-implement a subset rule in `simt` or in the
 analyzer — put it in `lower` and both get it.
 
 - `lower.LoadPackage` parses and type-checks a kernel package; `Package.Kernel(name)`
-  lowers one function to a `*Unit` (`Source`, `RequiredBlock`, `SharedBytes`,
-  `SourceHash`). A kernel that produces any `Diagnostic` yields `(nil, diags)` —
-  half-lowered CUDA must never escape.
+  lowers one function to a `*Unit` (`Source`, `Name`, `RequiredBlock`,
+  `SharedBytes`, `DynSharedWidth`, `Params`, `SourceHash`). Everything after
+  `Source` is a **launch contract** discovered while lowering: what the source
+  demands of the launch that will run it, which is why it travels with the unit
+  rather than being restated at every launch site. A kernel that produces any
+  `Diagnostic` yields `(nil, diags)` — half-lowered CUDA must never escape.
 - `lower.GPUPackage()` builds `types.Package` for `gpu` **by hand**, because
   run-time type-checking has no module graph. `internal/lower/gpupkg_drift_test.go`
   compares it against the real package: **adding anything to `gpu` means
@@ -111,8 +114,9 @@ kernel package itself (it is type-checked as one unit and may import only `gpu`)
 `generate` refuses `-out == -pkg`.
 
 **Build/launch path.** `simt.Build` transpiles _even when a prebuilt exists_ —
-lowering is what produces the hash, and it keeps `RequiredBlock`/`SharedBytes`
-derived from the source in hand. `internal/jit` then either loads registered
+lowering is what produces the hash, and it keeps the launch contracts
+(`RequiredBlock`, `SharedBytes`, `DynSharedWidth`, `Params`) derived from the
+source in hand rather than trusted from an artifact. `internal/jit` then either loads registered
 PTX or calls NVRTC, caching modules per `cuda.Context` (never package-global —
 a module dies with its context). `.gocuda-cache/` receives the `.cu`/`.ptx`
 that were actually used, for inspection; it is gitignored, and per-`Build`
