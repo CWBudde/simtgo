@@ -4,12 +4,31 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/CWBudde/gocuda/cuda"
 	"github.com/CWBudde/gocuda/internal/jit"
 )
+
+// requireDevice skips a test that needs a GPU, or fails it when the caller has
+// promised one.
+//
+// GOCUDA_REQUIRE_DEVICE is what a job sets when the whole point of the run is
+// that kernels executed -- a compute-sanitizer sweep, say. There a silent skip
+// is the worst outcome available: the job goes green having launched nothing.
+// See .github/workflows/sanitizer.yml.
+func requireDevice(t *testing.T) {
+	t.Helper()
+	if cuda.Available() {
+		return
+	}
+	if os.Getenv("GOCUDA_REQUIRE_DEVICE") != "" {
+		t.Fatal("GOCUDA_REQUIRE_DEVICE is set, but no CUDA device is available")
+	}
+	t.Skip("no CUDA device available")
+}
 
 const addSrc = `
 extern "C" __global__ void add(float* c, const float* a, const float* b, int n) {
@@ -20,9 +39,7 @@ extern "C" __global__ void add(float* c, const float* a, const float* b, int n) 
 // TestRawKernel exercises the whole host path with a hand-written kernel:
 // NVRTC compile, module load, upload, launch, download.
 func TestRawKernel(t *testing.T) {
-	if !cuda.Available() {
-		t.Skip("no CUDA device available")
-	}
+	requireDevice(t)
 	ctx, err := cuda.NewContext(0)
 	if err != nil {
 		t.Fatalf("NewContext: %v", err)
@@ -135,9 +152,7 @@ func runAdd(t *testing.T, ctx *cuda.Context, fn *cuda.Function) {
 // actually queried. Zero is the documented "unknown" answer of the build
 // without a device, so a real device must report more than that.
 func TestMaxSharedMemPerBlock(t *testing.T) {
-	if !cuda.Available() {
-		t.Skip("no CUDA device available")
-	}
+	requireDevice(t)
 	ctx, err := cuda.NewContext(0)
 	if err != nil {
 		t.Fatalf("NewContext: %v", err)
@@ -164,9 +179,7 @@ func TestMaxSharedMemPerBlock(t *testing.T) {
 // up in it worked on a stale handle. Here the same key is asked for in two
 // contexts, and the builder must run again for the second one.
 func TestModuleCacheIsPerContext(t *testing.T) {
-	if !cuda.Available() {
-		t.Skip("no CUDA device available")
-	}
+	requireDevice(t)
 	first, err := cuda.NewContext(0)
 	if err != nil {
 		t.Fatalf("NewContext: %v", err)
@@ -257,9 +270,7 @@ func TestModuleCacheIsPerContext(t *testing.T) {
 // reports: PTX and the compiler log used to be returned on the first build of
 // a source and silently dropped on every later one.
 func TestJITLoadAcrossContexts(t *testing.T) {
-	if !cuda.Available() {
-		t.Skip("no CUDA device available")
-	}
+	requireDevice(t)
 	// A Request with no cache directory writes no dumps, which is what this
 	// test wants: nothing here is worth reading afterwards.
 	req := jit.Request{Src: addSrc, Name: "add"}
