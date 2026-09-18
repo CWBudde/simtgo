@@ -217,30 +217,68 @@ second implementation somebody has to trust.
 The yield is **20000/20000**: every generated program is accepted by the
 subset, so a fuzz run tests the emitter rather than the refusal path.
 
-Feature coverage over 3,000 programs:
+Feature coverage over 3,000 programs. This table used to be prose — measured
+once, written down, and then unable to move when the generator did. It is
+`TestFeatureCoverage` (`internal/fuzz/coverage_test.go`) now, which prints it
+and holds each row to a floor, so a construct the generator quietly stops
+reaching is a failing test rather than a stale sentence:
 
-| Feature              | Coverage |
-| -------------------- | -------: |
-| `switch`             |      80% |
-| `range`              |      70% |
-| narrow element types |      66% |
-| `SyncThreads`        |      45% |
-| arrays               |      45% |
-| shared memory        |      38% |
-| structs              |    33.4% |
-| atomics              |      32% |
-| `float64`            |      24% |
-| device functions     |      21% |
-| warp primitives      |     7.5% |
+| Feature                 | Coverage |
+| ----------------------- | -------: |
+| array locals            |    97.8% |
+| `switch`                |    80.4% |
+| device funcs declared   |    74.9% |
+| `range`                 |    70.8% |
+| narrow element types    |    66.6% |
+| `SyncThreads`           |    42.9% |
+| shared memory           |    37.1% |
+| structs                 |    32.0% |
+| atomics                 |    32.0% |
+| `float64`               |    25.8% |
+| `LaneID`                |    24.3% |
+| warp `_sync` vocabulary |    19.8% |
 
-Structs were **0%** and are 33.4% now, at an unchanged yield. 250
-struct-bearing programs went through NVRTC with none refused — which is the
-test that matters, because the emitter writes a `sizeof` and an `alignof`
-assertion for every struct and those fail at compile time when a layout is
-wrong.
+A row is "programs that reach this at least once", matched against the
+generated Go source. Several figures differ from the hand-measured table this
+replaced because the **definitions** differ, not because the generator does:
+"array locals" counts a `var x [n]T` declaration and "device funcs declared" a
+helper in the source, both of which the earlier figures evidently read more
+narrowly. Treat this table as the baseline and the earlier one as superseded.
 
-Warp primitives at 7.5% is the lowest figure in the table and the obvious next
-thing to raise.
+Structs were **0%** before the generator learned them, and are 32% now at an
+unchanged yield. 250 struct-bearing programs went through NVRTC with none
+refused — which is the test that matters, because the emitter writes a `sizeof`
+and an `alignof` assertion for every struct and those fail at compile time when
+a layout is wrong.
+
+`LaneID` is counted apart from the rest of the warp vocabulary because it is
+reached two ways — through `warpExpr` behind all seven gates, and as an
+ordinary thread-varying position behind only `warpOK` — and a single figure
+covering both would move when either did.
+
+### Warp primitives, and the ceiling over them
+
+The warp `_sync` vocabulary was the lowest row in the table at **10.7%**, and
+the cause was structural rather than incidental: a warp expression sits behind
+a conjunction of **seven** conditions while a barrier sits behind three and
+owns a whole statement slot, which is the whole of why `SyncThreads` was at 43%
+and warp primitives at a quarter of that.
+
+None of the seven moved. Each guards real undefined behaviour — the emitter
+writes `0xffffffff` into every `_sync` built-in, so a short warp names lanes
+that do not exist; and `__any_sync` on the right of a short-circuiting `&&` is
+undefined on the device and a deadlock on the emulator. What changed is the
+draws **upstream** of them: a statement slot of warp's own, a second slot in
+each of the three expression switches, and more whole-warp block widths (ten of
+sixteen, from seven of thirteen). That took it to **19.8%** at a yield still
+measured at 1.0, and a 120-second search on each of the host and NVRTC oracles
+— 62,800 and 14,288 executions — found nothing.
+
+There is a ceiling not far above. A warp primitive needs `g.sync`, a coin flip,
+and `g.warpOK`, about 0.64: no more than a third of programs can carry one at
+all. Raising `g.sync` is the obvious next lever and it is the wrong one — a
+program with a barrier or a warp primitive is outside the host oracle's scope,
+so that trade buys warp coverage directly out of the differential's reach.
 
 ### Struct shapes are chosen for their holes
 
@@ -282,9 +320,29 @@ The NVRTC oracle takes all of it, because it never executes anything.
 ### Running continuously
 
 `.github/workflows/fuzz.yml`, daily and on demand, **one matrix leg per
-untagged target** so that one finding cannot hide the other. The NVRTC oracle
-stays out of it for the same reason the parity tests are out of CI: no runner
-has a toolkit.
+untagged target** so that one finding cannot hide the other.
+
+The NVRTC oracle runs there too, in a job of its own, and getting it there cost
+nothing but noticing that it needs a **toolkit and not a device**: NVRTC
+compiles to PTX and nothing is launched, so the `nvidia-cuda-nvrtc-cu12` wheel
+is the whole dependency and `GOCUDA_LIBNVRTC` points the loader at it. That is
+the same trick [`toolchain.md`](toolchain.md) records for running
+`TestGeneratedCCompiles` on a machine with no GPU. The version is pinned,
+because the target whitelists four NVRTC diagnostic numbers as generator noise
+and which numbers those are is a property of a particular NVRTC.
+
+**That job sets `GOCUDA_REQUIRE_NVRTC=1`, and the reason is the whole point of
+the job.** Without the library the target skips, and a skip is indistinguishable
+from a clean search: with `GOCUDA_LIBNVRTC` pointed at a file that does not
+exist, a twenty-minute leg passes **in three milliseconds** having compiled
+nothing. The variable turns that skip into a failure, exactly as
+`GOCUDA_REQUIRE_DEVICE` does for the sanitizer sweep.
+
+Two schedules, because they answer different questions. The daily run is the
+regression cadence — every defect the fuzzer has found turned up in minutes, so
+twenty of them is generous for "did the last day's commits break something".
+Whether a _deeper_ case exists is a question twenty minutes cannot answer at
+all, and that is the weekly leg: four hours, once.
 
 Three targets are committed in `simt/`, two of them running on every push. Go
 runs a fuzz target's seeds as ordinary tests under plain `go test`, so the whole
@@ -298,6 +356,24 @@ notice.
 **A case the fuzzer finds is committed by hand**, after it has been read,
 because a corpus entry is a test every future run pays for and an automated
 commit would add them faster than anybody diagnoses them.
+
+### What a corpus entry does not pin
+
+An entry here is a **seed**, not a program: `int64(620)` and `int64(77)` are
+what `fuzz.Generate` and `Program.Inputs` are handed. So a change to the
+generator's draws changes the program that seed produces, and the entry goes on
+running without going on testing the case it was named for. Raising the warp
+coverage above made `signed-zero-620` stop skipping on the transcendental
+filter and start passing, and made `signed-overflow-279` start skipping — two
+entries, neither of which now reaches what it was committed for, and no test
+went red to say so.
+
+This is not an argument against seed entries; they cost almost nothing and they
+do catch a case that comes back while the generator is still the one that found
+it. It is an argument for what actually holds a diagnosed case down, which is a
+hand-written regression test next to the fix. `TestFminFmaxAgreeOnTheZeros` is
+the one for the signed zeros, and it is why that case is closed whatever seed
+620 renders next.
 
 ### Barrier divergence
 

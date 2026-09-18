@@ -46,7 +46,7 @@ checked against the implementation in both directions — a refusal the code
 enforces and the document omits fails the build, and so does a rule the document
 claims that nothing pins. Twelve kernels, each with a golden file, an NVRTC
 compile test and a CPU/GPU parity test. A differential fuzzer with three oracles,
-two of them running in CI daily. A kernel that cannot be lowered fails
+all three running in CI daily and a longer search weekly. A kernel that cannot be lowered fails
 `go build` rather than `main()`. No cgo anywhere, so the module builds and ships
 on a machine that has never had a CUDA toolkit. `compute-sanitizer` clean on
 `memcheck`, `racecheck`, `initcheck` and `synccheck`.
