@@ -694,11 +694,29 @@ A transpiler is trusted through evidence, not review.
       3,000 programs: `switch` 80%, `range` 70%, narrow element types 66%,
       `SyncThreads` 45%, arrays 45%, shared memory 38%, atomics 32%, `float64`
       24%, device functions 21%, warp primitives 7.5% — and **structs 0%**.
-      There is no struct node in the IR, which leaves the padding members, the
-      `sizeof` assertion standing in for offsets NVRTC cannot assert, and the
-      `ctype`/`ctypeElem` split untested by this route. That is the next thing
-      the generator wants, and the design is settled even though the code is
-      not:
+      **Closed** (2026-09-18): structs appear in **33.4%** of generated
+      programs now, where they appeared in none, and the yield is unchanged at
+      20000/20000. 250 struct-bearing programs went through NVRTC with none
+      refused — which is the test that matters, because the emitter writes a
+      `sizeof` and an `alignof` assertion for every struct and those fail at
+      compile time when a layout is wrong.
+
+      The catalogue is four shapes chosen for their holes rather than for
+      variety, since a shape with no hole exercises none of the padding:
+      `SPair` has none and is the control, `SHole` pads three bytes after an
+      `int8`, `SWide` four to reach an `int64`'s alignment, and `STail` six at
+      the *end* — the case that moves no field and changes only `sizeof`, so
+      nothing but the size assertion can see it.
+      `TestShapesLowerWithTheirPadding` pins each one, naming the hole it is
+      there for.
+
+      Finding the struct support needed one more fix in the oracle, the third
+      of that kind: `Program.Compare` fell through to `reflect.DeepEqual` for a
+      struct, which compares floats with `==`, so two buffers holding the same
+      NaN were reported as differing — in a message that printed them
+      identically. It compares field by field through `tolerance.Agree` now.
+
+      The design, which the obvious shape does not survive:
 
       - **A fixed catalogue of shapes, declared as real Go types** in
         `internal/fuzz`, rather than shapes invented at run time. The closure
@@ -721,7 +739,7 @@ A transpiler is trusted through evidence, not review.
       **NVRTC is the oracle that matters here**, and it needs no execution: the
       emitter writes a `static_assert` on the struct's size, so a wrong layout
       fails to compile. A generated struct reaching `cuda.Compile` is the whole
-      test.
+      test — and 250 of them did.
 
       41.1% of generated programs are in the host oracle's scope — a barrier, a
       warp primitive, an atomic or a shared tile means something a sequential

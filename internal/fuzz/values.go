@@ -22,6 +22,10 @@ func (p *Program) Inputs(seed int64) *Args {
 			a.Vals[i] = a.Vals[spec.AliasOf]
 			continue
 		}
+		if spec.Shape != nil {
+			a.Vals[i] = makeStructSlice(r, spec.Shape, spec.Len)
+			continue
+		}
 		if spec.Slice {
 			a.Vals[i] = makeSlice(r, spec.Kind, spec.Len)
 			continue
@@ -80,6 +84,46 @@ func makeInt(r *rand.Rand) int64 {
 		return -1
 	}
 	return int64(r.IntN(2001) - 1000)
+}
+
+// makeStructSlice fills a buffer of one of the catalogue's shapes, field by
+// field, from the same distributions every other input uses -- so a float
+// field gets the NaN, the infinities, the zeros and the subnormal that the
+// rest of the generator's inputs get, and a struct is not quietly the one
+// place where only ordinary numbers appear.
+func makeStructSlice(r *rand.Rand, shape *StructShape, n int) any {
+	buf := shape.make(n)
+	for i := range n {
+		for _, f := range shape.Fields {
+			switch f.Kind {
+			case KF32:
+				f.set.(func(any, int, float32))(buf, i, float32(makeFloat(r)))
+			case KF64:
+				f.set.(func(any, int, float64))(buf, i, makeFloat(r))
+			case KI32:
+				f.set.(func(any, int, int32))(buf, i, int32(makeInt(r)))
+			case KI64:
+				f.set.(func(any, int, int64))(buf, i, makeInt(r))
+			case KU32:
+				f.set.(func(any, int, uint32))(buf, i, uint32(makeInt(r)))
+			case KU64:
+				f.set.(func(any, int, uint64))(buf, i, uint64(makeInt(r)))
+			case KBool:
+				f.set.(func(any, int, bool))(buf, i, r.IntN(2) == 0)
+			case KI8:
+				f.set.(func(any, int, int8))(buf, i, int8(makeInt(r)))
+			case KI16:
+				f.set.(func(any, int, int16))(buf, i, int16(makeInt(r)))
+			case KU8:
+				f.set.(func(any, int, uint8))(buf, i, uint8(makeInt(r)))
+			case KU16:
+				f.set.(func(any, int, uint16))(buf, i, uint16(makeInt(r)))
+			default:
+				panic("fuzz: no input for a struct field of kind " + f.Kind.goName())
+			}
+		}
+	}
+	return buf
 }
 
 func makeSlice(r *rand.Rand, k Kind, n int) any {

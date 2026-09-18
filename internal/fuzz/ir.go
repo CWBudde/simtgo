@@ -64,6 +64,12 @@ const (
 	KU64
 	KBool
 	KInt
+	// KStruct is a buffer of one of the catalogue's shapes (structs.go). It is
+	// a buffer kind and never a value one: nothing in the subset assigns a
+	// struct whole, and a Field reached through one has the *field's* kind, so
+	// no expression is ever of this kind. It sits before the narrow kinds so
+	// that Kind.narrow's range still means what it says.
+	KStruct
 	KI8
 	KI16
 	KU8
@@ -91,6 +97,10 @@ func (k Kind) goName() string {
 		return "bool"
 	case KInt:
 		return "int"
+	case KStruct:
+		// Named by the shape rather than the kind, which is why a Var carrying
+		// this one always carries a Shape as well.
+		return "struct"
 	case KI8:
 		return "int8"
 	case KI16:
@@ -102,6 +112,11 @@ func (k Kind) goName() string {
 	}
 	return "<invalid>"
 }
+
+// GoName is goName for callers outside the package: the tests that render a
+// shape as Go source need to spell a field's type, and the catalogue is
+// exported for them already.
+func (k Kind) GoName() string { return k.goName() }
 
 // narrow reports whether k is storage only: legal as a slice element and
 // accepted by no operator, because Go's 8- and 16-bit arithmetic wraps where
@@ -147,6 +162,10 @@ type Var struct {
 	Kind  Kind
 	Slice bool // a slice parameter or a shared tile
 	Array int  // >0: a local array of this many elements
+	// Shape is the struct type of a KStruct buffer, and nil otherwise. It is
+	// on the variable rather than on the kind because the kind says only that
+	// this is a struct buffer, not which one.
+	Shape *StructShape
 	Vary  bool
 	Len   int // elements, for a buffer whose length the generator knows
 	// Fixed says nothing may assign to this variable after it is declared.
@@ -216,6 +235,25 @@ func (x *Index) varies() bool {
 	}
 	return x.Base.Vary || x.Idx.varies()
 }
+
+// Field reads one field of one element of a struct buffer: p[i].A.
+//
+// Its kind is the *field's*, not the struct's, and that is the whole reason
+// structs fit the generator at all. Every per-kind compiler in closure.go --
+// there are some two hundred case arms of them -- then handles the result
+// unchanged, and nothing had to learn that a struct exists except the four
+// places that reach one.
+type Field struct {
+	Base *Var
+	Idx  Expr
+	F    int
+}
+
+func (x *Field) kind() Kind { return x.Base.Shape.Fields[x.F].Kind }
+
+// varies follows Index: the buffer is one piece of memory the whole block
+// addresses, so what may differ between threads is the index.
+func (x *Field) varies() bool { return x.Idx.varies() }
 
 // Len is len(x) on a slice parameter, a shared tile or a local array. It is
 // block-uniform, which is what makes it legal to branch a barrier on.
@@ -398,9 +436,19 @@ func (*ArrayDecl) stmt() {}
 type Lvalue struct {
 	V   *Var // the scalar when Idx is nil, otherwise the buffer
 	Idx Expr
+	// F selects a field when V is a struct buffer. It is read only when
+	// V.Shape is non-nil, which is what makes the zero value safe for every
+	// other Lvalue -- and there are many, all of them written before structs
+	// existed.
+	F int
 }
 
-func (l Lvalue) kind() Kind { return l.V.Kind }
+func (l Lvalue) kind() Kind {
+	if l.V.Shape != nil {
+		return l.V.Shape.Fields[l.F].Kind
+	}
+	return l.V.Kind
+}
 
 // Assign is `lhs op= rhs`, with Op == token.ASSIGN for a plain store.
 type Assign struct {

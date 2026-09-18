@@ -291,6 +291,17 @@ func (c *compiler) update(l Lvalue, op token.Token, rhs code) func(*frame) {
 	if l.Idx == nil {
 		return scalarStore(l.V, op, rhs)
 	}
+	if l.V.Shape != nil {
+		// A struct field takes a plain store only, which assignOp spells as
+		// ILLEGAL -- "no operator", not an error. The generator never emits a
+		// compound assignment into one, because `p[i].A += x` reads and writes
+		// through the same accessor pair and would be testing the accessors
+		// rather than the translation.
+		if op != token.ILLEGAL {
+			panic("fuzz: compound assignment " + op.String() + " into a struct field")
+		}
+		return c.fieldStore(l, rhs)
+	}
 	return withBufStore(l.V, as[int](c.expr(l.Idx)), op, rhs)
 }
 

@@ -26,6 +26,17 @@ func (p *Program) Source() string {
 	w.line("package %s", p.Pkg)
 	w.blank()
 	w.line("import %q", gpuImportPath)
+	for _, sh := range p.Shapes {
+		// Declared with the same fields in the same order as the Go type in
+		// structs.go, so that Go computes one layout for both and the emitter's
+		// padding has something true to be checked against.
+		w.blank()
+		w.line("type %s struct {", sh.Name)
+		for _, f := range sh.Fields {
+			w.line("\t%s %s", f.Name, f.Kind.goName())
+		}
+		w.line("}")
+	}
 	for _, fn := range p.Funcs {
 		w.blank()
 		p.writeFunc(&w, fn)
@@ -93,6 +104,9 @@ func (p *Program) writeFunc(w *srcWriter, fn *Func) {
 // function would reach the caller's array, and the subset refuses it.
 func paramType(v *Var) string {
 	if v.Slice {
+		if v.Shape != nil {
+			return "[]" + v.Shape.Name
+		}
 		return "[]" + v.Kind.goName()
 	}
 	return v.Kind.goName()
@@ -287,6 +301,9 @@ func lvalueText(l Lvalue) string {
 	if l.Idx == nil {
 		return l.V.Name
 	}
+	if l.V.Shape != nil {
+		return l.V.Name + "[" + expand(l.Idx) + "]." + l.V.Shape.Fields[l.F].Name
+	}
 	return l.V.Name + "[" + expand(l.Idx) + "]"
 }
 
@@ -328,6 +345,8 @@ func exprText(e Expr, min int) string {
 		return e.V.Name
 	case *Index:
 		return e.Base.Name + "[" + expand(e.Idx) + "]"
+	case *Field:
+		return e.Base.Name + "[" + expand(e.Idx) + "]." + e.Base.Shape.Fields[e.F].Name
 	case *Len:
 		return "len(" + e.Base.Name + ")"
 	case *Binary:

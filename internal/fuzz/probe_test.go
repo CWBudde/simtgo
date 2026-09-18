@@ -33,9 +33,89 @@ func encode(p *Program, a *Args) []string {
 		if !spec.Slice {
 			continue
 		}
+		if spec.Shape != nil {
+			out = append(out, spec.Name+" "+encodeStructSlice(spec.Shape, a.Vals[i]))
+			continue
+		}
 		out = append(out, spec.Name+" "+encodeSlice(a.Vals[i]))
 	}
 	return out
+}
+
+// encodeStructSlice prints a struct buffer field by field, in declaration
+// order, in exactly the form the probe's own emit prints it. It goes through
+// the catalogue's getters because nothing outside structs.go names the type.
+func encodeStructSlice(shape *StructShape, buf any) string {
+	var parts []string
+	n := shape.length(buf)
+	for i := range n {
+		for _, f := range shape.Fields {
+			parts = append(parts, fieldText(f, buf, i))
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+// fieldText is one field of one element, printed as its kind is printed
+// everywhere else here: a float by its bits, so that a NaN, a negative zero
+// and a subnormal all survive the comparison.
+func fieldText(f StructField, buf any, i int) string {
+	switch f.Kind {
+	case KF32:
+		return f32text(f.get.(func(any, int) float32)(buf, i))
+	case KF64:
+		return f64text(f.get.(func(any, int) float64)(buf, i))
+	case KI32:
+		return fmt.Sprintf("%d", f.get.(func(any, int) int32)(buf, i))
+	case KI64:
+		return fmt.Sprintf("%d", f.get.(func(any, int) int64)(buf, i))
+	case KU32:
+		return fmt.Sprintf("%d", f.get.(func(any, int) uint32)(buf, i))
+	case KU64:
+		return fmt.Sprintf("%d", f.get.(func(any, int) uint64)(buf, i))
+	case KBool:
+		return fmt.Sprintf("%t", f.get.(func(any, int) bool)(buf, i))
+	case KI8:
+		return fmt.Sprintf("%d", f.get.(func(any, int) int8)(buf, i))
+	case KI16:
+		return fmt.Sprintf("%d", f.get.(func(any, int) int16)(buf, i))
+	case KU8:
+		return fmt.Sprintf("%d", f.get.(func(any, int) uint8)(buf, i))
+	case KU16:
+		return fmt.Sprintf("%d", f.get.(func(any, int) uint16)(buf, i))
+	}
+	panic("fuzz: cannot encode a struct field of kind " + f.Kind.goName())
+}
+
+// structLiteral writes the source-side argument: a composite literal of the
+// kernel package's own struct type, field by field, so that both renderings
+// start from identical bytes.
+func structLiteral(pkg string, shape *StructShape, buf any) string {
+	n := shape.length(buf)
+	elems := make([]string, n)
+	for i := range n {
+		fields := make([]string, len(shape.Fields))
+		for j, f := range shape.Fields {
+			fields[j] = f.Name + ": " + fieldLiteral(f, buf, i)
+		}
+		elems[i] = "{" + strings.Join(fields, ", ") + "}"
+	}
+	return fmt.Sprintf("[]%s.%s{%s}", pkg, shape.Name, strings.Join(elems, ", "))
+}
+
+// fieldLiteral is one field as Go source. A float goes through Frombits for
+// the same reason goLiteral does it: a literal cannot spell a NaN, and %v
+// would round a subnormal.
+func fieldLiteral(f StructField, buf any, i int) string {
+	switch f.Kind {
+	case KF32:
+		return fmt.Sprintf("math.Float32frombits(%#x)", math.Float32bits(f.get.(func(any, int) float32)(buf, i)))
+	case KF64:
+		return fmt.Sprintf("math.Float64frombits(%#x)", math.Float64bits(f.get.(func(any, int) float64)(buf, i)))
+	case KBool:
+		return fmt.Sprintf("%t", f.get.(func(any, int) bool)(buf, i))
+	}
+	return fieldText(f, buf, i)
 }
 
 func encodeSlice(v any) string {
@@ -231,6 +311,10 @@ func writeRunner(w *strings.Builder, i int, p *Program, a *Args) {
 			fmt.Fprintf(w, "\t%s := %s\n", names[j], names[spec.AliasOf])
 			continue
 		}
+		if spec.Shape != nil {
+			fmt.Fprintf(w, "\t%s := %s\n", names[j], structLiteral(fmt.Sprintf("k%d", i), spec.Shape, a.Vals[j]))
+			continue
+		}
 		fmt.Fprintf(w, "\t%s := %s\n", names[j], goLiteral(a.Vals[j]))
 	}
 	call := fmt.Sprintf("k%d.%s(ctx, %s)", i, p.Name(), strings.Join(names, ", "))
@@ -263,6 +347,7 @@ func mainSource(imports, body string) string {
 import (
 	"fmt"
 	"math"
+	"reflect"
 	"strings"
 
 	"github.com/CWBudde/gocuda/gpu"
@@ -327,9 +412,48 @@ func emit(name string, v any) {
 			parts = append(parts, fmt.Sprintf("%d", x))
 		}
 	default:
-		panic("probe: cannot encode")
+		// A struct buffer. Its element type lives in the kernel package, which
+		// this one imports under a generated alias, so it is reached by
+		// reflection rather than by name -- and printed field by field, in
+		// declaration order, in exactly the form encodeStructSlice uses.
+		rv := reflect.ValueOf(v)
+		if rv.Kind() != reflect.Slice || rv.Type().Elem().Kind() != reflect.Struct {
+			panic("probe: cannot encode")
+		}
+		for i := 0; i < rv.Len(); i++ {
+			e := rv.Index(i)
+			for j := 0; j < e.NumField(); j++ {
+				parts = append(parts, fieldWord(e.Field(j)))
+			}
+		}
 	}
 	fmt.Println(name + " " + strings.Join(parts, " "))
+}
+
+// fieldWord prints one struct field, matching encode's rules for its kind: a
+// float by its bits, with a NaN collapsed to one word whatever its payload.
+func fieldWord(v reflect.Value) string {
+	switch v.Kind() {
+	case reflect.Float32:
+		x := float32(v.Float())
+		if x != x {
+			return "NaN"
+		}
+		return fmt.Sprintf("%08x", math.Float32bits(x))
+	case reflect.Float64:
+		x := v.Float()
+		if x != x {
+			return "NaN"
+		}
+		return fmt.Sprintf("%016x", math.Float64bits(x))
+	case reflect.Bool:
+		return fmt.Sprintf("%t", v.Bool())
+	case reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return fmt.Sprintf("%d", v.Int())
+	case reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return fmt.Sprintf("%d", v.Uint())
+	}
+	panic("probe: cannot encode a struct field")
 }
 ` + body
 }

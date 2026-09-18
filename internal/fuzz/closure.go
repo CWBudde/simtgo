@@ -91,6 +91,11 @@ type frame struct {
 	bI16 [][]int16
 	bU8  [][]uint8
 	bU16 [][]uint16
+	// bStruct holds the struct buffers as any, because there is no one Go type
+	// to declare them as -- the catalogue has four. Which shape each slot holds
+	// is fixed when the program is generated, so the type assertion that gets
+	// at it is made once, while the closure is compiled, and never in the loop.
+	bStruct []any
 
 	rF32 float32
 	rF64 float64
@@ -163,6 +168,9 @@ func newFrame(l frameLayout, ctx gpu.Ctx) *frame {
 	if n := l.buffers[KU16]; n > 0 {
 		f.bU16 = make([][]uint16, n)
 	}
+	if n := l.buffers[KStruct]; n > 0 {
+		f.bStruct = make([]any, n)
+	}
 	return f
 }
 
@@ -215,6 +223,8 @@ func (c *compiler) expr(e Expr) code {
 		return c.ref(e.V)
 	case *Index:
 		return c.index(e)
+	case *Field:
+		return c.field(e)
 	case *Len:
 		return c.length(e.Base)
 	case *Binary:
@@ -326,6 +336,86 @@ func bufOf(v *Var) any {
 	panic("fuzz: no buffer of kind " + v.Kind.goName())
 }
 
+// field compiles p[i].A.
+//
+// The kind is the field's, so what comes back is an ordinary typed code of
+// that kind and every compiler above this one is unchanged. The catalogue's
+// accessor is asserted to its type here, once, rather than in the closure: a
+// type assertion in the loop would be a boxed read on every iteration, which
+// is exactly what the typed frame exists to avoid.
+func (c *compiler) field(x *Field) code {
+	idx := as[int](c.expr(x.Idx))
+	n := x.Base.slot
+	f := x.Base.Shape.Fields[x.F]
+	switch f.Kind {
+	case KF32:
+		g := f.get.(func(any, int) float32)
+		return mk(KF32, func(fr *frame) float32 { return g(fr.bStruct[n], idx(fr)) })
+	case KF64:
+		g := f.get.(func(any, int) float64)
+		return mk(KF64, func(fr *frame) float64 { return g(fr.bStruct[n], idx(fr)) })
+	case KI32:
+		g := f.get.(func(any, int) int32)
+		return mk(KI32, func(fr *frame) int32 { return g(fr.bStruct[n], idx(fr)) })
+	case KI64:
+		g := f.get.(func(any, int) int64)
+		return mk(KI64, func(fr *frame) int64 { return g(fr.bStruct[n], idx(fr)) })
+	case KU32:
+		g := f.get.(func(any, int) uint32)
+		return mk(KU32, func(fr *frame) uint32 { return g(fr.bStruct[n], idx(fr)) })
+	case KU64:
+		g := f.get.(func(any, int) uint64)
+		return mk(KU64, func(fr *frame) uint64 { return g(fr.bStruct[n], idx(fr)) })
+	case KBool:
+		g := f.get.(func(any, int) bool)
+		return mk(KBool, func(fr *frame) bool { return g(fr.bStruct[n], idx(fr)) })
+	case KI8:
+		g := f.get.(func(any, int) int8)
+		return mk(KI8, func(fr *frame) int8 { return g(fr.bStruct[n], idx(fr)) })
+	case KI16:
+		g := f.get.(func(any, int) int16)
+		return mk(KI16, func(fr *frame) int16 { return g(fr.bStruct[n], idx(fr)) })
+	case KU8:
+		g := f.get.(func(any, int) uint8)
+		return mk(KU8, func(fr *frame) uint8 { return g(fr.bStruct[n], idx(fr)) })
+	case KU16:
+		g := f.get.(func(any, int) uint16)
+		return mk(KU16, func(fr *frame) uint16 { return g(fr.bStruct[n], idx(fr)) })
+	}
+	panic("fuzz: no struct field of kind " + f.Kind.goName())
+}
+
+// fieldStore compiles `p[i].A = v` for a value of the field's kind.
+func (c *compiler) fieldStore(l Lvalue, val code) func(*frame) {
+	idx := as[int](c.expr(l.Idx))
+	n := l.V.slot
+	f := l.V.Shape.Fields[l.F]
+	switch f.Kind {
+	case KF32:
+		st, v := f.set.(func(any, int, float32)), as[float32](val)
+		return func(fr *frame) { st(fr.bStruct[n], idx(fr), v(fr)) }
+	case KF64:
+		st, v := f.set.(func(any, int, float64)), as[float64](val)
+		return func(fr *frame) { st(fr.bStruct[n], idx(fr), v(fr)) }
+	case KI32:
+		st, v := f.set.(func(any, int, int32)), as[int32](val)
+		return func(fr *frame) { st(fr.bStruct[n], idx(fr), v(fr)) }
+	case KI64:
+		st, v := f.set.(func(any, int, int64)), as[int64](val)
+		return func(fr *frame) { st(fr.bStruct[n], idx(fr), v(fr)) }
+	case KU32:
+		st, v := f.set.(func(any, int, uint32)), as[uint32](val)
+		return func(fr *frame) { st(fr.bStruct[n], idx(fr), v(fr)) }
+	case KU64:
+		st, v := f.set.(func(any, int, uint64)), as[uint64](val)
+		return func(fr *frame) { st(fr.bStruct[n], idx(fr), v(fr)) }
+	case KBool:
+		st, v := f.set.(func(any, int, bool)), as[bool](val)
+		return func(fr *frame) { st(fr.bStruct[n], idx(fr), v(fr)) }
+	}
+	panic("fuzz: cannot store into a struct field of kind " + f.Kind.goName())
+}
+
 func (c *compiler) index(x *Index) code {
 	idx := as[int](c.expr(x.Idx))
 	return withBuf(x.Base, func(get func(*frame) []float32) code {
@@ -399,6 +489,10 @@ func withBuf(v *Var,
 }
 
 func (c *compiler) length(v *Var) code {
+	if v.Shape != nil {
+		n, shape := v.slot, v.Shape
+		return mk(KInt, func(f *frame) int { return shape.length(f.bStruct[n]) })
+	}
 	return withBuf(v, func(get func(*frame) []float32) code {
 		return mk(KInt, func(f *frame) int { return len(get(f)) })
 	}, func(get func(*frame) []float64) code {
@@ -1018,6 +1112,12 @@ func withBufBinder(src *Var, n int) func(*frame, *frame) {
 // once per launch, rather than in the closure every thread runs.
 func bindArg(v *Var, val any) func(*frame) {
 	n := v.slot
+	if v.Slice && v.Shape != nil {
+		// Held as an any, and never unwrapped here: which shape it is was
+		// fixed when the program was generated, and the accessors that reach
+		// into it know.
+		return func(f *frame) { f.bStruct[n] = val }
+	}
 	if v.Slice {
 		switch v.Kind {
 		case KF32:

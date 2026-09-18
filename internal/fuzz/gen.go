@@ -69,6 +69,12 @@ type gen struct {
 
 	inBufs  []*Var // read-only parameters, indexable anywhere
 	outBufs []*Var // written parameters, touched only at this thread's own slot
+	// structIn is a read-only struct buffer and structOut a written one, or
+	// nil. They are held apart from inBufs and outBufs because a struct is
+	// never read or written whole -- only one field of one element -- so the
+	// places that index a buffer must not reach for one.
+	structIn  *Var
+	structOut *Var
 	// atomBuf is the buffer only the atomics touch, and atomFn the single
 	// operation they use on it. One operation, because two of them do not
 	// commute with each other: an add and a min over one element answer
@@ -239,6 +245,56 @@ func (g *gen) params(k *Func) {
 		v := &Var{Name: g.paramName(), Kind: pick(g.r, g.valueKinds())}
 		g.addParam(k, v, true)
 	}
+	g.structParams(k, threads, outLen)
+}
+
+// structParams adds a struct buffer to read from and, less often, one to write
+// to.
+//
+// They are worth generating for what the emitter does with the *type* rather
+// than with the values: every hole becomes a gocuda_padN member and the whole
+// struct gets a sizeof assertion, which is what stands in for the field offsets
+// NVRTC has no offsetof to check. So the test is mostly that NVRTC accepts the
+// declaration at all, and that is why a struct earns its place even in a
+// program that only reads one field.
+//
+// Not every program gets one. A struct in every kernel would crowd out the
+// shapes the generator already covers, and the point is to add a seam, not to
+// replace the others with it.
+func (g *gen) structParams(k *Func, threads, outLen int) {
+	if g.r.IntN(3) != 0 {
+		return
+	}
+	shape := pick(g.r, Shapes)
+	g.p.Shapes = append(g.p.Shapes, shape)
+
+	in := &Var{Name: g.paramName(), Kind: KStruct, Shape: shape, Slice: true, Len: g.raggedLen(threads)}
+	g.addParam(k, in, true)
+	g.structIn = in
+
+	// A written one only where the shape has a field worth writing: a narrow
+	// field takes no value the subset can produce except a conversion, which
+	// would say nothing the slice case does not.
+	if g.r.IntN(2) != 0 || !shapeHasWritableField(shape) {
+		return
+	}
+	// The same length as the other outputs, because the tail that writes them
+	// is guarded by `gid < len(outBufs[0])` and this is written in it. A buffer
+	// of its own length would be indexed past its end on the first thread the
+	// guard let through and the other did not.
+	out := &Var{Name: g.paramName(), Kind: KStruct, Shape: shape, Slice: true, Len: outLen}
+	g.addParam(k, out, false)
+	g.structOut = out
+}
+
+// shapeHasWritableField reports whether anything in the shape can be stored to.
+func shapeHasWritableField(shape *StructShape) bool {
+	for _, f := range shape.Fields {
+		if f.writable() {
+			return true
+		}
+	}
+	return false
 }
 
 // raggedLen is a buffer length that is deliberately not a multiple of the
@@ -263,7 +319,7 @@ func (g *gen) addParam(k *Func, v *Var, readOnly bool) {
 	g.declare(v)
 	g.p.Params = append(g.p.Params, ParamSpec{
 		Name: v.Name, Kind: v.Kind, Slice: v.Slice, Len: v.Len,
-		ReadOnly: readOnly, AliasOf: -1,
+		ReadOnly: readOnly, AliasOf: -1, Shape: v.Shape,
 	})
 }
 
@@ -424,6 +480,26 @@ func (g *gen) stores() []Stmt {
 		}
 		out = append(out, &Assign{LHS: lhs, Op: op, RHS: g.expr(b.Kind, 3)})
 	}
+	// And this thread's own element of the struct output, one writable field of
+	// it. A plain store only: a compound assignment would read and write
+	// through the same pair of accessors and be testing those rather than the
+	// translation.
+	if g.structOut != nil {
+		var writable []int
+		for i, f := range g.structOut.Shape.Fields {
+			if f.writable() {
+				writable = append(writable, i)
+			}
+		}
+		f := pick(g.r, writable)
+		k := g.structOut.Shape.Fields[f].Kind
+		out = append(out, &Assign{
+			LHS: Lvalue{V: g.structOut, Idx: &Ref{V: g.gid}, F: f},
+			Op:  token.ASSIGN,
+			RHS: g.expr(k, 3),
+		})
+
+	}
 	if g.atomBuf != nil {
 		out = append(out, g.atomic())
 	}
@@ -471,6 +547,7 @@ func (g *gen) genHelpers() {
 func (g *gen) genHelperBody(fn *Func) {
 	prevFn, prevScopes, prevDepth := g.fn, g.scopes, g.depth
 	prevIn, prevTiles, prevOut, prevAtom := g.inBufs, g.tiles, g.outBufs, g.atomBuf
+	prevSIn, prevSOut := g.structIn, g.structOut
 	prevUniform, prevBudget, prevPure := g.uniform, g.budget, g.pureFns
 	prevNoShadow := g.noShadow
 	g.fn, g.scopes, g.depth, g.noShadow = fn, nil, map[string]int{}, map[string]bool{}
@@ -479,6 +556,7 @@ func (g *gen) genHelperBody(fn *Func) {
 	// that writes is refused at lowering, and passing one that the launch
 	// aliased would be unsound even where lowering accepts it.
 	g.outBufs, g.atomBuf, g.tiles = nil, nil, nil
+	g.structIn, g.structOut = nil, nil
 	g.budget = 3 + g.r.IntN(4)
 	// A helper without a gpu.Ctx holds no barrier and can say nothing
 	// block-uniform in the first place: its scalar parameters come from its
@@ -533,6 +611,7 @@ func (g *gen) genHelperBody(fn *Func) {
 
 	g.fn, g.scopes, g.depth = prevFn, prevScopes, prevDepth
 	g.inBufs, g.tiles, g.outBufs, g.atomBuf = prevIn, prevTiles, prevOut, prevAtom
+	g.structIn, g.structOut = prevSIn, prevSOut
 	g.uniform, g.budget, g.pureFns = prevUniform, prevBudget, prevPure
 	g.noShadow = prevNoShadow
 }

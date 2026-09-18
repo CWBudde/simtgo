@@ -37,6 +37,11 @@ type Program struct {
 	HasDyn bool
 
 	Params []ParamSpec
+
+	// Shapes are the struct types this program declares, in declaration order.
+	// It is empty for most programs: a struct is one of the things the
+	// generator may reach for, not something every kernel has.
+	Shapes []*StructShape
 }
 
 // A ParamSpec describes one kernel parameter to whoever has to supply it.
@@ -55,6 +60,10 @@ type ParamSpec struct {
 	Len      int
 	ReadOnly bool
 	AliasOf  int // -1, or the index of the earlier parameter sharing this buffer
+	// Shape is the struct type when Kind is KStruct, and nil otherwise. It is
+	// what Inputs needs to make a buffer of, since nothing outside structs.go
+	// names the type.
+	Shape *StructShape
 }
 
 // Name is the kernel's name, which is also the generated C entry point.
@@ -78,6 +87,11 @@ func (p *Program) CloneArgs(a *Args) *Args {
 	for i, spec := range p.Params {
 		if spec.AliasOf >= 0 {
 			out.Vals[i] = out.Vals[spec.AliasOf]
+			continue
+		}
+		if spec.Shape != nil {
+			// The shape knows its own type; nothing else here does.
+			out.Vals[i] = spec.Shape.clone(a.Vals[i])
 			continue
 		}
 		out.Vals[i] = cloneValue(a.Vals[i])
