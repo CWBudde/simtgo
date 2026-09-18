@@ -65,3 +65,10 @@ func AtomicOnAnExpression(ctx gpu.Ctx, h []int32) {
 func Float64MathWithoutTheDirective(ctx gpu.Ctx, a []float32) {
 	a[0] = float32(gpu.Sqrt64(2)) // want `is double precision and needs //gocuda:float64`
 }
+
+// NegativeLane is refused because CUDA reads a lane offset as unsigned: -1 is
+// not the lane below but lane 4294967295, and the CPU emulator has an answer
+// for it that the device does not.
+func NegativeLane(ctx gpu.Ctx, y []float32) {
+	y[0] = ctx.ShuffleUpF32(y[1], -1) // want `takes a lane offset and -1 is negative`
+}

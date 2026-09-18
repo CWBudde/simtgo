@@ -12,6 +12,14 @@
 // That function compiles, runs and can be tested as plain Go via RunCPU, and
 // the transpiler in package simt lowers the very same source to CUDA C. One
 // source, two backends.
+//
+// Two corners of the vocabulary are emulated rather than modelled, and each
+// begins with what its emulation cannot promise: atomic.go, where the CPU
+// serialises every read-modify-write on one lock and imposes an order the
+// device does not, and warp.go, where a warp is a rendezvous between
+// goroutines rather than threads already in lockstep -- so a short warp and
+// ActiveMask both answer questions the device answers differently. Those notes
+// are worth reading before relying on either.
 package gpu
 
 import (
@@ -197,7 +205,16 @@ func (c Ctx) AssumeBlockDim(n int) {
 // number of SharedF32 calls this thread has made so far, which doubles as the
 // index of its next call; comparing the final values across a block is how
 // divergent shared-memory usage is detected.
-type threadState struct{ seq int }
+//
+// warp and lane say which rendezvous the warp-level primitives join and which
+// slot of it this thread owns. They are fixed when the block is built, because
+// which warp a thread belongs to is a property of its position and not of what
+// it does.
+type threadState struct {
+	seq  int
+	warp *warpState
+	lane int
+}
 
 // slab is one shared buffer of a block together with the size it was created
 // with. Keeping the size is what allows a later thread that asks for a
@@ -224,6 +241,7 @@ type slab struct {
 // kernel author's recover and a test's.
 type blockState struct {
 	bar   *barrier
+	warps []*warpState
 	mu    sync.Mutex
 	slabs []slab
 	fail  string
@@ -330,12 +348,24 @@ func runBlock(bid int, grid, block Dim, fn func(Ctx)) string {
 	n := block.count()
 	st := &blockState{bar: newBarrier(n)}
 
+	// A warp is 32 consecutive threads by flat index, which is how CUDA
+	// partitions a block, so t is already the number that decides both the
+	// warp and the lane. A block that is not a multiple of 32 ends in a short
+	// warp, and the emulator sizes that one at what is left rather than
+	// pretending the missing lanes are there: see gpu/warp.go for what the
+	// device does instead.
+	st.warps = make([]*warpState, (n+WarpSize-1)/WarpSize)
+	for w := range st.warps {
+		size := min(WarpSize, n-w*WarpSize)
+		st.warps[w] = &warpState{bar: newWarpBarrier(size), block: st, bid: bid, id: w, size: size}
+	}
+
 	// The thread states outlive the goroutines that use them: after the block
 	// has finished, their seq counters say how many SharedF32 calls each
 	// thread made, and those counts must agree.
 	threads := make([]*threadState, n)
 	for t := range n {
-		threads[t] = &threadState{}
+		threads[t] = &threadState{warp: st.warps[t/WarpSize], lane: t % WarpSize}
 	}
 
 	var wg sync.WaitGroup
@@ -343,6 +373,12 @@ func runBlock(bid int, grid, block Dim, fn func(Ctx)) string {
 	for t := range n {
 		go func() {
 			defer wg.Done()
+			// A thread that leaves the kernel stops being a participant in its
+			// warp, whether it returned or panicked -- which is what keeps
+			// ordinary divergence from stranding the threads waiting for it.
+			// Registered first so that it runs last, after the recover below
+			// has turned a panic into a diagnosis.
+			defer threads[t].warp.bar.abandon()
 			// A kernel that panics on a thread goroutine would otherwise kill
 			// the process. Catch it, let the barrier forget the thread so its
 			// siblings are not stranded, and hand the message upwards to be

@@ -60,3 +60,21 @@ func Float64Math(ctx gpu.Ctx, y []float64) {
 		y[i] = gpu.Hypot64(gpu.Sqrt64(y[i]), 1)
 	}
 }
+
+// WarpSum is the accepted half of the warp vocabulary. The analyzer has to
+// agree with the transpiler that a warp primitive is ordinary vocabulary
+// wherever a kernel may put it, device functions included; nothing else makes
+// them agree.
+func WarpSum(ctx gpu.Ctx, out, x []float32) {
+	i := ctx.GlobalID()
+	v := float32(0)
+	if i < len(x) {
+		v = x[i]
+	}
+	for off := gpu.WarpSize / 2; off > 0; off /= 2 {
+		v += ctx.ShuffleDownF32(v, off)
+	}
+	if ctx.LaneID() == 0 && ctx.Any(v != 0) {
+		out[i/gpu.WarpSize] = v
+	}
+}

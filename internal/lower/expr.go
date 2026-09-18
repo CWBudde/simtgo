@@ -257,6 +257,12 @@ func (t *transpiler) call(c *ast.CallExpr) cexpr {
 			case "AssumeBlockDim":
 				return t.assumeBlockDim(c)
 			}
+			// The warp-level vocabulary is a table of its own: it takes
+			// arguments, and the mask CUDA wants in front of them is the
+			// emitter's rather than the kernel's.
+			if op, ok := ctxWarp[name]; ok {
+				return t.warp(c, name, op)
+			}
 			builtin, ok := ctxBuiltins[name]
 			if !ok {
 				t.fail(c.Pos(), "gpu.Ctx.%s is not available on the device", name)

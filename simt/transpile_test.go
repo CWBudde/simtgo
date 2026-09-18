@@ -14,7 +14,7 @@ import (
 // TestGolden pins the generated CUDA for every example kernel. Run with
 // GOCUDA_UPDATE=1 to refresh the golden files after an intentional change.
 func TestGolden(t *testing.T) {
-	for _, name := range []string{"VecAdd", "Magnitude", "Scale", "FIR", "Classify", "Softclip", "Transpose", "Quantize", "BandGain"} {
+	for _, name := range []string{"VecAdd", "Magnitude", "Scale", "FIR", "Classify", "Softclip", "Transpose", "Quantize", "BandGain", "WarpReduceSum"} {
 		t.Run(name, func(t *testing.T) {
 			u, err := simt.Transpile(gocuda.Kernels(), name)
 			if err != nil {
@@ -764,6 +764,105 @@ func TestFloat64Math(t *testing.T) {
 		name: "the float32 helpers are untouched",
 		body: "func K(ctx gpu.Ctx, y []float32) { y[0] = gpu.Sqrt(y[1]) }",
 		want: "y[0] = sqrtf(y[1]);",
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := transpile(t, tc.body).Source
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("generated CUDA does not contain %q:\n%s", tc.want, got)
+			}
+		})
+	}
+}
+
+// TestWarpPrimitives pins what the warp vocabulary lowers to.
+//
+// The interesting part is the argument the kernel never wrote: CUDA's _sync
+// built-ins take a participation mask, the Go spelling has none, and the
+// emitter writes 0xffffffff against the contract that every thread of the warp
+// reaches the call. Getting that wrong is undefined behaviour rather than a
+// wrong number, which is why it is pinned rather than trusted.
+func TestWarpPrimitives(t *testing.T) {
+	const decl = "func K(ctx gpu.Ctx, y []float32, h []int32) "
+	cases := []struct{ name, body, want string }{{
+		// Not threadIdx.x & 31: CUDA fills a warp with consecutive flat
+		// thread indices, so a 16x16 block would make every second row lane 0.
+		name: "the lane is the flat thread index modulo the warp size",
+		body: decl + "{ y[0] = float32(ctx.LaneID()) }",
+		want: "y[0] = (float)((int)((threadIdx.x + blockDim.x * (threadIdx.y + blockDim.y * threadIdx.z)) % 32));",
+	}, {
+		name: "a float shuffle carries the mask the kernel never wrote",
+		body: decl + "{ y[0] = ctx.ShuffleF32(y[1], 0) }",
+		want: "y[0] = __shfl_sync(0xffffffff, y[1], 0);",
+	}, {
+		name: "an int shuffle is the same built-in, resolved by argument",
+		body: decl + "{ h[0] = ctx.ShuffleI32(h[1], 3) }",
+		want: "h[0] = __shfl_sync(0xffffffff, h[1], 3);",
+	}, {
+		name: "xor",
+		body: decl + "{ y[0] = ctx.ShuffleXorF32(y[1], 16) }",
+		want: "y[0] = __shfl_xor_sync(0xffffffff, y[1], 16);",
+	}, {
+		name: "up",
+		body: decl + "{ h[0] = ctx.ShuffleUpI32(h[1], 1) }",
+		want: "h[0] = __shfl_up_sync(0xffffffff, h[1], 1);",
+	}, {
+		name: "down, with an expression for the delta",
+		body: decl + "{ i := ctx.GlobalID(); y[0] = ctx.ShuffleDownF32(y[1], i+1) }",
+		want: "y[0] = __shfl_down_sync(0xffffffff, y[1], i + 1);",
+	}, {
+		name: "ballot returns the mask itself",
+		body: decl + "{ h[0] = int32(ctx.Ballot(y[0] > 0)) }",
+		want: "h[0] = (int)(__ballot_sync(0xffffffff, y[0] > 0.0f));",
+	}, {
+		// C's __any_sync returns an int and Go's Any returns a bool. The
+		// comparison is written out rather than left to C++'s silent
+		// conversion, because the generated source is read by people.
+		name: "a vote becomes a comparison, because C returns an int",
+		body: decl + "{ if ctx.Any(y[0] > 0) { y[1] = 1 } }",
+		want: "if (__any_sync(0xffffffff, y[0] > 0.0f) != 0)",
+	}, {
+		name: "and so does All",
+		body: decl + "{ if ctx.All(y[0] > 0) { y[1] = 1 } }",
+		want: "if (__all_sync(0xffffffff, y[0] > 0.0f) != 0)",
+	}, {
+		// The comparison binds tighter than && in C as well as in Go, so the
+		// conjunction needs no parentheses and the negation does.
+		name: "a vote composes with a conjunction without gaining parentheses",
+		body: decl + "{ if ctx.Any(y[0] > 0) && ctx.All(y[1] > 0) { y[2] = 1 } }",
+		want: "if (__any_sync(0xffffffff, y[0] > 0.0f) != 0 && __all_sync(0xffffffff, y[1] > 0.0f) != 0)",
+	}, {
+		name: "a negated vote is parenthesised, because ! binds tighter than !=",
+		body: decl + "{ if !ctx.Any(y[0] > 0) { y[1] = 1 } }",
+		want: "if (!(__any_sync(0xffffffff, y[0] > 0.0f) != 0))",
+	}, {
+		// __activemask is the one that reads the mask rather than taking one,
+		// so it is also the one entry in the table with no mask argument.
+		name: "the active mask takes no mask",
+		body: decl + "{ h[0] = int32(ctx.ActiveMask()) }",
+		want: "h[0] = (int)(__activemask());",
+	}, {
+		name: "syncwarp is a statement and still carries the mask",
+		body: decl + "{ ctx.SyncWarp(); y[0] = 1 }",
+		want: "__syncwarp(0xffffffff);",
+	}, {
+		// gpu.WarpSize is a constant on both sides, so go/types folds it and
+		// the emitter never sees the selector at all. CUDA's own warpSize is
+		// an ordinary variable, and a bound divided by one would be a runtime
+		// division.
+		name: "WarpSize folds to a literal",
+		body: decl + "{ y[0] = float32(ctx.LaneID() % gpu.WarpSize) }",
+		want: "% 32)",
+	}, {
+		// A device function that takes a Ctx loses it from its C signature,
+		// exactly as the kernel does, and the built-ins are available there
+		// with nothing special: they are not promises about a launch, which is
+		// what SharedF32 and AssumeBlockDim are refused in one for.
+		name: "inside a device function taking a Ctx",
+		body: "//gocuda:ignore\nfunc lane(ctx gpu.Ctx) int { return ctx.LaneID() }\n\n" +
+			"func K(ctx gpu.Ctx, y []float32) { y[0] = float32(lane(ctx)) }",
+		want: "return (int)((threadIdx.x + blockDim.x * (threadIdx.y + blockDim.y * threadIdx.z)) % 32);",
 	}}
 
 	for _, tc := range cases {

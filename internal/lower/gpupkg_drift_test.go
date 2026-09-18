@@ -104,8 +104,14 @@ func TestGPUPackageMatchesReal(t *testing.T) {
 			if name == "SharedF32" || name == "AssumeBlockDim" {
 				continue
 			}
+			if _, ok := ctxWarp[name]; ok {
+				// The warp-level methods have a table of their own: they take
+				// arguments, which ctxBuiltins cannot express, and the mask
+				// CUDA wants in front of those is the emitter's to supply.
+				continue
+			}
 			if _, ok := ctxBuiltins[name]; !ok {
-				t.Errorf("gpu.Ctx.%s has no entry in ctxBuiltins; the emitter cannot lower it", name)
+				t.Errorf("gpu.Ctx.%s has no entry in ctxBuiltins or ctxWarp; the emitter cannot lower it", name)
 			}
 		}
 	})

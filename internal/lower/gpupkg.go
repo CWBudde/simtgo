@@ -2,6 +2,7 @@ package lower
 
 import (
 	"go/ast"
+	"go/constant"
 	"go/token"
 	"go/types"
 	"strconv"
@@ -62,6 +63,41 @@ func GPUPackage() *types.Package {
 	// block size the kernel was written for.
 	method("AssumeBlockDim", []*types.Var{types.NewVar(token.NoPos, pkg, "n", intT)}, nil)
 
+	// The warp-level vocabulary. It is spelled on Ctx rather than at package
+	// level, as the atomics are, because a warp primitive is defined by which
+	// thread calls it: the CPU emulator runs a thread per goroutine and only
+	// the Ctx says which one this is. See gpu/warp.go.
+	i32 := types.Typ[types.Int32]
+	u32 := types.Typ[types.Uint32]
+	boolT := types.Typ[types.Bool]
+	arg := func(name string, t types.Type) *types.Var {
+		return types.NewVar(token.NoPos, pkg, name, t)
+	}
+	method("LaneID", nil, ret(intT))
+	// The lane argument is an int and not a uint32 even though CUDA reads it
+	// as unsigned, because every other index in a kernel is an int and a
+	// reduction loop counts with one. A negative constant is refused when the
+	// call is lowered rather than being made unspellable here, so that the
+	// refusal can say why.
+	for _, name := range []string{"ShuffleF32", "ShuffleXorF32", "ShuffleUpF32", "ShuffleDownF32"} {
+		method(name, []*types.Var{arg("v", f32), arg("lane", intT)}, ret(f32))
+	}
+	for _, name := range []string{"ShuffleI32", "ShuffleXorI32", "ShuffleUpI32", "ShuffleDownI32"} {
+		method(name, []*types.Var{arg("v", i32), arg("lane", intT)}, ret(i32))
+	}
+	method("Ballot", []*types.Var{arg("pred", boolT)}, ret(u32))
+	method("Any", []*types.Var{arg("pred", boolT)}, ret(boolT))
+	method("All", []*types.Var{arg("pred", boolT)}, ret(boolT))
+	method("ActiveMask", nil, ret(u32))
+	method("SyncWarp", nil, nil)
+
+	// WarpSize is a constant on both sides, so go/types folds it and the
+	// emitter never sees the selector at all -- which is the point: CUDA's own
+	// warpSize is a variable, and a kernel that sizes a shared tile against it
+	// would not compile.
+	scope.Insert(types.NewConst(token.NoPos, pkg, "WarpSize",
+		types.Typ[types.UntypedInt], constant.MakeInt64(32)))
+
 	fn := func(name string, arity int) {
 		params := make([]*types.Var, arity)
 		for i := range params {
@@ -99,7 +135,6 @@ func GPUPackage() *types.Package {
 		fn64(name, 2)
 	}
 
-	i32 := types.Typ[types.Int32]
 	i32Slice := types.NewSlice(i32)
 
 	// atomic declares one of the read-modify-write helpers. The shape is

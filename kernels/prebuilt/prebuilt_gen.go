@@ -35,6 +35,9 @@ const Softclip Lowered = "Softclip"
 // Transpose reports that the kernel of that name lowered to CUDA C.
 const Transpose Lowered = "Transpose"
 
+// WarpReduceSum reports that the kernel of that name lowered to CUDA C.
+const WarpReduceSum Lowered = "WarpReduceSum"
+
 //go:embed BandGain.compute_75.ptx
 var ptxBandGain []byte
 
@@ -61,6 +64,9 @@ var ptxSoftclip []byte
 
 //go:embed Transpose.compute_75.ptx
 var ptxTranspose []byte
+
+//go:embed WarpReduceSum.compute_75.ptx
+var ptxWarpReduceSum []byte
 
 func init() {
 	simt.RegisterPrebuilt(simt.Prebuilt{
@@ -120,5 +126,12 @@ func init() {
 		PTX:           ptxTranspose,
 		RequiredBlock: 256,
 		SharedBytes:   1024,
+	})
+	simt.RegisterPrebuilt(simt.Prebuilt{
+		Name:          "WarpReduceSum",
+		SourceSHA256:  "87dc547472f50d66c1fa033866e863d9e4f10edceba83e862f562000b26b975a",
+		Arch:          "compute_75",
+		PTX:           ptxWarpReduceSum,
+		RequiredBlock: 128,
 	})
 }

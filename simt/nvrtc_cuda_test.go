@@ -203,6 +203,45 @@ func TestGeneratedCCompiles(t *testing.T) {
 			"\tctx.SyncThreads()\n" +
 			"\tbump(h, ctx.GlobalID()%4)\n" +
 			"\ty[0] = s[0]\n}",
+	}, {
+		// The warp vocabulary, and the case this whole test exists for: NVRTC
+		// compiles a bare string with no #include, so whether the _sync
+		// built-ins are declared at all was an open question until this
+		// compiled. Every entry in the emitter's table is reached here, both
+		// element types of every shuffle, because they are separate overloads.
+		name: "the warp-level vocabulary with no headers included",
+		body: "func K(ctx gpu.Ctx, y []float32, h []int32) {\n" +
+			"\ti := ctx.GlobalID()\n" +
+			"\tlane := ctx.LaneID()\n" +
+			"\tv := y[i]\n" +
+			"\tv += ctx.ShuffleF32(v, 0)\n" +
+			"\tv += ctx.ShuffleXorF32(v, gpu.WarpSize/2)\n" +
+			"\tv += ctx.ShuffleUpF32(v, 1)\n" +
+			"\tv += ctx.ShuffleDownF32(v, 2)\n" +
+			"\tn := h[i]\n" +
+			"\tn += ctx.ShuffleI32(n, lane)\n" +
+			"\tn += ctx.ShuffleXorI32(n, 8)\n" +
+			"\tn += ctx.ShuffleUpI32(n, 4)\n" +
+			"\tn += ctx.ShuffleDownI32(n, 4)\n" +
+			"\tm := ctx.Ballot(v > 0) | ctx.ActiveMask()\n" +
+			"\tif ctx.Any(n > 0) && ctx.All(lane < gpu.WarpSize) {\n\t\tm += 1\n\t}\n" +
+			"\tctx.SyncWarp()\n" +
+			"\th[i] = n + int32(m%2)\n" +
+			"\ty[i] = v + float32(lane)\n}",
+	}, {
+		// A warp primitive reached through a device function, which is where
+		// the Ctx vanishes from the C signature: the built-ins are globals, so
+		// nothing has to be passed for them to work.
+		name: "a warp primitive inside a device function",
+		body: "//gocuda:ignore\n" +
+			"func warpSum(ctx gpu.Ctx, v float32) float32 {\n" +
+			"\tfor off := gpu.WarpSize / 2; off > 0; off /= 2 {\n" +
+			"\t\tv += ctx.ShuffleDownF32(v, off)\n\t}\n" +
+			"\treturn v\n}\n\n" +
+			"func K(ctx gpu.Ctx, y, x []float32) {\n" +
+			"\ti := ctx.GlobalID()\n" +
+			"\ts := warpSum(ctx, x[i])\n" +
+			"\tif ctx.LaneID() == 0 {\n\t\ty[i/gpu.WarpSize] = s\n\t}\n}",
 	}}
 
 	for _, tc := range cases {
@@ -220,7 +259,7 @@ func TestGeneratedCCompiles(t *testing.T) {
 
 	// The committed kernels go through the same gate, so a kernel that stops
 	// compiling is caught here and not at some later launch.
-	for _, name := range []string{"VecAdd", "Magnitude", "Scale", "FIR", "Classify", "Softclip", "Transpose", "Quantize", "BandGain"} {
+	for _, name := range []string{"VecAdd", "Magnitude", "Scale", "FIR", "Classify", "Softclip", "Transpose", "Quantize", "BandGain", "WarpReduceSum"} {
 		t.Run(name, func(t *testing.T) {
 			u, err := simt.Transpile(gocuda.Kernels(), name)
 			if err != nil {
