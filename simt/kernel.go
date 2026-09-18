@@ -3,6 +3,7 @@ package simt
 import (
 	"fmt"
 	"io/fs"
+	"math"
 
 	"github.com/CWBudde/gocuda/cuda"
 	"github.com/CWBudde/gocuda/internal/jit"
@@ -202,6 +203,44 @@ func (e *AliasError) Error() string {
 		e.Kernel, e.Write, e.Other, e.Write)
 }
 
+// ArgCountError is a launch that supplied a different number of arguments than
+// the kernel has parameters.
+//
+// Nothing downstream catches this. cuda.BuildArgs marshals whatever it is
+// given, and cuLaunchKernel reads as many parameters as the loaded function
+// declares from the array it was handed -- so too few arguments has the kernel
+// reading whatever follows the array, and too many is silently dropped. Both
+// are undefined behaviour that surfaces as wrong numbers rather than as an
+// error, which is why the count is checked against the signature that lowering
+// recorded.
+type ArgCountError struct {
+	Kernel string
+	Want   int // parameters the kernel declares, after the gpu.Ctx
+	Got    int // arguments the launch supplied
+}
+
+func (e *ArgCountError) Error() string {
+	return fmt.Sprintf("simt: %s takes %d launch argument(s), got %d", e.Kernel, e.Want, e.Got)
+}
+
+// checkArgs refuses a launch whose argument count does not match the kernel's.
+//
+// args is what reaches the driver, which for a kernel with a dynamically sized
+// shared tile is one longer than the caller wrote: LaunchSharedDim appends the
+// tile's length, and Params -- which describes the Go signature -- does not
+// include it. The extra is subtracted again before the numbers are reported,
+// so the error states the count the caller can actually see.
+func (k *Kernel) checkArgs(args []any) error {
+	extra := 0
+	if k.DynSharedWidth != 0 {
+		extra = 1
+	}
+	if got := len(args) - extra; got != len(k.Params) {
+		return &ArgCountError{Kernel: k.Name, Want: len(k.Params), Got: got}
+	}
+	return nil
+}
+
 // checkAliasing refuses a launch that breaks the __restrict__ promise.
 //
 // The Go source cannot make that promise: VecAdd(ctx, c, a, b) is three
@@ -222,9 +261,9 @@ func (e *AliasError) Error() string {
 // the same Go slice; there the kernel is ordinary Go, where aliasing is
 // defined, so the two backends agree on everything except the diagnosis.
 func (k *Kernel) checkAliasing(args []any) error {
-	if len(args) != len(k.Params) {
-		// A mismatched call is a different error, and BuildArgs or the driver
-		// will say so; guessing at which argument is which would not.
+	if len(args) < len(k.Params) {
+		// checkArgs has already refused this at every launch; pairing the
+		// arguments off anyway would be a guess about which is which.
 		return nil
 	}
 	type span struct {
@@ -233,11 +272,15 @@ func (k *Kernel) checkAliasing(args []any) error {
 		param int
 	}
 	var spans []span
-	for i, a := range args {
-		if !k.Params[i].Slice {
+	// Over the parameters rather than over the arguments, because args may
+	// carry one more than Params describes: the length LaunchSharedDim
+	// appends for a dynamically sized tile. It is a scalar and always last,
+	// so the positions the two share still line up.
+	for i, p := range k.Params {
+		if !p.Slice {
 			continue
 		}
-		r, ok := a.(cuda.Ranger)
+		r, ok := args[i].(cuda.Ranger)
 		if !ok {
 			continue
 		}
@@ -273,7 +316,9 @@ func (k *Kernel) checkAliasing(args []any) error {
 // at any other size: its shared tiles are sized for that one geometry, so a
 // different block would stage the wrong number of samples and read past them.
 // A launch that binds one device buffer to two parameters is refused too, when
-// the kernel writes through either of them; see checkAliasing.
+// the kernel writes through either of them; see checkAliasing. So is one that
+// supplies the wrong number of arguments, which the driver would otherwise
+// read off the end of the parameter array; see checkArgs.
 func (k *Kernel) Launch(grid, block int, args ...any) error {
 	return k.LaunchDim(cuda.D1(grid), cuda.D1(block), args...)
 }
@@ -318,6 +363,17 @@ func (k *Kernel) LaunchSharedDim(grid, block cuda.Dim3, n int, args ...any) erro
 	if n < 0 {
 		return fmt.Errorf("simt: %s: a shared tile of %d elements is not a size", k.Name, n)
 	}
+	// Both numbers derived from n are 32-bit on the device -- the byte count
+	// the driver is handed, and the length the kernel reads -- so a count that
+	// does not fit has to be refused here rather than wrapped. The limit check
+	// below cannot stand in for this one: the product is computed in a host
+	// int, so it is the truncation of n that comes first, and maxShared == 0,
+	// which is what "there was no device to ask" looks like, disables the
+	// limit check entirely.
+	if n > math.MaxInt32/k.DynSharedWidth {
+		return fmt.Errorf("simt: %s: a shared tile of %d elements of %d bytes does not fit a 32-bit size",
+			k.Name, n, k.DynSharedWidth)
+	}
 	dynBytes := n * k.DynSharedWidth
 	// The same check Build makes, and it has to be made again: this is the
 	// first moment the dynamic half of the total exists. cuLaunchKernel would
@@ -340,6 +396,9 @@ func (k *Kernel) launch(grid, block cuda.Dim3, dynBytes int, args []any) error {
 	threads := int(block.X) * int(block.Y) * int(block.Z)
 	if k.RequiredBlock != 0 && threads != k.RequiredBlock {
 		return &BlockSizeError{Kernel: k.Name, Want: k.RequiredBlock, Got: threads}
+	}
+	if err := k.checkArgs(args); err != nil {
+		return err
 	}
 	if err := k.checkAliasing(args); err != nil {
 		return err
