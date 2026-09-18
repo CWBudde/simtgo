@@ -199,6 +199,9 @@ type transpiler struct {
 	// prototypes, because a prototype may name one.
 	structNames map[*types.Named]string
 	structDefs  []string
+	// structLayouts records the padding members emitted for each struct, which
+	// is what a positional literal has to step over.
+	structLayouts map[*types.Named]structLayout
 	// deviceProtos and deviceDefs accumulate the emitted device functions.
 	// Prototypes are written before any definition, which is what makes the
 	// order of the Go declarations irrelevant.
@@ -743,14 +746,16 @@ func (t *transpiler) ctype(typ types.Type, pos token.Pos) string {
 	}
 	switch basic.Kind() {
 	case types.Int8, types.Int16, types.Uint8, types.Uint16:
-		// Not refused because the widths disagree -- they match exactly -- but
-		// because the arithmetic does. Go computes int8*int8 in 8 bits and
-		// wraps; C promotes both to int, computes in 32, and truncates only at
-		// the assignment. `a, b := int8(100), int8(3); a*b/2` is 22 in Go and
-		// -106 in C. That is a different answer from code that compiled, which
-		// is the one thing this transpiler must never produce, so the narrow
-		// widths wait for a lowering that truncates at every step.
-		t.fail(pos, "unsupported type %s on the device: Go computes %s arithmetic in %d bits and C promotes it to int, so the two would disagree; use int32", typ, typ, 8*t.sizes.Sizeof(basic))
+		// Storage only, and this is the position that is not storage. The
+		// widths match exactly; the arithmetic does not. Go computes int8*int8
+		// in 8 bits and wraps, while C promotes both to int, computes in 32 and
+		// truncates only at the assignment, so `a, b := int8(100), int8(3);
+		// a*b/2` is 22 in Go and -106 in C. A variable, a by-value parameter or
+		// a result exists in order to be computed with, so one of these here
+		// would be an invitation to write exactly that expression -- whereas a
+		// slice element, an array element or a struct field is a place bytes
+		// live, which ctypeElem does accept.
+		t.fail(pos, "%s is storage only on the device: it may be a slice element, an array element or a struct field, but not a variable, a parameter or a result, because Go computes %s arithmetic in %d bits and C promotes it to int; hold the value in an int32 and convert with %s(...) when you store it", typ, typ, 8*t.sizes.Sizeof(basic), typ)
 		return "void"
 	case types.Uint, types.Uintptr:
 		// int gets the narrowing because an index is bounded by the grid.
@@ -780,5 +785,40 @@ func (t *transpiler) ctypeElem(typ types.Type, pos token.Pos) string {
 			return "void"
 		}
 	}
+	// The narrow integers are the mirror image of int: here the widths do line
+	// up, so the bytes cross unchanged, and it is only arithmetic that the two
+	// languages disagree about. An image buffer is the case that asks for this
+	// -- holding a []uint8 as []int32 quadruples both the transfer and the
+	// footprint to store numbers that fit in a byte -- so they are accepted
+	// exactly where a layout is what is being described. Every operator on one
+	// is refused (see narrowOperand), which is what keeps the disagreement from
+	// ever being reachable.
+	if c, ok := narrowCType(typ); ok {
+		return c
+	}
 	return t.ctype(typ, pos)
+}
+
+// narrowCType spells the storage-only integers, and reports false for every
+// other type.
+//
+// int8 becomes "signed char" and never "char": C leaves plain char's signedness
+// to the implementation, and nvcc's is signed on x86 and unsigned on aarch64,
+// so the one spelling that means int8 everywhere is the explicit one.
+func narrowCType(typ types.Type) (string, bool) {
+	basic, ok := typ.Underlying().(*types.Basic)
+	if !ok {
+		return "", false
+	}
+	switch basic.Kind() {
+	case types.Int8:
+		return "signed char", true
+	case types.Uint8:
+		return "unsigned char", true
+	case types.Int16:
+		return "short", true
+	case types.Uint16:
+		return "unsigned short", true
+	}
+	return "", false
 }

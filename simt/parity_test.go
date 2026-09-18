@@ -739,3 +739,220 @@ func TileProbe(ctx gpu.Ctx, out []float32) {
 	}
 	assertEqual(t, "total", got, []float32{blocks * block})
 }
+
+// TestGrayParity is the narrow storage types end to end: []uint8 in, []uint8
+// out, every arithmetic step at int32.
+//
+// The reference is written out here rather than taken from the emulator run,
+// and it is exact. Integer weights are what make that possible: a float32
+// pipeline would need a tolerance, and a tolerance is where a one-bit
+// disagreement in how the two languages truncated a byte would hide. The whole
+// point of this kernel is that no byte is ever an operand, so nothing here may
+// be approximately right.
+func TestGrayParity(t *testing.T) {
+	ctx := device(t)
+	const n, block = 1 << 14, 256
+
+	rgb := make([]uint8, 3*n)
+	for i := range rgb {
+		// 37 is coprime with 256, so every channel takes every value; the
+		// second term keeps the three channels of a pixel from moving in step.
+		rgb[i] = uint8((i*37 + i/251) % 256)
+	}
+	// The two pixels the weights have to land on exactly. White is where a sum
+	// that did not round, or weights that did not add up to 1<<GrayShift, comes
+	// back as 254; black is where anything that carried a stray term shows.
+	for c := 0; c < 3; c++ {
+		rgb[c], rgb[3+c] = 255, 0
+	}
+
+	want := make([]uint8, n)
+	gpu.RunCPU((n+block-1)/block, block, func(c gpu.Ctx) { kernels.Gray(c, want, rgb) })
+
+	ref := make([]uint8, n)
+	for i := range ref {
+		r, g, b := int(rgb[3*i]), int(rgb[3*i+1]), int(rgb[3*i+2])
+		v := (kernels.GrayWeightR*r + kernels.GrayWeightG*g + kernels.GrayWeightB*b + 1<<(kernels.GrayShift-1)) >> kernels.GrayShift
+		ref[i] = uint8(v)
+	}
+	assertEqual(t, "cpu luma", want, ref)
+
+	k, err := simt.Build(ctx, gocuda.Kernels(), "Gray")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	dout, _ := cuda.NewSlice[uint8](ctx, n)
+	drgb, _ := cuda.Upload(ctx, rgb)
+	defer dout.Free()
+	defer drgb.Free()
+
+	if err := k.LaunchN(n, block, dout, drgb); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	got, err := dout.Download()
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	assertEqual(t, "luma", got, want)
+}
+
+// TestNarrowStorageRoundTrip pins the stride rather than the arithmetic.
+//
+// Gray covers a []uint8 computing something. What it cannot cover is the
+// other three widths, and the question they raise is the one []int leaves
+// behind: cuda.Upload copies Go's bytes, so if the device read an element at a
+// different width every value after the first would be wrong. Each buffer here
+// holds a pattern whose elements differ in every byte, and the kernel copies
+// element i of each into its own output slot, so a stride that disagreed comes
+// back as another element's value rather than as something merely close.
+//
+// The probe kernel is inline rather than committed to kernels/, for the reason
+// TestStructLayoutRoundTrip gives: it tests a rule, not a kernel anyone would
+// launch.
+func TestNarrowStorageRoundTrip(t *testing.T) {
+	ctx := device(t)
+
+	const probe = `package kernels
+
+import "github.com/CWBudde/gocuda/gpu"
+
+func NarrowProbe(ctx gpu.Ctx, out []int32, a []int8, b []uint8, c []int16, d []uint16) {
+	i := ctx.GlobalID()
+	if i >= len(a) {
+		return
+	}
+	out[4*i+0] = int32(a[i])
+	out[4*i+1] = int32(b[i])
+	out[4*i+2] = int32(c[i])
+	out[4*i+3] = int32(d[i])
+}
+`
+	src := fstest.MapFS{"probe.go": &fstest.MapFile{Data: []byte(probe)}}
+	k, err := simt.Build(ctx, src, "NarrowProbe")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	const n = 64
+	a := make([]int8, n)
+	b := make([]uint8, n)
+	c := make([]int16, n)
+	d := make([]uint16, n)
+	want := make([]int32, 4*n)
+	for i := range a {
+		// Both signs and both rails, so a signed element read as unsigned --
+		// or a "char" whose signedness the compiler chose for itself -- is a
+		// wrong number and not a coincidence.
+		a[i] = int8(i - 100)
+		b[i] = uint8(200 - i)
+		c[i] = int16(i*517 - 20000)
+		d[i] = uint16(60000 - i*601)
+		want[4*i+0] = int32(a[i])
+		want[4*i+1] = int32(b[i])
+		want[4*i+2] = int32(c[i])
+		want[4*i+3] = int32(d[i])
+	}
+
+	dout, _ := cuda.NewSlice[int32](ctx, 4*n)
+	da, _ := cuda.Upload(ctx, a)
+	db, _ := cuda.Upload(ctx, b)
+	dc, _ := cuda.Upload(ctx, c)
+	dd, _ := cuda.Upload(ctx, d)
+	defer dout.Free()
+	defer da.Free()
+	defer db.Free()
+	defer dc.Free()
+	defer dd.Free()
+
+	if err := k.LaunchN(n, 32, dout, da, db, dc, dd); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	got, err := dout.Download()
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	assertEqual(t, "elements", got, want)
+}
+
+// arrayFieldTaps mirrors the struct the probe below declares, so that
+// cuda.Upload copies Go's layout of exactly that type.
+//
+// The field order is chosen to leave a hole in both places one can be. N is one
+// byte and W wants four, so Go pads three; W ends at 16 and Gain wants eight,
+// which lands with nothing between them; Tag is one byte at 24 and the struct
+// is eight-aligned, so seven bytes of slack close it at 32. The emitter has to
+// declare both of those holes, and the trailing one is the interesting half --
+// a field placed wrongly earlier could otherwise hide inside it and leave
+// sizeof unchanged.
+type arrayFieldTaps struct {
+	N    uint8
+	W    [3]float32
+	Gain float64
+	Tag  uint8
+}
+
+// TestArrayFieldLayoutRoundTrip extends the struct round trip to the field
+// shape that was refused until the offsets could be pinned.
+//
+// An array member is where a size assertion says least: sizeof counts the whole
+// array, so a struct that put W one slot earlier or later would come out
+// exactly the same size. Reading each element back through the device is what
+// says where it actually is. The values differ by orders of magnitude, and the
+// second element is read from a second struct, so a slipped offset or a wrong
+// stride returns another field's number rather than a nearby one.
+func TestArrayFieldLayoutRoundTrip(t *testing.T) {
+	ctx := device(t)
+
+	const probe = `package kernels
+
+import "github.com/CWBudde/gocuda/gpu"
+
+type Taps struct {
+	N    uint8
+	W    [3]float32
+	Gain float64
+	Tag  uint8
+}
+
+//gocuda:float64
+func ArrayFieldProbe(ctx gpu.Ctx, out []float32, ts []Taps) {
+	if ctx.GlobalID() != 0 {
+		return
+	}
+	out[0] = float32(int32(ts[0].N))
+	out[1] = ts[0].W[0]
+	out[2] = ts[0].W[1]
+	out[3] = ts[0].W[2]
+	out[4] = float32(ts[0].Gain)
+	out[5] = float32(int32(ts[0].Tag))
+	out[6] = float32(int32(ts[1].N))
+	out[7] = ts[1].W[2]
+	out[8] = float32(ts[1].Gain)
+	out[9] = float32(int32(ts[1].Tag))
+}
+`
+	src := fstest.MapFS{"probe.go": &fstest.MapFile{Data: []byte(probe)}}
+	k, err := simt.Build(ctx, src, "ArrayFieldProbe")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	ts := []arrayFieldTaps{
+		{N: 3, W: [3]float32{1, 10, 100}, Gain: 1000, Tag: 5},
+		{N: 7, W: [3]float32{2, 20, 200}, Gain: 2000, Tag: 9},
+	}
+
+	dout, _ := cuda.NewSlice[float32](ctx, 10)
+	dts, _ := cuda.Upload(ctx, ts)
+	defer dout.Free()
+	defer dts.Free()
+
+	if err := k.LaunchN(1, 32, dout, dts); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	got, err := dout.Download()
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	assertEqual(t, "fields", got, []float32{3, 1, 10, 100, 1000, 5, 7, 200, 2000, 9})
+}

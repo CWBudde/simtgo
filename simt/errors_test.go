@@ -32,13 +32,76 @@ func TestUnsupported(t *testing.T) {
 		body: "//gocuda:float64\nfunc half(x float32) float32 { return x / 2 }\n\nfunc K(ctx gpu.Ctx, a []float32) { a[0] = half(a[1]) }",
 		want: "belongs on the kernel, not on device function half",
 	}, {
-		name: "int8",
-		body: "func K(ctx gpu.Ctx, a []int8) { a[0] = 1 }",
-		want: "C promotes it to int, so the two would disagree",
+		// The four narrow integers are storage and nothing else. They cross as
+		// slice elements, array elements and struct fields, where the widths
+		// agree and no arithmetic happens; every position that exists in order
+		// to be computed with is refused, and so is every operator. What the
+		// two languages disagree about is an operator whose result feeds
+		// another one -- `a, b := int8(100), int8(3); a*b/2` is 22 in Go and
+		// -106 in C -- and the rest of these are refused with it rather than
+		// listed as exceptions somebody would have to trust.
+		name: "a narrow local",
+		body: "func K(ctx gpu.Ctx, y []uint8) { v := y[0]; y[1] = v }",
+		want: "not a variable, a parameter or a result",
 	}, {
-		name: "uint16",
-		body: "func K(ctx gpu.Ctx, a []uint16) { a[0] = 1 }",
-		want: "C promotes it to int, so the two would disagree",
+		name: "a narrow by-value parameter",
+		body: "func K(ctx gpu.Ctx, y []uint8, k uint8) { y[0] = k }",
+		want: "not a variable, a parameter or a result",
+	}, {
+		name: "a narrow result",
+		body: "func clip(x int32) uint8 { return uint8(x) }\n\n" +
+			"func K(ctx gpu.Ctx, y []uint8) { y[0] = clip(1) }",
+		want: "not a variable, a parameter or a result",
+	}, {
+		// `for i, v := range narrow` declares v, so it is the local rule
+		// reached by another spelling. `for i := range narrow` is fine and
+		// TestNarrowStorage pins that.
+		name: "a range value over a narrow slice",
+		body: "func K(ctx gpu.Ctx, y []uint8) { for i, v := range y { y[i] = v } }",
+		want: "not a variable, a parameter or a result",
+	}, {
+		name: "arithmetic on narrow elements",
+		body: "func K(ctx gpu.Ctx, y, a, b []int8) { y[0] = a[0] * b[0] }",
+		want: "so `*` on one can give a different answer",
+	}, {
+		name: "unary minus on a narrow element",
+		body: "func K(ctx gpu.Ctx, y, a []int8) { y[0] = -a[0] }",
+		want: "so `-` on one can give a different answer",
+	}, {
+		// The two languages do agree about this one. It goes anyway, because
+		// the rule is every operator rather than a list of the safe ones, and
+		// because relaxing a refusal later costs a line while retracting an
+		// acceptance costs somebody a kernel that worked.
+		name: "comparing narrow elements",
+		body: "func K(ctx gpu.Ctx, y []float32, a, b []uint16) { if a[0] < b[0] { y[0] = 1 } }",
+		want: "so `<` on one can give a different answer",
+	}, {
+		name: "compound assignment into a narrow slot",
+		body: "func K(ctx gpu.Ctx, y []uint8) { y[0] += 1 }",
+		want: "`+=` is refused anyway",
+	}, {
+		name: "incrementing a narrow slot",
+		body: "func K(ctx gpu.Ctx, y []uint8) { y[0]++ }",
+		want: "`++` is refused anyway",
+	}, {
+		// CUDA's min and max are overloaded for int and float, not for a
+		// narrow type, so this would resolve to the int overload and hand back
+		// an int -- an answer about generated code either way.
+		name: "min on narrow elements",
+		body: "func K(ctx gpu.Ctx, y, a, b []uint8) { y[0] = min(a[0], b[0]) }",
+		want: "min has no overload for it",
+	}, {
+		// A switch is not an operator, and the constant form lowers (see
+		// TestNarrowSwitch); this one becomes an if/else chain against a
+		// declared tag, and the tag is a local, which is the rule that stops
+		// it.
+		name: "a non-constant switch on a narrow value",
+		body: "func K(ctx gpu.Ctx, y []float32, a, b []uint8) { switch a[0] {\ncase b[0]:\n\ty[0] = 1\n} }",
+		want: "not a variable, a parameter or a result",
+	}, {
+		name: "a shift by a narrow count",
+		body: "func K(ctx gpu.Ctx, y []int32, n []uint8) { y[0] = y[1] << n[0] }",
+		want: "so `<<` on one can give a different answer",
 	}, {
 		name: "uint",
 		body: "func K(ctx gpu.Ctx, n uint, a []float32) { a[0] = float32(n) }",
@@ -78,9 +141,12 @@ func TestUnsupported(t *testing.T) {
 		body: "type P struct{ N int }\n\nfunc K(ctx gpu.Ctx, y []float32, ps []P) { y[0] = float32(ps[0].N) }",
 		want: "cannot cross to the device",
 	}, {
-		name: "an array field in a struct",
-		body: "type P struct{ Taps [4]float32 }\n\nfunc K(ctx gpu.Ctx, y []float32, ps []P) { y[0] = ps[0].Taps[0] }",
-		want: "a device struct holds scalars",
+		// An array field lowers now; what cannot is a field spelled like the
+		// padding the emitter adds to pin the offsets, because two members
+		// with one name is an NVRTC error about code nobody wrote.
+		name: "a field named like the emitted padding",
+		body: "type P struct{ gocuda_pad0 int32 }\n\nfunc K(ctx gpu.Ctx, y []float32, ps []P) { y[0] = float32(ps[0].gocuda_pad0) }",
+		want: "spelled like the padding gocuda emits",
 	}, {
 		name: "an embedded field",
 		body: "type Inner struct{ X float32 }\ntype Outer struct{ Inner }\n\nfunc K(ctx gpu.Ctx, y []float32, os []Outer) { y[0] = os[0].X }",

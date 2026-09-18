@@ -21,8 +21,17 @@ func IntSlice(ctx gpu.Ctx, a []int) { // want `cannot cross to the device`
 	a[0] = 1
 }
 
-func Int8Slice(ctx gpu.Ctx, a []int8) { // want `C promotes it to int`
-	a[0] = 1
+// NarrowArithmetic is the refusal the narrow storage types exist around: the
+// bytes cross fine, and an operator on one is where Go and C part company.
+func NarrowArithmetic(ctx gpu.Ctx, a []uint8) {
+	a[0] = a[1] * 2 // want `storage only on the device`
+}
+
+// NarrowLocal is the other half of the same rule, and the one the analyzer
+// reaches through a different path: a declaration rather than an expression.
+func NarrowLocal(ctx gpu.Ctx, a []uint8) {
+	v := a[0] // want `not a variable, a parameter or a result`
+	a[1] = v
 }
 
 func Goroutine(ctx gpu.Ctx, a []float32) {

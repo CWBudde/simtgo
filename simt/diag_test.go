@@ -103,13 +103,14 @@ func TestSingleDiagnosticTextIsUnchanged(t *testing.T) {
 	// The subject is the rendering -- "simt: file:line:col: msg" -- not this
 	// particular refusal, so the fixture only has to be something still
 	// refused. It was []float64 until //gocuda:float64 made that a question
-	// about a directive rather than about a type.
-	src := diagPrelude + "func K(ctx gpu.Ctx, a []int8) { a[0] = 1 }\n"
+	// about a directive rather than about a type, and []int8 until narrow
+	// integer storage made that one a question about position.
+	src := diagPrelude + "func K(ctx gpu.Ctx, a []int) { a[0] = 1 }\n"
 	_, err := simt.Transpile(fstest.MapFS{"k.go": &fstest.MapFile{Data: []byte(src)}}, "K")
 	if err == nil {
 		t.Fatal("expected an error")
 	}
-	const want = "simt: k.go:5:21: unsupported type int8 on the device: Go computes int8 arithmetic in 8 bits and C promotes it to int, so the two would disagree; use int32"
+	const want = "simt: k.go:5:21: int cannot cross to the device: Go's int is 8 bytes and CUDA's int is 4, so the elements would not line up; use int32 or int64"
 	if err.Error() != want {
 		t.Errorf("got  %q\nwant %q", err.Error(), want)
 	}

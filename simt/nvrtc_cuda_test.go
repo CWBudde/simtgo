@@ -78,10 +78,11 @@ func TestGeneratedCCompiles(t *testing.T) {
 	}, {
 		// The struct emission is the C++ furthest from anything the author
 		// wrote, and the static_asserts in it are the layout guarantee: they
-		// state what Go believes and let NVRTC refuse it. A padded struct is
-		// the interesting case -- Count at 4, four bytes of padding, Bias at 8,
-		// size 16, align 8 -- because that is where the two could disagree.
-		name: "a padded struct, by value and as a slice element",
+		// state what Go believes and let NVRTC refuse it. Shape is Floor at 0,
+		// Count at 4, Bias at 8 and 16 bytes in all -- a mixed-width layout
+		// with, as it happens, no hole anywhere in it, so nothing here is
+		// padded and the emitter must add nothing.
+		name: "a mixed-width struct, by value and as a slice element",
 		body: "type Shape struct {\n\tFloor float32\n\tCount int32\n\tBias  float64\n}\n\n" +
 			"type Band struct{ Upper, Gain float32 }\n\n" +
 			"//gocuda:float64\n" +
@@ -92,6 +93,44 @@ func TestGeneratedCCompiles(t *testing.T) {
 			"\tfor _, b := range bands {\n" +
 			"\t\tif x[i] <= b.Upper {\n\t\t\tbest = b\n\t\t\tbreak\n\t\t}\n\t}\n" +
 			"\ty[i] = float32(float64(x[i])*float64(best.Gain)+cfg.Bias) + float32(cfg.Count)\n}",
+	}, {
+		// A struct with a hole before a field and slack after the last one,
+		// which is where the padding is emitted. What is being asked is only
+		// whether NVRTC accepts what comes out; that the padding is measured
+		// rather than ignored is TestEmittedPaddingIsMeasured below, and it
+		// has to be asked with hand-written C because the emitter cannot
+		// produce a wrong answer to ask it with.
+		name: "a struct with a hole before a field and slack after the last",
+		body: "type S struct {\n\tA int32\n\tB float64\n\tC uint8\n}\n\n" +
+			"//gocuda:float64\n" +
+			"func K(ctx gpu.Ctx, y []float32, ss []S, one S) {\n" +
+			"\ts := S{1, 2, 3}\n" +
+			"\ty[0] = float32(s.A) + float32(ss[0].B) + float32(int32(one.C))\n}",
+	}, {
+		// An array field, which is the shape that was refused until the
+		// offsets could be pinned, together with a narrow one so that the
+		// padding around both is what NVRTC is asked about.
+		name: "a struct with an array field and a narrow field",
+		body: "type Taps struct {\n\tN    uint8\n\tW    [3]float32\n\tGain float64\n}\n\n" +
+			"//gocuda:float64\n" +
+			"func K(ctx gpu.Ctx, y []float32, ts []Taps) {\n" +
+			"\tsum := float32(0)\n" +
+			"\tfor _, w := range ts[0].W {\n\t\tsum += w\n\t}\n" +
+			"\ty[0] = sum * float32(ts[0].Gain) * float32(int32(ts[0].N))\n}",
+	}, {
+		// The narrow types as storage: all four widths as slice elements, an
+		// array of them as a local, arithmetic done in int32 and the result
+		// converted back. Whether "signed char" and "unsigned short" are even
+		// spellings NVRTC accepts as pointer element types with no header
+		// included is a measurement, not a claim.
+		name: "narrow integer storage with the arithmetic done in int32",
+		body: "func K(ctx gpu.Ctx, out []uint8, a []int8, b []uint16, c []int16) {\n" +
+			"\ti := ctx.GlobalID()\n" +
+			"\tif i >= len(out) {\n\t\treturn\n\t}\n" +
+			"\tvar buf [4]uint8\n" +
+			"\tbuf[0] = out[i]\n" +
+			"\tv := int32(a[i]) + int32(b[i]) + int32(c[i]) + int32(buf[0])\n" +
+			"\tout[i] = uint8(v & 255)\n}",
 	}, {
 		name: "a struct literal with keyed fields, some of them left out",
 		body: "type P struct{ X, Y, Z float32 }\n\n" +
@@ -279,7 +318,7 @@ func TestGeneratedCCompiles(t *testing.T) {
 
 	// The committed kernels go through the same gate, so a kernel that stops
 	// compiling is caught here and not at some later launch.
-	for _, name := range []string{"VecAdd", "Magnitude", "Scale", "FIR", "Classify", "Softclip", "Transpose", "Quantize", "BandGain", "Histogram"} {
+	for _, name := range []string{"VecAdd", "Magnitude", "Scale", "FIR", "Classify", "Softclip", "Transpose", "Quantize", "BandGain", "Gray", "Histogram"} {
 		t.Run(name, func(t *testing.T) {
 			u, err := simt.Transpile(gocuda.Kernels(), name)
 			if err != nil {
@@ -292,5 +331,50 @@ func TestGeneratedCCompiles(t *testing.T) {
 				t.Fatalf("%s lowered to nothing", name)
 			}
 		})
+	}
+}
+
+// TestEmittedPaddingIsMeasured is the negative half of the offset check, and
+// it is written in C by hand because the emitter cannot produce a wrong answer
+// to ask the question with.
+//
+// The padding exists to make sizeof say something it could not say on its own.
+// C++ turns out to insert exactly the holes Go does -- the first case here is
+// the struct with no padding members at all, asserting Go's size, and NVRTC
+// accepts it -- so the old assertion was never failing on any real ABI. What it
+// could not do was rule out a compiler that put a field somewhere else and made
+// the size come out right anyway, because a hole it did not declare is a hole
+// sizeof cannot see. With every hole declared, the members add up to Go's size
+// by construction, and C++ places each at or after the end of the one before,
+// so sizeof can only equal Go's size if nothing was inserted and every field
+// therefore sits at Go's offset. That argument needs the padding to be part of
+// what sizeof measures, which is what the second case asks: one byte too much
+// and NVRTC refuses the struct.
+//
+// The honest limit is that the argument also assumes each field's size in C is
+// its size in Go. For a scalar that is the type map, and for a nested struct it
+// is that struct's own assertion, so it is assumed nowhere that it is not also
+// checked -- but it is an assumption, not a consequence.
+func TestEmittedPaddingIsMeasured(t *testing.T) {
+	if _, _, err := cuda.NVRTCVersion(); errors.Is(err, cuda.ErrNoCUDA) {
+		t.Skipf("no CUDA toolkit available: %v", err)
+	}
+	const arch = "compute_75"
+	const entry = "\nextern \"C\" __global__ void K(float* y) { y[0] = 1; }\n"
+
+	// Go's layout for struct{A int32; B float64}: A at 0, B at 8, 16 bytes.
+	undeclared := "struct S { int A; double B; };\nstatic_assert(sizeof(S) == 16, \"size\");" + entry
+	if _, err := cuda.Compile(undeclared, "S.cu", arch); err != nil {
+		t.Errorf("NVRTC refused a struct whose hole it inserts itself, so the premise of this test is wrong: %v", err)
+	}
+
+	declared := "struct S { int A; unsigned char gocuda_pad0[4]; double B; };\nstatic_assert(sizeof(S) == 16, \"size\");" + entry
+	if _, err := cuda.Compile(declared, "S.cu", arch); err != nil {
+		t.Errorf("NVRTC refused the struct the emitter would write: %v", err)
+	}
+
+	wrong := "struct S { int A; unsigned char gocuda_pad0[5]; double B; };\nstatic_assert(sizeof(S) == 16, \"size\");" + entry
+	if _, err := cuda.Compile(wrong, "S.cu", arch); err == nil {
+		t.Error("NVRTC accepted a struct with one byte too much padding, so sizeof is not measuring the padding and the offsets are not pinned by it")
 	}
 }

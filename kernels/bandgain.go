@@ -13,10 +13,13 @@ type Band struct {
 
 // Shape is the part of the curve that does not vary per band.
 //
-// The field order is deliberate: Floor at 0, Count at 4, then four bytes of
-// padding, then Bias at 8, for a size of 16 and an alignment of 8. A struct
-// that needed no padding would not be testing anything, since the two languages
-// can only disagree about where the holes go.
+// The field order is deliberate: Floor at 0, Count at 4, Bias at 8, for a size
+// of 16 and an alignment of 8. Mixed widths are the point -- an all-float32
+// struct has only one layout either language could give it -- and the holes
+// that Go leaves in a struct like this one are what the generated padding
+// declares, so that sizeof pins every offset. This particular order happens to
+// leave none: 4 and 4 fill the first eight bytes exactly. An earlier comment
+// here claimed four bytes of padding before Bias, which was never true.
 //
 // Count is an int32 and not an int. An int field would be 8 bytes in Go and 4
 // in CUDA, and cuda.Upload copies Go's layout, so it is refused.

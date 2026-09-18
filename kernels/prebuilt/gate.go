@@ -19,6 +19,7 @@ var Gate = []Lowered{
 	BandGain,
 	Classify,
 	FIR,
+	Gray,
 	Histogram,
 	VecAdd,
 	Magnitude,

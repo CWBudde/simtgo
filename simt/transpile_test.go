@@ -14,7 +14,7 @@ import (
 // TestGolden pins the generated CUDA for every example kernel. Run with
 // GOCUDA_UPDATE=1 to refresh the golden files after an intentional change.
 func TestGolden(t *testing.T) {
-	for _, name := range []string{"VecAdd", "Magnitude", "Scale", "FIR", "Classify", "Softclip", "Transpose", "Quantize", "BandGain", "Histogram"} {
+	for _, name := range []string{"VecAdd", "Magnitude", "Scale", "FIR", "Classify", "Softclip", "Transpose", "Quantize", "BandGain", "Gray", "Histogram"} {
 		t.Run(name, func(t *testing.T) {
 			u, err := simt.Transpile(gocuda.Kernels(), name)
 			if err != nil {
@@ -735,14 +735,18 @@ func TestFloat64Directive(t *testing.T) {
 // holds on whatever architecture and CUDA version the kernel is built for
 // rather than on the one it was written on. Offsets are missing from the
 // assertions because NVRTC compiles a string with no include path and so has no
-// offsetof; TestStructRoundTrip in the parity tests pins those instead.
+// offsetof; the padding this emits is what makes sizeof cover them, and
+// TestStructLayoutRoundTrip in the parity tests measures them on a device.
 func TestStructLayoutIsAsserted(t *testing.T) {
 	u := transpile(t, "type Shape struct {\n\tFloor float32\n\tCount int32\n\tBias  float64\n}\n\n"+
 		"//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float32, cfg Shape) { y[0] = cfg.Floor }")
 	for _, want := range []string{
+		// Nothing but the three fields. Floor ends at 4, Count ends at 8 and
+		// Bias starts there, and 8 + 8 is the whole struct, so this is a Go
+		// layout with no hole anywhere in it and the emitter must add nothing:
+		// padding a struct that needs none would churn every artifact it
+		// appears in to say what was already being said.
 		"struct Shape\n{\n\tfloat Floor;\n\tint Count;\n\tdouble Bias;\n};",
-		// 4 + 4 of Count, four bytes of padding, then Bias at 8: the padded
-		// case is the one where Go and C could part company.
 		`static_assert(sizeof(Shape) == 16,`,
 		`static_assert(alignof(Shape) == 8,`,
 		"y[0] = cfg.Floor;",
@@ -936,5 +940,146 @@ func TestFloat64Math(t *testing.T) {
 				t.Errorf("generated CUDA does not contain %q:\n%s", tc.want, got)
 			}
 		})
+	}
+}
+
+// TestNarrowStorage pins where the storage-only integers are allowed to be and
+// what they lower to.
+//
+// The four of them are the one part of the type map that is a position rule
+// rather than a name: the same type is a slice element, an array element or a
+// struct field and lowers fine, and is a variable or a parameter and is
+// refused -- TestUnsupported has that half. int8 is deliberately "signed char"
+// and not "char", whose signedness C leaves to the implementation, so the bare
+// spelling would mean one thing on x86 and another on aarch64.
+func TestNarrowStorage(t *testing.T) {
+	cases := []struct{ name, body, want string }{{
+		name: "as slice elements, all four widths",
+		body: "func K(ctx gpu.Ctx, a []uint8, b []int8, c []uint16, d []int16) { a[0] = 1 }",
+		want: "unsigned char* a, int a_len, signed char* b, int b_len, unsigned short* c, int c_len, short* d, int d_len",
+	}, {
+		name: "as an array element",
+		body: "func K(ctx gpu.Ctx, y []uint8) { var buf [4]uint8; buf[0] = y[0]; y[1] = buf[0] }",
+		want: "unsigned char buf[4] = {};",
+	}, {
+		name: "as a struct field",
+		body: "type Px struct{ R, G, B uint8; A int16 }\n\n" +
+			"func K(ctx gpu.Ctx, y []float32, ps []Px) { y[0] = float32(int32(ps[0].R) + int32(ps[0].A)) }",
+		want: "\tunsigned char R;\n\tunsigned char G;\n\tunsigned char B;\n",
+	}, {
+		// Both directions of the conversion that makes the type usable at all,
+		// with the arithmetic in between happening at int32.
+		name: "int32 out, uint8 back in",
+		body: "func K(ctx gpu.Ctx, out, x []uint8) { out[0] = uint8(int32(x[0]) * 2) }",
+		want: "out[0] = (unsigned char)((int)(x[0]) * 2);",
+	}, {
+		// The things that are not arithmetic and have to keep working, or the
+		// feature is storage nobody can reach.
+		name: "len, index and range over a narrow slice",
+		body: "func K(ctx gpu.Ctx, out, x []uint8) {\n" +
+			"\tn := int32(0)\n\tfor i := range x {\n\t\tn += int32(x[i])\n\t}\n" +
+			"\tout[0] = uint8(n % int32(len(x)))\n}",
+		want: "for (int i = 0; i < x_len; i++)",
+	}, {
+		name: "a plain copy between narrow slots needs no conversion",
+		body: "func K(ctx gpu.Ctx, out, x []uint8) { out[0] = x[1] }",
+		want: "out[0] = x[1];",
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := transpile(t, tc.body).Source
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("generated CUDA does not contain %q:\n%s", tc.want, got)
+			}
+		})
+	}
+}
+
+// TestStructPadding pins the offset check.
+//
+// NVRTC has no offsetof, so the assertion that can be written is about sizes.
+// Filling every hole in Go's layout -- and the trailing one -- with an unsigned
+// char array makes the declared members occupy exactly Go's size, and C++ lays
+// members out in order at or after the end of the one before, so sizeof
+// agreeing is only possible if nothing was inserted and every field therefore
+// sits where Go put it. What is pinned here is that the padding appears where
+// Go has a hole and nowhere else, and that a positional literal steps over it
+// rather than initialising a field into it.
+func TestStructPadding(t *testing.T) {
+	cases := []struct{ name, body, want string }{{
+		name: "an internal hole is declared",
+		body: "type S struct{ A int32; B float64 }\n\n" +
+			"//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float32, s S) { y[0] = float32(s.A) + float32(s.B) }",
+		want: "struct S\n{\n\tint A;\n\tunsigned char gocuda_pad0[4];\n\tdouble B;\n};",
+	}, {
+		// The blind spot the trailing member closes: a byte inserted earlier
+		// could hide inside the slack at the end and leave sizeof unchanged.
+		name: "trailing slack is declared too",
+		body: "type S struct{ A float64; B int32 }\n\n" +
+			"//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float32, s S) { y[0] = float32(s.A) + float32(s.B) }",
+		want: "struct S\n{\n\tdouble A;\n\tint B;\n\tunsigned char gocuda_pad0[4];\n};",
+	}, {
+		name: "a layout with no holes gets no padding",
+		body: "type S struct{ A, B float32 }\n\n" +
+			"func K(ctx gpu.Ctx, y []float32, s S) { y[0] = s.A + s.B }",
+		want: "struct S\n{\n\tfloat A;\n\tfloat B;\n};",
+	}, {
+		name: "a positional literal steps over the padding",
+		body: "type S struct{ A int32; B float64 }\n\n" +
+			"//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float32) { s := S{1, 2}; y[0] = float32(s.A) + float32(s.B) }",
+		want: "S s = S{1, {}, 2.0};",
+	}, {
+		// An over-aligned field, where the hole is larger than the field before
+		// it rather than a leftover byte or two.
+		name: "a one-byte field before an eight-byte one",
+		body: "type S struct{ A uint8; B float64 }\n\n" +
+			"//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float32, s S) { y[0] = float32(int32(s.A)) + float32(s.B) }",
+		want: "\tunsigned char A;\n\tunsigned char gocuda_pad0[7];\n\tdouble B;\n",
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := transpile(t, tc.body).Source
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("generated CUDA does not contain %q:\n%s", tc.want, got)
+			}
+		})
+	}
+}
+
+// TestArrayStructField covers the field shape that was refused until the
+// offsets could be pinned: C puts an array's extent after the name, so the
+// field goes through cdecl like every other declaration, and the struct it
+// sits in is asserted the same way as any other.
+func TestArrayStructField(t *testing.T) {
+	u := transpile(t, "type Taps struct {\n\tGain float32\n\tW    [3]float32\n}\n\n"+
+		"func K(ctx gpu.Ctx, y []float32, ts []Taps) { y[0] = ts[0].Gain * ts[0].W[2] }")
+	for _, want := range []string{
+		"struct Taps\n{\n\tfloat Gain;\n\tfloat W[3];\n};",
+		"static_assert(sizeof(Taps) == 16,",
+		"static_assert(alignof(Taps) == 4,",
+		"y[0] = ts[0].Gain * ts[0].W[2];",
+	} {
+		if !strings.Contains(u.Source, want) {
+			t.Errorf("missing %q in:\n%s", want, u.Source)
+		}
+	}
+}
+
+// TestNarrowSwitch pins the one comparison of a narrow value that is not
+// refused, and says why it is the exception rather than an oversight.
+//
+// A switch is not an operator, and a C switch promotes its tag to int exactly
+// as an if would: the case labels are constants Go already checked fit the
+// narrow type, so every arm matches the same value in both languages. The
+// chained form is a different thing -- it declares a tag variable first, and a
+// narrow local is refused, which TestUnsupported pins.
+func TestNarrowSwitch(t *testing.T) {
+	u := transpile(t, "func K(ctx gpu.Ctx, y []float32, a []uint8) { switch a[0] {\ncase 1:\n\ty[0] = 1\ncase 255:\n\ty[0] = 2\n} }")
+	for _, want := range []string{"switch (a[0])", "case 1:", "case 255:"} {
+		if !strings.Contains(u.Source, want) {
+			t.Errorf("missing %q in:\n%s", want, u.Source)
+		}
 	}
 }

@@ -347,6 +347,11 @@ func (t *transpiler) simple(s ast.Stmt) string {
 	case nil:
 		return ""
 	case *ast.IncDecStmt:
+		if typ := t.narrowOperand(s.X); typ != "" {
+			t.fail(s.Pos(), "%s; `%s` %s read it into an int32, step that, and write it back with %s(...)",
+				narrowWhy(typ), s.Tok, narrowAnyway, typ)
+			return ""
+		}
 		return fmt.Sprintf("%s%s", t.expr(s.X).s, s.Tok)
 	case *ast.AssignStmt:
 		if len(s.Lhs) != 1 || len(s.Rhs) != 1 {
@@ -367,6 +372,21 @@ func (t *transpiler) simple(s ast.Stmt) string {
 			token.XOR_ASSIGN, token.SHL_ASSIGN, token.SHR_ASSIGN:
 			if t.refuseArrayValue(s.Lhs[0], s.Pos()) {
 				return ""
+			}
+			// A plain `=` is not an operator: `out[i] = uint8(v)` is how a
+			// computed value gets into a byte, and refusing it would leave the
+			// narrow types with nowhere to be written. Everything else here
+			// combines an operator with the store, so it goes.
+			if s.Tok != token.ASSIGN {
+				typ := t.narrowOperand(s.Lhs[0])
+				if typ == "" {
+					typ = t.narrowOperand(s.Rhs[0])
+				}
+				if typ != "" {
+					t.fail(s.Pos(), "%s; `%s` %s read it into an int32, do the arithmetic there, and write the result back with %s(...)",
+						narrowWhy(typ), s.Tok, narrowAnyway, typ)
+					return ""
+				}
 			}
 			// Both sides stand in positions that accept a whole expression, so
 			// neither needs parentheses of its own.
