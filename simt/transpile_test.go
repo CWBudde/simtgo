@@ -655,3 +655,123 @@ func TestMinInt64Literal(t *testing.T) {
 		t.Errorf("minimum int64 not rendered representably:\n%s", u.Source)
 	}
 }
+
+// TestAtomics pins what the atomic vocabulary lowers to.
+//
+// The interesting part is the first two arguments, which become one C operand:
+// the Go side takes a buffer and an index because the subset has no
+// address-of, and "&s[i]" is the only "&" this emitter ever writes.
+func TestAtomics(t *testing.T) {
+	const decl = "func K(ctx gpu.Ctx, y []float32, h []int32) "
+	cases := []struct{ name, body, want string }{{
+		name: "an int add takes the address of the element",
+		body: decl + "{ i := ctx.GlobalID(); gpu.AtomicAddI32(h, i, 1) }",
+		want: "atomicAdd(&h[i], 1);",
+	}, {
+		name: "a float add renders its value as a float",
+		body: decl + "{ i := ctx.GlobalID(); gpu.AtomicAddF32(y, i, 2) }",
+		want: "atomicAdd(&y[i], 2.0f);",
+	}, {
+		name: "the old value is an ordinary result",
+		body: decl + "{ old := gpu.AtomicAddI32(h, 0, 1); y[0] = float32(old) }",
+		want: "int old = atomicAdd(&h[0], 1);",
+	}, {
+		name: "min",
+		body: decl + "{ gpu.AtomicMinI32(h, 0, 3) }",
+		want: "atomicMin(&h[0], 3);",
+	}, {
+		name: "max",
+		body: decl + "{ gpu.AtomicMaxI32(h, 0, 3) }",
+		want: "atomicMax(&h[0], 3);",
+	}, {
+		name: "exchange",
+		body: decl + "{ gpu.AtomicExchI32(h, 0, 3) }",
+		want: "atomicExch(&h[0], 3);",
+	}, {
+		name: "compare-and-swap carries both operands",
+		body: decl + "{ gpu.AtomicCASI32(h, 0, 0, 7) }",
+		want: "atomicCAS(&h[0], 0, 7);",
+	}, {
+		name: "the index may be an expression",
+		body: decl + "{ i := ctx.GlobalID(); gpu.AtomicAddI32(h, i+1, 1) }",
+		want: "atomicAdd(&h[i + 1], 1);",
+	}, {
+		// A shared tile is a __shared__ array rather than a pointer parameter,
+		// so its address is generic; the hardware resolves that back to a
+		// shared atomic. Nothing in the emitted C says which it is.
+		name: "a shared tile is addressable too",
+		body: "func K(ctx gpu.Ctx, y []float32) { s := ctx.SharedF32(256); gpu.AtomicAddF32(s, ctx.ThreadIdx(), 1); ctx.SyncThreads(); y[0] = s[0] }",
+		want: "atomicAdd(&s[(int)threadIdx.x], 1.0f);",
+	}, {
+		// The buffer is rendered through the ordinary identifier path, so a
+		// name that collides with a C++ keyword is escaped exactly once and in
+		// one place. Spelling it a second time here is how the generated C
+		// would come to name something that was never declared.
+		name: "a buffer whose name is a C++ keyword keeps its escape",
+		body: "func K(ctx gpu.Ctx, float []int32) { gpu.AtomicAddI32(float, 0, 1) }",
+		want: "atomicAdd(&float_[0], 1);",
+	}, {
+		name: "the result composes into a larger expression",
+		body: decl + "{ y[0] = float32(gpu.AtomicAddI32(h, 0, 1)) * 2 }",
+		want: "(float)(atomicAdd(&h[0], 1)) * 2.0f",
+	}, {
+		// A slice parameter of a device function is a pointer like any other,
+		// so an atomic works across the call boundary with nothing special.
+		name: "inside a device function",
+		body: "//gocuda:ignore\nfunc bump(h []int32, i int) { gpu.AtomicAddI32(h, i, 1) }\n\n" +
+			"func K(ctx gpu.Ctx, h []int32) { bump(h, ctx.GlobalID()) }",
+		want: "atomicAdd(&h[i], 1);",
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := transpile(t, tc.body).Source
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("generated CUDA does not contain %q:\n%s", tc.want, got)
+			}
+		})
+	}
+}
+
+// TestFloat64Math pins the double-precision vocabulary onto CUDA's unsuffixed
+// built-ins. sqrt rather than sqrtf is the whole point: reaching the float32
+// table by accident would halve the precision the kernel asked for, silently.
+func TestFloat64Math(t *testing.T) {
+	const decl = "//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float64) "
+	cases := []struct{ name, body, want string }{{
+		name: "sqrt is the double built-in, not sqrtf",
+		body: decl + "{ y[0] = gpu.Sqrt64(y[1]) }",
+		want: "y[0] = sqrt(y[1]);",
+	}, {
+		name: "abs is fabs",
+		body: decl + "{ y[0] = gpu.Abs64(y[1]) }",
+		want: "y[0] = fabs(y[1]);",
+	}, {
+		name: "hypot takes two",
+		body: decl + "{ y[0] = gpu.Hypot64(y[1], y[2]) }",
+		want: "y[0] = hypot(y[1], y[2]);",
+	}, {
+		name: "fmin and fmax nest",
+		body: decl + "{ y[0] = gpu.Fmax64(gpu.Fmin64(y[1], y[2]), y[3]) }",
+		want: "fmax(fmin(y[1], y[2]), y[3]);",
+	}, {
+		name: "log and exp",
+		body: decl + "{ y[0] = gpu.Log64(gpu.Exp64(y[1])) }",
+		want: "log(exp(y[1]));",
+	}, {
+		// The float32 table is unchanged by any of this: the suffixed names
+		// still reach the suffixed built-ins.
+		name: "the float32 helpers are untouched",
+		body: "func K(ctx gpu.Ctx, y []float32) { y[0] = gpu.Sqrt(y[1]) }",
+		want: "y[0] = sqrtf(y[1]);",
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := transpile(t, tc.body).Source
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("generated CUDA does not contain %q:\n%s", tc.want, got)
+			}
+		})
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/CWBudde/gocuda/gpu"
 )
@@ -336,5 +337,205 @@ func TestAssumeBlockDimCountsTheWholeBlock(t *testing.T) {
 	})
 	if !strings.Contains(msg, "AssumeBlockDim") {
 		t.Errorf("diagnosis %q does not mention AssumeBlockDim", msg)
+	}
+}
+
+// The atomic tests below are all order-independent by construction. The
+// emulator runs a goroutine per thread, so the order in which they win the
+// lock is not reproducible; any assertion that depended on it would be a
+// flaky test dressed up as a correctness test.
+
+// TestAtomicAddI32Counts is the plain lost-update test: 256 threads each add
+// one, and a non-atomic implementation loses some of them.
+func TestAtomicAddI32Counts(t *testing.T) {
+	c := make([]int32, 1)
+	gpu.RunCPU(8, 32, func(_ gpu.Ctx) { gpu.AtomicAddI32(c, 0, 1) })
+	if c[0] != 256 {
+		t.Errorf("counter is %d, want 256", c[0])
+	}
+}
+
+// TestAtomicReturnsTheOldValue is the stronger claim, and the one that makes
+// the returned value worth having: across all threads the values handed back
+// must be a permutation of 0..n-1. A lost update duplicates one, and an
+// implementation that returned the new value instead would never produce 0.
+//
+// Each thread writes its own slot, so the bookkeeping itself races with
+// nothing and the test stays clean under -race.
+func TestAtomicReturnsTheOldValue(t *testing.T) {
+	const grid, block = 8, 32
+	c := make([]int32, 1)
+	seen := make([]int32, grid*block)
+	gpu.RunCPU(grid, block, func(ctx gpu.Ctx) {
+		old := gpu.AtomicAddI32(c, 0, 1)
+		seen[ctx.GlobalID()] = old
+	})
+
+	count := make([]int, grid*block)
+	for i, v := range seen {
+		if v < 0 || int(v) >= len(count) {
+			t.Fatalf("thread %d was handed %d, which is outside 0..%d", i, v, len(count)-1)
+		}
+		count[v]++
+	}
+	for v, n := range count {
+		if n != 1 {
+			t.Errorf("the value %d was handed to %d threads, want exactly 1", v, n)
+		}
+	}
+}
+
+// TestAtomicAddF32Histogram bins into float32. The counts stay far below 2**24,
+// so every partial sum is exact and the result does not depend on the order the
+// threads arrived in -- which is what lets this assert equality rather than a
+// tolerance. On the device the same kernel is exact for the same reason and
+// stops being so as soon as the addends are not small integers.
+func TestAtomicAddF32Histogram(t *testing.T) {
+	const grid, block, bins = 8, 32, 16
+	h := make([]float32, bins)
+	gpu.RunCPU(grid, block, func(ctx gpu.Ctx) {
+		gpu.AtomicAddF32(h, ctx.GlobalID()%bins, 1)
+	})
+	for i, v := range h {
+		if want := float32(grid * block / bins); v != want {
+			t.Errorf("bin %d holds %v, want %v", i, v, want)
+		}
+	}
+}
+
+// TestAtomicMinMaxI32 drives the extremes from every thread at once, and pins
+// the half that a no-op implementation would pass: min must not write when the
+// candidate is larger, and must still report what was there.
+func TestAtomicMinMaxI32(t *testing.T) {
+	const grid, block = 8, 32
+	ext := []int32{1 << 30, -(1 << 30)}
+	gpu.RunCPU(grid, block, func(ctx gpu.Ctx) {
+		v := int32(ctx.GlobalID()) - 100
+		gpu.AtomicMinI32(ext, 0, v)
+		gpu.AtomicMaxI32(ext, 1, v)
+	})
+	if ext[0] != -100 {
+		t.Errorf("min is %d, want -100", ext[0])
+	}
+	if want := int32(grid*block - 1 - 100); ext[1] != want {
+		t.Errorf("max is %d, want %d", ext[1], want)
+	}
+
+	one := []int32{7}
+	if old := gpu.AtomicMinI32(one, 0, 9); old != 7 || one[0] != 7 {
+		t.Errorf("min against a larger candidate returned %d and left %d, want 7 and 7", old, one[0])
+	}
+	if old := gpu.AtomicMaxI32(one, 0, 3); old != 7 || one[0] != 7 {
+		t.Errorf("max against a smaller candidate returned %d and left %d, want 7 and 7", old, one[0])
+	}
+}
+
+// TestAtomicCASI32SingleWinner is the mutual-exclusion primitive doing the one
+// job it exists for. Every thread races to claim a flag; exactly one may win,
+// and the flag must hold that winner's identity rather than anybody else's.
+func TestAtomicCASI32SingleWinner(t *testing.T) {
+	const grid, block = 8, 32
+	flag := []int32{0}
+	wins := []int32{0}
+	gpu.RunCPU(grid, block, func(ctx gpu.Ctx) {
+		if gpu.AtomicCASI32(flag, 0, 0, int32(ctx.GlobalID())+1) == 0 {
+			gpu.AtomicAddI32(wins, 0, 1)
+		}
+	})
+	if wins[0] != 1 {
+		t.Errorf("%d threads believed they won the flag, want exactly 1", wins[0])
+	}
+	if flag[0] < 1 || int(flag[0]) > grid*block {
+		t.Errorf("the flag holds %d, which is no thread's identity", flag[0])
+	}
+
+	// A losing compare-and-swap reports what is actually there, not the value
+	// it compared against -- which is how a caller retries without re-reading.
+	held := []int32{5}
+	if old := gpu.AtomicCASI32(held, 0, 1, 9); old != 5 || held[0] != 5 {
+		t.Errorf("a losing CAS returned %d and left %d, want 5 and 5", old, held[0])
+	}
+}
+
+// TestAtomicExchI32 pins that exch is unconditional and still reports what it
+// displaced.
+func TestAtomicExchI32(t *testing.T) {
+	s := []int32{3}
+	if old := gpu.AtomicExchI32(s, 0, 8); old != 3 {
+		t.Errorf("exch returned %d, want 3", old)
+	}
+	if s[0] != 8 {
+		t.Errorf("exch left %d, want 8", s[0])
+	}
+}
+
+// TestAtomicOnASharedTile is the case the generated C reaches through a
+// generic pointer rather than a global one. In the emulator a tile is an
+// ordinary slice, so what this really pins is that the vocabulary composes
+// with SharedF32 at all -- the device half is simt's parity test.
+func TestAtomicOnASharedTile(t *testing.T) {
+	const block = 32
+	out := make([]float32, block)
+	gpu.RunCPU(1, block, func(ctx gpu.Ctx) {
+		s := ctx.SharedF32(1)
+		if ctx.ThreadIdx() == 0 {
+			s[0] = 0
+		}
+		ctx.SyncThreads()
+		gpu.AtomicAddF32(s, 0, 1)
+		ctx.SyncThreads()
+		out[ctx.ThreadIdx()] = s[0]
+	})
+	for i, v := range out {
+		if v != block {
+			t.Errorf("thread %d saw %v in the tile, want %d", i, v, block)
+		}
+	}
+}
+
+// TestAtomicOutsideALaunch calls the vocabulary on a plain slice with no
+// RunCPU at all. A kernel is ordinary Go, and the CPU reference in a parity
+// test is often the kernel called directly, so these must not require a Ctx.
+func TestAtomicOutsideALaunch(t *testing.T) {
+	i := []int32{4}
+	f := []float32{1.5}
+	if old := gpu.AtomicAddI32(i, 0, 3); old != 4 || i[0] != 7 {
+		t.Errorf("add returned %d and left %d, want 4 and 7", old, i[0])
+	}
+	if old := gpu.AtomicAddF32(f, 0, 0.5); old != 1.5 || f[0] != 2 {
+		t.Errorf("add returned %v and left %v, want 1.5 and 2", old, f[0])
+	}
+}
+
+// TestAtomicPanicDoesNotStrandTheLock is the test for the defer, and it is the
+// reason the defer is not a stylistic choice.
+//
+// An out-of-range index panics with the package lock held. RunCPU's per-thread
+// recover turns that panic into a diagnosis rather than a crash, so without the
+// defer the process would carry on holding a mutex nobody will ever release,
+// and the *next* launch to use an atomic would block forever. One bad kernel
+// would hang the whole test binary, some distance from the kernel that did it.
+//
+// The second half is therefore the assertion: if it returns at all, the lock
+// was released.
+func TestAtomicPanicDoesNotStrandTheLock(t *testing.T) {
+	c := make([]int32, 1)
+	msg := mustPanic(t, func() {
+		gpu.RunCPU(1, 4, func(_ gpu.Ctx) { gpu.AtomicAddI32(c, 999, 1) })
+	})
+	wantContains(t, msg, "index out of range")
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		gpu.RunCPU(1, 8, func(_ gpu.Ctx) { gpu.AtomicAddI32(c, 0, 1) })
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("a launch using atomics blocked after an earlier kernel panicked holding the lock")
+	}
+	if c[0] != 8 {
+		t.Errorf("counter is %d, want 8", c[0])
 	}
 }

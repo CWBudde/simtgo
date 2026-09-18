@@ -577,3 +577,157 @@ func StructProbe(ctx gpu.Ctx, out []float32, bands []Band, cfg Shape) {
 	}
 	assertEqual(t, "fields", got, []float32{1, 1000, 2, 2000, 7, 11, 13})
 }
+
+// TestAtomicHistogramParity is the device half of the atomics vocabulary.
+//
+// The reference is an ordinary sequential loop rather than the same kernel
+// under RunCPU. That is deliberate and it is stronger: a loop agrees with the
+// device only if the device's adds really were atomic, whereas the emulator
+// and the device could in principle both lose updates in ways that happened to
+// cancel. Integers make the comparison exact regardless of the order the
+// threads arrived in, which is what lets this assert equality at all.
+//
+// The probe kernel is inline rather than committed to kernels/, for the reason
+// TestStructLayoutRoundTrip gives: it tests a rule, not a kernel anyone would
+// launch, and committing one would cost a gate entry, a golden and a
+// regeneration to say the same thing.
+func TestAtomicHistogramParity(t *testing.T) {
+	ctx := device(t)
+
+	const probe = `package kernels
+
+import "github.com/CWBudde/gocuda/gpu"
+
+func AtomicProbe(ctx gpu.Ctx, bins []int32, x []int32) {
+	i := ctx.GlobalID()
+	if i < len(x) {
+		gpu.AtomicAddI32(bins, int(x[i])%len(bins), 1)
+	}
+}
+`
+	src := fstest.MapFS{"probe.go": &fstest.MapFile{Data: []byte(probe)}}
+	k, err := simt.Build(ctx, src, "AtomicProbe")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	const n, bins = 1 << 14, 16
+	x := make([]int32, n)
+	for i := range x {
+		// Deliberately uneven, so a bin that is never written is visible as a
+		// zero rather than hidden by every bin holding the same count.
+		x[i] = int32(i*i%97 + i%7)
+	}
+	want := make([]int32, bins)
+	for _, v := range x {
+		want[int(v)%bins]++
+	}
+
+	dbins, _ := cuda.NewSlice[int32](ctx, bins)
+	dx, _ := cuda.Upload(ctx, x)
+	defer dbins.Free()
+	defer dx.Free()
+
+	if err := k.LaunchN(n, 256, dbins, dx); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	got, err := dbins.Download()
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	assertEqual(t, "bins", got, want)
+}
+
+// TestAtomicCASParity pins the primitive the others cannot stand in for: every
+// thread in the grid races to claim one flag, and exactly one may win.
+//
+// A compare-and-swap that was not atomic would let two threads read the same
+// zero and both believe they won, which the winner count catches; one that
+// returned the compared value rather than the held one would make every thread
+// believe it won.
+func TestAtomicCASParity(t *testing.T) {
+	ctx := device(t)
+
+	const probe = `package kernels
+
+import "github.com/CWBudde/gocuda/gpu"
+
+func CASProbe(ctx gpu.Ctx, out []int32) {
+	i := ctx.GlobalID()
+	if gpu.AtomicCASI32(out, 0, 0, int32(i)+1) == 0 {
+		gpu.AtomicAddI32(out, 1, 1)
+	}
+}
+`
+	src := fstest.MapFS{"probe.go": &fstest.MapFile{Data: []byte(probe)}}
+	k, err := simt.Build(ctx, src, "CASProbe")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	const n = 1 << 12
+	dout, _ := cuda.NewSlice[int32](ctx, 2)
+	defer dout.Free()
+
+	if err := k.LaunchN(n, 256, dout); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	got, err := dout.Download()
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	if got[1] != 1 {
+		t.Errorf("%d threads believed they won the flag, want exactly 1", got[1])
+	}
+	if got[0] < 1 || got[0] > n {
+		t.Errorf("the flag holds %d, which is no thread's identity", got[0])
+	}
+}
+
+// TestAtomicSharedTileParity reaches the case whose C is indistinguishable
+// from the global one: &s[i] on a __shared__ array is a generic pointer, and
+// it is the hardware that resolves it back to a shared atomic.
+//
+// Every thread adds 1.0, so each partial sum is a small integer and exact in
+// float32 whatever order the adds happened in. That is what lets the result be
+// compared exactly; a kernel adding real data could not be, because float
+// addition is not associative and the device's order is not the CPU's.
+func TestAtomicSharedTileParity(t *testing.T) {
+	ctx := device(t)
+
+	const probe = `package kernels
+
+import "github.com/CWBudde/gocuda/gpu"
+
+func TileProbe(ctx gpu.Ctx, out []float32) {
+	s := ctx.SharedF32(1)
+	if ctx.ThreadIdx() == 0 {
+		s[0] = 0
+	}
+	ctx.SyncThreads()
+	gpu.AtomicAddF32(s, 0, 1)
+	ctx.SyncThreads()
+	if ctx.ThreadIdx() == 0 {
+		gpu.AtomicAddF32(out, 0, s[0])
+	}
+}
+`
+	src := fstest.MapFS{"probe.go": &fstest.MapFile{Data: []byte(probe)}}
+	k, err := simt.Build(ctx, src, "TileProbe")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	const blocks, block = 32, 128
+	dout, _ := cuda.NewSlice[float32](ctx, 1)
+	defer dout.Free()
+
+	if err := k.LaunchDim(cuda.Dim3{X: blocks, Y: 1, Z: 1}, cuda.Dim3{X: block, Y: 1, Z: 1}, dout); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	got, err := dout.Download()
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	assertEqual(t, "total", got, []float32{blocks * block})
+}

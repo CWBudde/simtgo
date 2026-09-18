@@ -78,6 +78,58 @@ func GPUPackage() *types.Package {
 		fn(name, 2)
 	}
 
+	// The double-precision helpers, whose signatures fn cannot express. They
+	// are declared unconditionally: whether a kernel may reach one is decided
+	// when it is lowered, not by what the type checker can see, so refusing
+	// them here would report a missing symbol instead of a missing directive.
+	f64 := types.Typ[types.Float64]
+	fn64 := func(name string, arity int) {
+		params := make([]*types.Var, arity)
+		for i := range params {
+			params[i] = types.NewVar(token.NoPos, pkg, "x", f64)
+		}
+		sig := types.NewSignatureType(nil, nil, nil,
+			types.NewTuple(params...), types.NewTuple(ret(f64)...), false)
+		scope.Insert(types.NewFunc(token.NoPos, pkg, name, sig))
+	}
+	for _, name := range []string{"Sqrt64", "Abs64", "Sin64", "Cos64", "Exp64", "Log64"} {
+		fn64(name, 1)
+	}
+	for _, name := range []string{"Hypot64", "Fmin64", "Fmax64"} {
+		fn64(name, 2)
+	}
+
+	i32 := types.Typ[types.Int32]
+	i32Slice := types.NewSlice(i32)
+
+	// atomic declares one of the read-modify-write helpers. The shape is
+	// always the same: the buffer, an index into it, then one value of the
+	// element type (two for compare-and-swap), returning the value the element
+	// held before -- which is what the CUDA built-in returns.
+	//
+	// It is a second builder rather than a generalisation of fn above, because
+	// fn's nine callers are the one thing in this file that must not drift,
+	// and rewriting them to thread an element type through would put every
+	// float32 signature at risk to describe six that are not float32 at all.
+	atomic := func(name string, slice, elem types.Type, vals int) {
+		params := []*types.Var{
+			types.NewVar(token.NoPos, pkg, "s", slice),
+			types.NewVar(token.NoPos, pkg, "i", intT),
+		}
+		for range vals {
+			params = append(params, types.NewVar(token.NoPos, pkg, "v", elem))
+		}
+		sig := types.NewSignatureType(nil, nil, nil,
+			types.NewTuple(params...), types.NewTuple(ret(elem)...), false)
+		scope.Insert(types.NewFunc(token.NoPos, pkg, name, sig))
+	}
+	atomic("AtomicAddF32", f32Slice, f32, 1)
+	atomic("AtomicAddI32", i32Slice, i32, 1)
+	atomic("AtomicMinI32", i32Slice, i32, 1)
+	atomic("AtomicMaxI32", i32Slice, i32, 1)
+	atomic("AtomicExchI32", i32Slice, i32, 1)
+	atomic("AtomicCASI32", i32Slice, i32, 2)
+
 	pkg.MarkComplete()
 	return pkg
 }
