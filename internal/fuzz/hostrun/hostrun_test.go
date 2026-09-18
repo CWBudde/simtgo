@@ -15,6 +15,7 @@ import (
 	"github.com/CWBudde/gocuda/gpu"
 	"github.com/CWBudde/gocuda/internal/fuzz/hostrun"
 	"github.com/CWBudde/gocuda/internal/lower"
+	"github.com/CWBudde/gocuda/internal/tolerance"
 	"github.com/CWBudde/gocuda/kernels"
 	"github.com/CWBudde/gocuda/simt"
 )
@@ -542,10 +543,13 @@ func same(got, want any, tol float64) bool {
 	case math.IsInf(gd, 0) || math.IsInf(wd, 0), g == 0 && w == 0:
 		return false
 	case tol > 0:
-		// internal/tolerance's rule, spelled here because that package asserts
-		// over a whole slice and this comparison is per element, having
-		// already settled the cases the rule declines to relate.
-		return math.Abs(gd-wd) <= tol*math.Max(math.Abs(wd), 1)
+		// internal/tolerance is the one comparison rule, and Close is its
+		// per-element half, so this asks it rather than restating it. The
+		// cases above are the ones no tolerance relates -- a NaN to anything,
+		// an infinity to a finite value, and the two zeros to each other --
+		// and they are settled first precisely so that what reaches Close is a
+		// pair of finite numbers, which is all the rule claims to be about.
+		return tolerance.Close(g, w, tol)
 	}
 	return false
 }
