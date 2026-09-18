@@ -45,6 +45,40 @@ func TestWarpStallIsDiagnosedRatherThanDeadlocked(t *testing.T) {
 	}
 }
 
+// TestDivergentActiveMaskIsDiagnosed pins the one warp primitive whose CUDA
+// counterpart is not collective.
+//
+// __activemask() may legally be called on one side of a divergent branch, so
+// this kernel is valid CUDA and the divergence checker accepts it -- it
+// refuses a divergent SyncThreads, which this is not. The emulator still
+// cannot run it: ActiveMask is a rendezvous, the lanes that skipped it are
+// held at the block barrier, and each half waits for the other. The test is
+// here to keep that a reported stall rather than a hang, and to keep the
+// message pointing at the conditional, which is the only thing the author can
+// act on.
+func TestDivergentActiveMaskIsDiagnosed(t *testing.T) {
+	saved := warpStallTimeout
+	warpStallTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { warpStallTimeout = saved })
+
+	// Half of one warp, so the divergence is inside a warp rather than
+	// between two of them: a branch on ThreadIdx that splits on a multiple of
+	// WarpSize leaves every warp uniform and is not this bug.
+	msg := recovered(t, func() {
+		RunCPU(1, 64, func(ctx Ctx) {
+			if ctx.LaneID() < 16 {
+				_ = ctx.ActiveMask()
+			}
+			ctx.SyncThreads()
+		})
+	})
+	for _, want := range []string{"warp rendezvous timed out", "ActiveMask", "Hoist the call out of the conditional"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("diagnosis does not mention %q:\n%s", want, msg)
+		}
+	}
+}
+
 // recovered runs fn and returns the string it panicked with. It duplicates the
 // external tests' mustPanic because the two live in different packages, and
 // this file is in package gpu only so that it can reach warpStallTimeout.

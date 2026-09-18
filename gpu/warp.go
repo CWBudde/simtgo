@@ -167,6 +167,18 @@ func (c Ctx) All(pred bool) bool {
 // (__activemask). Under the emulator that is the set of threads that arrived
 // at this rendezvous, which is not the same question the device answers; see
 // the note at the top of this file.
+//
+// That it is a rendezvous at all is the sharpest edge of the difference, and
+// worth stating here rather than leaving to be discovered. __activemask() is
+// not collective on the device, so a kernel may legally call it on one side of
+// a divergent branch; this waits for the lanes that took the other side, and
+// when those are blocked elsewhere -- at SyncThreads, typically -- the two
+// wait for each other and the stall is reported. Such a kernel is valid CUDA
+// and simply has no emulation here: answering without the rest of the warp
+// would mean inventing a convergence the emulator does not model, and the
+// invented mask would depend on which goroutine happened to be running, so it
+// would differ between two runs of the same launch and could agree with the
+// device on neither. A diagnosis is the honest answer of the two.
 func (c Ctx) ActiveMask() uint32 {
 	w, lane := c.warp()
 	if w == nil {
