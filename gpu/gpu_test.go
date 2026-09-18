@@ -2,6 +2,7 @@ package gpu_test
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -537,5 +538,65 @@ func TestAtomicPanicDoesNotStrandTheLock(t *testing.T) {
 	}
 	if c[0] != 8 {
 		t.Errorf("counter is %d, want 8", c[0])
+	}
+}
+
+// TestFminFmaxFollowTheBuiltinTheyClaimToBe is a test about the instrument
+// rather than about a kernel.
+//
+// gpu.Fmin lowers to fminf, so the emulator has to be fminf. Go's math.Min is
+// not: it propagates NaN, which its own documentation states, while IEEE 754
+// minNum -- which fminf follows -- returns the operand that is not NaN. A
+// parity test built on the wrong one would compare NaN against a number, which
+// no tolerance can reconcile and which would read as a kernel bug rather than
+// as a bug in the comparison.
+func TestFminFmaxFollowTheBuiltinTheyClaimToBe(t *testing.T) {
+	nan := float32(math.NaN())
+
+	cases := []struct {
+		name     string
+		got      float32
+		want     float32
+		wantSign bool // check the sign bit too, for the zeros
+	}{
+		{name: "Fmin ignores a NaN on the right", got: gpu.Fmin(1, nan), want: 1},
+		{name: "Fmin ignores a NaN on the left", got: gpu.Fmin(nan, 1), want: 1},
+		{name: "Fmax ignores a NaN on the right", got: gpu.Fmax(1, nan), want: 1},
+		{name: "Fmax ignores a NaN on the left", got: gpu.Fmax(nan, 1), want: 1},
+		{name: "Fmin of two", got: gpu.Fmin(2, 3), want: 2},
+		{name: "Fmin of two, reversed", got: gpu.Fmin(3, 2), want: 2},
+		{name: "Fmax of two", got: gpu.Fmax(2, 3), want: 3},
+		{name: "Fmax of two, reversed", got: gpu.Fmax(3, 2), want: 3},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.got != tc.want {
+				t.Errorf("got %v, want %v", tc.got, tc.want)
+			}
+		})
+	}
+
+	// Both NaN is the one case where there is nothing to return but a NaN.
+	if !math.IsNaN(float64(gpu.Fmin(nan, nan))) {
+		t.Errorf("Fmin(NaN, NaN) = %v, want NaN", gpu.Fmin(nan, nan))
+	}
+	if !math.IsNaN(float64(gpu.Fmax(nan, nan))) {
+		t.Errorf("Fmax(NaN, NaN) = %v, want NaN", gpu.Fmax(nan, nan))
+	}
+
+	// Signed zeros compare equal, so only the sign bit can tell which came
+	// back. fminf prefers the negative zero and fmaxf the positive one.
+	negZero := float32(math.Copysign(0, -1))
+	if !math.Signbit(float64(gpu.Fmin(negZero, 0))) {
+		t.Error("Fmin(-0, +0) should be -0")
+	}
+	if !math.Signbit(float64(gpu.Fmin(0, negZero))) {
+		t.Error("Fmin(+0, -0) should be -0")
+	}
+	if math.Signbit(float64(gpu.Fmax(negZero, 0))) {
+		t.Error("Fmax(-0, +0) should be +0")
+	}
+	if math.Signbit(float64(gpu.Fmax(0, negZero))) {
+		t.Error("Fmax(+0, -0) should be +0")
 	}
 }

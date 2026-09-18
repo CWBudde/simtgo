@@ -35,6 +35,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"sync"
+	"time"
 )
 
 // Dim is a grid or block extent, in threads or blocks per axis.
@@ -129,9 +130,26 @@ func (c Ctx) GlobalIDY() int { return c.bid.Y*c.bdim.Y + c.tid.Y }
 func (c Ctx) GlobalIDZ() int { return c.bid.Z*c.bdim.Z + c.tid.Z }
 
 // SyncThreads is __syncthreads(): a barrier across the threads of one block.
+//
+// Every thread of a block must reach every SyncThreads. A thread that took
+// another branch and ran to the end of the kernel is not a problem -- leaving
+// releases the barrier, exactly as it releases a warp, and CUDA says the same:
+// a thread that has exited need not take part. What cannot be survived is a
+// thread blocked somewhere else, in a warp rendezvous typically, waiting for
+// the very thread that is waiting for it. That is a deadlock, and a deadlock
+// is the worst thing a test suite can be handed, so the wait gives up and
+// reports rather than hanging.
 func (c Ctx) SyncThreads() {
-	if c.block != nil {
-		c.block.bar.wait()
+	if c.block == nil {
+		return
+	}
+	if !c.block.bar.wait() {
+		c.block.report(fmt.Sprintf(
+			"gpu: block barrier timed out in block %d, thread %d. "+
+				"Every thread of a block must reach every SyncThreads call; a thread that cannot "+
+				"arrive -- because it is waiting elsewhere -- leaves its siblings waiting for it. "+
+				"Hoist the barrier out of the conditional the threads disagree about.",
+			flat(c.bid, c.gdim), flat(c.tid, c.bdim)))
 	}
 }
 
@@ -378,15 +396,20 @@ func runBlock(bid int, grid, block Dim, dyn dynSize, fn func(Ctx)) string {
 			// Registered first so that it runs last, after the recover below
 			// has turned a panic into a diagnosis.
 			defer threads[t].warp.bar.abandon()
+			// And the block barrier likewise, for the same reason and in both
+			// the same cases. Registered here rather than in the recover below
+			// so that a thread which simply returns early releases it too: a
+			// sibling waiting at a barrier that thread will never reach would
+			// otherwise wait for ever, with nothing to report.
+			defer st.bar.abandon()
 			// A kernel that panics on a thread goroutine would otherwise kill
-			// the process. Catch it, let the barrier forget the thread so its
-			// siblings are not stranded, and hand the message upwards to be
+			// the process. Catch it and hand the message upwards to be
 			// re-raised by RunCPU. The original stack is kept, since that is
-			// the part with the diagnostic value.
+			// the part with the diagnostic value. The barrier is released by
+			// the defer above, which runs after this one.
 			defer func() {
 				if r := recover(); r != nil {
 					st.report(fmt.Sprintf("gpu: kernel panicked in block %d, thread %d: %v\n\n%s", bid, t, r, debug.Stack()))
-					st.bar.abandon()
 				}
 			}()
 			fn(Ctx{
@@ -428,47 +451,85 @@ func divergence(bid int, threads []*threadState) string {
 // barrier is a reusable barrier for a fixed number of participants.
 type barrier struct {
 	mu    sync.Mutex
-	cond  *sync.Cond
-	n     int
-	count int
-	gen   uint64
+	n     int // threads still in the kernel
+	count int // threads arrived in the generation being assembled
+	cur   *barrierGen
 }
+
+// blockStallTimeout bounds how long a thread waits at a block barrier.
+//
+// It is the block-scope twin of warpStallTimeout and exists for the same
+// reason: a barrier is a rendezvous, so a kernel whose threads disagree about
+// reaching one waits for somebody who will never come. Threads that leave the
+// kernel release the barrier, which covers divergence that ends in a return;
+// what it does not cover is a thread blocked elsewhere. It is a variable
+// rather than a constant only so the tests can make the wait short.
+var blockStallTimeout = 5 * time.Second
+
+// barrierGen is one rendezvous, closed to release it. A generation is a
+// channel rather than a condition variable for one reason: a wait has to be
+// able to give up, and sync.Cond has no timed Wait.
+type barrierGen struct{ done chan struct{} }
 
 func newBarrier(n int) *barrier {
-	b := &barrier{n: n}
-	b.cond = sync.NewCond(&b.mu)
-	return b
+	return &barrier{n: n, cur: &barrierGen{done: make(chan struct{})}}
 }
 
-func (b *barrier) wait() {
+// wait blocks until every thread still in the kernel has arrived. It returns
+// false if it gave up first; see blockStallTimeout.
+func (b *barrier) wait() bool {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	gen := b.gen
 	b.count++
-	if b.count == b.n {
-		b.count = 0
-		b.gen++
-		b.cond.Broadcast()
-		return
+	gen := b.cur
+	if b.count >= b.n {
+		b.releaseLocked()
+		b.mu.Unlock()
+		return true
 	}
-	for gen == b.gen {
-		b.cond.Wait()
+	b.mu.Unlock()
+
+	timer := time.NewTimer(blockStallTimeout)
+	defer timer.Stop()
+	select {
+	case <-gen.done:
+		return true
+	case <-timer.C:
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		if b.cur != gen {
+			// Released between the timer firing and the lock being taken. The
+			// block did assemble, so there is nothing to report.
+			return true
+		}
+		// Take the arrival back, so a later generation is not released by a
+		// thread that is no longer waiting in this one.
+		b.count--
+		return false
 	}
 }
 
-// abandon removes one participant from the barrier for good. It exists for the
-// one case where a thread stops taking part without reaching the end of the
-// kernel: a panic. Without it the surviving threads would wait at the next
-// barrier for a participant that no longer exists, and the deadlock would hide
-// the panic that caused it.
+func (b *barrier) releaseLocked() {
+	b.count = 0
+	close(b.cur.done)
+	b.cur = &barrierGen{done: make(chan struct{})}
+}
+
+// abandon removes one participant from the barrier for good, and is called
+// when a thread leaves the kernel -- by returning as much as by panicking.
+//
+// Both cases need it, and for the same reason: the surviving threads would
+// otherwise wait at the next barrier for a participant that no longer exists.
+// For a panic the deadlock would hide the panic that caused it; for a return
+// it would turn ordinary divergence into a hang, which is wrong on its own
+// terms, since CUDA does not require an exited thread to reach a barrier
+// either. The release condition is therefore arrived + finished == block size,
+// spelled as a count against a shrinking n.
 func (b *barrier) abandon() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.n--
 	// The departure may have been the one the others were waiting for.
 	if b.n > 0 && b.count >= b.n {
-		b.count = 0
-		b.gen++
-		b.cond.Broadcast()
+		b.releaseLocked()
 	}
 }
