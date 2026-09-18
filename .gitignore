@@ -1,2 +1,7 @@
 .gocuda-cache/
 /gocuda
+
+# Scratch checkouts the agent tooling creates inside the repository. They are
+# full worktrees of this same repository, so committing one would nest a copy
+# of the tree inside itself.
+.claude/worktrees/
