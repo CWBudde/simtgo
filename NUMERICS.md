@@ -203,6 +203,20 @@ The rest is still `math.Min`'s, which unlike the float32 case exists and
 documents the remaining special values; **[cited]** Go specifies
 `Min(-0, ±0) = -0`, which is what `fmin` does too.
 
+**[measured]** The **host oracle** had to be told this. `fmin` and `fmax` of
+two zeros of opposite signs are unspecified in C and in IEEE 754 alike —
+`minNum` "returns either one" — and the host does not answer it stably: the
+same expression gives −0 compiled at `-O1` and +0 at `-O0`, the compiler having
+picked a different instruction. The differential fuzzer duly reported the
+difference as a mismatch (`fuzz.Generate(620)`, inputs `77`).
+
+Since the device's answer is _not_ open, `internal/fuzz/hostrun`'s shim pins
+`fmin`, `fmax`, `fminf` and `fmaxf` on the two zeros and leaves everything
+else, the NaN rule included, to the real functions. That is what a shim is for:
+it supplies the device's C where the host's is free to differ, so a
+disagreement in a run means a mistranslation rather than a tie-break nobody
+promised. `TestFminFmaxAgreeOnTheZeros` holds it there.
+
 ### Go's `min` and `max` are a different function
 
 **[cited]** In Go they are not the same function as CUDA's: the specification

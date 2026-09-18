@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	gocuda "github.com/CWBudde/gocuda"
@@ -528,3 +529,57 @@ func compare(t *testing.T, name string, got, want any, tol float64) int {
 // against the bound. This file used to state all of that itself, which is
 // exactly how the repository came to have three comparison rules before.
 func same(got, want any, tol float64) bool { return tolerance.Agree(got, want, tol) }
+
+// TestFminFmaxAgreeOnTheZeros pins the one place the shim overrides the host
+// rather than supplying something it lacks.
+//
+// fmin and fmax of two zeros of opposite signs are unspecified, in C and in
+// IEEE 754 alike, and the host does not even answer it stably: the same
+// expression gives -0 compiled at -O1 and +0 at -O0. The device's answer is
+// not open -- gpu.Fmin returns -0 and gpu.Fmax +0 -- so the shim pins it, and
+// this is what says it stayed pinned.
+//
+// Every case runs both ways and the two must agree bit for bit, which is why
+// the comparison is on the bits rather than on the values: +0 == -0 is true in
+// both languages, so an == here would pass whatever the shim did.
+func TestFminFmaxAgreeOnTheZeros(t *testing.T) {
+	if err := hostrun.Available(); err != nil {
+		t.Skipf("no host C++ compiler: %v", err)
+	}
+	const src = "package kernels\n\nimport \"github.com/CWBudde/gocuda/gpu\"\n\n" +
+		"func Zeros(ctx gpu.Ctx, y []float32, a, b float32) {\n" +
+		"\ty[0] = gpu.Fmin(a, b)\n" +
+		"\ty[1] = gpu.Fmax(a, b)\n" +
+		"\ty[2] = gpu.Fmin(b, a)\n" +
+		"\ty[3] = gpu.Fmax(b, a)\n}\n"
+	u, err := simt.Transpile(fstest.MapFS{"k.go": &fstest.MapFile{Data: []byte(src)}}, "Zeros")
+	if err != nil {
+		t.Fatalf("Transpile: %v", err)
+	}
+
+	pos, neg := float32(0), float32(math.Copysign(0, -1))
+	host := make([]float32, 4)
+	if err := hostrun.Run(u, gpu.D1(1), gpu.D1(1), host, pos, neg); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	cpu := make([]float32, 4)
+	gpu.RunCPU(1, 1, func(c gpu.Ctx) {
+		cpu[0], cpu[1] = gpu.Fmin(pos, neg), gpu.Fmax(pos, neg)
+		cpu[2], cpu[3] = gpu.Fmin(neg, pos), gpu.Fmax(neg, pos)
+	})
+
+	for i, name := range []string{"Fmin(+0,-0)", "Fmax(+0,-0)", "Fmin(-0,+0)", "Fmax(-0,+0)"} {
+		h, c := math.Float32bits(host[i]), math.Float32bits(cpu[i])
+		if h != c {
+			t.Errorf("%s: host %#08x, emulator %#08x", name, h, c)
+		}
+	}
+	// And the direction, so that a shim which merely made them agree on the
+	// wrong answer would still fail: the smaller zero is negative.
+	if got := math.Float32bits(host[0]); got != 0x80000000 {
+		t.Errorf("Fmin of the two zeros is %#08x on the host, want -0", got)
+	}
+	if got := math.Float32bits(host[1]); got != 0 {
+		t.Errorf("Fmax of the two zeros is %#08x on the host, want +0", got)
+	}
+}
