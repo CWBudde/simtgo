@@ -268,6 +268,35 @@ func collectNames(fn *ast.FuncDecl) map[string]bool {
 	return names
 }
 
+// collectDeclared records every variable fn declares, with the position of its
+// first spelling, and nothing else.
+//
+// It is the precise counterpart to collectNames, which is deliberately blunt
+// because it only has to keep a generated name from colliding with anything at
+// all. Here bluntness would cost a refusal somebody could not act on: a struct
+// field lives in its own C namespace and can share a spelling with a variable
+// without either becoming the other, so counting one as a collision would
+// refuse a kernel that is perfectly translatable. What becomes a C variable is
+// a Go variable that is not a field, so that is what this collects.
+func collectDeclared(info *types.Info, fn *ast.FuncDecl) map[string]token.Pos {
+	out := map[string]token.Pos{}
+	ast.Inspect(fn, func(n ast.Node) bool {
+		id, ok := n.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		v, ok := info.Defs[id].(*types.Var)
+		if !ok || v.IsField() {
+			return true
+		}
+		if _, seen := out[id.Name]; !seen {
+			out[id.Name] = id.Pos()
+		}
+		return true
+	})
+	return out
+}
+
 func (t *transpiler) fail(pos token.Pos, format string, args ...any) {
 	t.diags = append(t.diags, Diagnostic{Pos: pos, Msg: fmt.Sprintf(format, args...)})
 }
@@ -329,7 +358,7 @@ func (t *transpiler) kernel(fd *ast.FuncDecl) {
 	// A name clash is a fact about the signature, not a reason to stop: the
 	// body is lowered anyway so that its own problems are reported in the
 	// same run. Nothing is emitted while any diagnostic stands.
-	t.checkLengthNames(params[1:])
+	t.checkGeneratedNames(fd, params[1:])
 
 	written := t.writtenParams(fd)
 	var decls []string
@@ -555,7 +584,7 @@ func (t *transpiler) fileOf(pos token.Pos) *ast.File {
 // length C does not carry.
 func (t *transpiler) signature(fd *ast.FuncDecl) string {
 	params := t.deviceParams(fd)
-	t.checkLengthNames(params)
+	t.checkGeneratedNames(fd, params)
 	written := t.writtenParams(fd)
 	decls := make([]string, 0, len(params))
 	for _, p := range params {
@@ -600,29 +629,65 @@ func (t *transpiler) deviceParams(fd *ast.FuncDecl) []param {
 	return params
 }
 
-// checkLengthNames refuses a kernel whose own parameters clash with the length
-// parameters synthesised for its slices.
+// checkGeneratedNames refuses a function in which a name the emitter generates
+// is already the name of one of the author's own variables.
 //
-// The readable x_len spelling is worth keeping, so the clash is reported here,
-// against the Go source, rather than left to NVRTC -- which would complain
-// about a duplicate parameter in generated code the author never wrote. The
-// tile track spells lengths the same way but names its parameters p0, p1, ...
-// itself, so it has nothing to check.
+// The emitter writes into the same C namespace the kernel does, and it writes
+// two kinds of name there: the x_len carried alongside every slice, and the
+// trailing underscore cname adds to a C++ keyword. Neither is visible in the
+// Go source, and both were reachable, silently:
 //
-// A dynamically sized shared tile generates a length the same way, and can
-// collide with either kind of name. It is discovered while the body is lowered
-// rather than here, so what this records in sigNames is the other half of that
-// check: everything the kernel's signature already spells.
-func (t *transpiler) checkLengthNames(params []param) {
+//	func K(ctx gpu.Ctx, y []float32) {    // y_len is generated
+//	    y_len := int32(3)                 // and so is this, now
+//	    if i < len(y) { ... }             // reads 3
+//	}
+//
+//	func K(ctx gpu.Ctx, y []float32, int int32) {  // int is emitted as int_
+//	    int_ := int32(99)                          // so is this
+//	    y[i] = float32(int_) + float32(int)        // both read 99
+//	}
+//
+// Each compiles under NVRTC and computes something the Go says nothing about,
+// which is the failure this emitter exists to rule out. Only the first
+// collision was checked before, and only against another parameter, so a local
+// reached neither. Checking against every variable the function declares
+// covers both, and covers a shared tile and a range variable with them, since
+// the emitter names those from the source too.
+//
+// A device function is checked over its own body: its parameters and locals
+// are what share a C scope with its generated lengths. The kernel additionally
+// records sigNames, because a dynamically sized tile generates a length while
+// the body is lowered, long after this runs.
+func (t *transpiler) checkGeneratedNames(fd *ast.FuncDecl, params []param) {
 	generated := make(map[string]string, len(params))
 	for _, p := range params {
 		if _, ok := p.typ.(*types.Slice); ok {
 			generated[cname(p.name)+"_len"] = p.name
 		}
 	}
-	for _, p := range params {
-		if slice, ok := generated[cname(p.name)]; ok {
-			t.fail(p.pos, "parameter %s collides with the length generated for slice parameter %s; rename it", p.name, slice)
+	declared := collectDeclared(t.info, fd)
+	for g, slice := range generated {
+		pos, taken := declared[g]
+		if !taken {
+			continue
+		}
+		t.fail(pos, "%s is the length generated for slice parameter %s, so in CUDA C the two would be one variable; rename it", g, slice)
+	}
+	// A C++ keyword is emitted with a trailing underscore, so a variable
+	// already spelled that way becomes the same C identifier. Sorted, because
+	// a map's order would shuffle the diagnostics between runs.
+	spellings := make([]string, 0, len(declared))
+	for name := range declared {
+		spellings = append(spellings, name)
+	}
+	sort.Strings(spellings)
+	for _, name := range spellings {
+		escaped := cname(name)
+		if escaped == name {
+			continue
+		}
+		if pos, taken := declared[escaped]; taken {
+			t.fail(pos, "%s is a C++ keyword and is emitted as %s, which is also declared here, so in CUDA C the two would be one variable; rename one of them", name, escaped)
 		}
 	}
 	if t.inDevice {

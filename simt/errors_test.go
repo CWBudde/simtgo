@@ -394,7 +394,23 @@ func TestUnsupported(t *testing.T) {
 		// parameter spelled like that length would reach NVRTC as a duplicate.
 		name: "parameter collides with a generated length",
 		body: "func K(ctx gpu.Ctx, x []float32, x_len int32) { x[0] = float32(x_len) }",
-		want: "collides with the length generated for slice parameter x",
+		want: "x_len is the length generated for slice parameter x",
+	}, {
+		// The same collision one scope in, which is the worse half: a duplicate
+		// parameter is at least an NVRTC error, while a local merely shadows
+		// the length, so len(x) quietly reads 3 from here on. It compiled and
+		// returned wrong numbers until the check stopped looking only at the
+		// other parameters.
+		name: "local shadows a generated length",
+		body: "func K(ctx gpu.Ctx, x []float32) { x_len := int32(3)\nif ctx.GlobalID() < len(x) { x[0] = float32(x_len) } }",
+		want: "x_len is the length generated for slice parameter x",
+	}, {
+		// cname spells a C++ keyword with a trailing underscore, so a variable
+		// already spelled that way becomes the same C identifier as the
+		// keyword-named one. Both then read whichever was declared last.
+		name: "a variable spelled like an escaped keyword",
+		body: "func K(ctx gpu.Ctx, y []float32, int int32) { int_ := int32(99)\ny[0] = float32(int_) + float32(int) }",
+		want: "int is a C++ keyword and is emitted as int_",
 	}, {
 		name: "non-constant block size",
 		body: "func K(ctx gpu.Ctx, a []float32) { ctx.AssumeBlockDim(len(a)); a[0] = 1 }",
