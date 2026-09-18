@@ -618,6 +618,13 @@ go run ./cmd/gocuda generate -check      # are the committed artifacts current?
 go generate ./...                        # regenerate them (needs NVRTC)
 ```
 
+There is a `justfile` for the same commands under shorter names — `just check`
+runs everything CI decides without a device, in CI's order, and `just fix`
+applies what the linters and formatters can apply themselves. `just --list`
+has the rest. It mirrors `.github/workflows/ci.yml`; the workflow is not
+written in terms of it, so that a CI runner needs no `just` and a red job names
+the step that failed.
+
 Generated `.cu` and `.ptx` land in `.gocuda-cache/` for inspection. Pass
 `simt.WithCacheDir("elsewhere")` to `simt.Build` to point it somewhere else, or
 `simt.WithCacheDir("")` to turn it off.

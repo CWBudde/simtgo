@@ -69,6 +69,11 @@ that launched nothing is green and means nothing. And note that a clean run
 prints **nothing**: `go test` discards a passing binary's stdout, so the
 `ERROR SUMMARY` lines show up only on a failure, or under `-v`.
 
+There is a `justfile` carrying all of the above under shorter names, and
+`just check` is the whole non-GPU sequence in CI's order. It mirrors the
+workflow rather than being called by it, so the workflow stays authoritative:
+if the two disagree, the justfile is the stale one. `just --list` is the index.
+
 Linting is `golangci-lint run ./...` (`.golangci.yml`) and formatting is
 `treefmt` (`treefmt.toml`: gofmt for Go, prettier for Markdown, YAML and JSON);
 `treefmt --ci` checks without writing. Both run in
