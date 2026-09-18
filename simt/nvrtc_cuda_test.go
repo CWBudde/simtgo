@@ -4,6 +4,7 @@ package simt_test
 
 import (
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -12,6 +13,37 @@ import (
 	"github.com/CWBudde/gocuda/cuda"
 	"github.com/CWBudde/gocuda/simt"
 )
+
+// requireNVRTC skips a test that needs libnvrtc, or fails it when the caller
+// has promised one.
+//
+// The cheapest probe that loads libnvrtc and nothing else. *LibraryError
+// reports ErrNoCUDA as well as ErrLibraryNotFound, so this single comparison
+// covers both "no toolkit installed" and "the library is somewhere the search
+// does not look".
+//
+// GOCUDA_REQUIRE_NVRTC is GOCUDA_REQUIRE_DEVICE's twin, for the half of the
+// tagged suite that needs the toolkit and no device: NVRTC compiles to PTX and
+// nothing is launched. A job that went to the trouble of installing the library
+// is saying the point of the run is that NVRTC answered, and there a silent
+// skip is the worst outcome available. It was measured rather than supposed --
+// with GOCUDA_LIBNVRTC pointed at a file that does not exist, a 20-minute
+// fuzz leg passes in three milliseconds having compiled nothing.
+// See .github/workflows/fuzz.yml.
+func requireNVRTC(tb testing.TB) {
+	tb.Helper()
+	_, _, err := cuda.NVRTCVersion()
+	if err == nil {
+		return
+	}
+	if !errors.Is(err, cuda.ErrNoCUDA) {
+		tb.Fatalf("NVRTCVersion: %v", err)
+	}
+	if os.Getenv("GOCUDA_REQUIRE_NVRTC") != "" {
+		tb.Fatalf("GOCUDA_REQUIRE_NVRTC is set, but no CUDA toolkit is available: %v", err)
+	}
+	tb.Skipf("no CUDA toolkit available: %v", err)
+}
 
 // TestGeneratedCCompiles puts the emitter's sharp edges through NVRTC.
 //
@@ -28,15 +60,10 @@ import (
 // here launches anything. When the toolkit is missing there is no question to
 // answer, so the test skips rather than fails -- an absent libnvrtc says
 // nothing about the emitter, and reporting it as a failure would train readers
-// to ignore the one signal this test exists to give.
+// to ignore the one signal this test exists to give. A job that installed the
+// library on purpose sets GOCUDA_REQUIRE_NVRTC and gets the other behaviour.
 func TestGeneratedCCompiles(t *testing.T) {
-	// The cheapest probe that loads libnvrtc and nothing else. *LibraryError
-	// reports ErrNoCUDA as well as ErrLibraryNotFound, so this single
-	// comparison covers both "no toolkit installed" and "the library is
-	// somewhere the search does not look".
-	if _, _, err := cuda.NVRTCVersion(); errors.Is(err, cuda.ErrNoCUDA) {
-		t.Skipf("no CUDA toolkit available: %v", err)
-	}
+	requireNVRTC(t)
 
 	const arch = "compute_75"
 	cases := []struct{ name, body string }{{

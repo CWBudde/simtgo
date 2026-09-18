@@ -7,9 +7,18 @@
 # job with a different budget, and putting it in CI would mean either a CI run
 # that takes half an hour or a search too short to reach anything.
 #
-# What runs here is the untagged half. FuzzNVRTCAcceptsTheGeneratedC needs a
-# CUDA toolkit and no runner has one -- the same reason ci.yml cannot check the
-# parity tests -- so the NVRTC oracle stays a local and self-hosted concern.
+# Two schedules, because they answer different questions. The daily run is the
+# regression cadence: every defect the fuzzer has found so far turned up in
+# minutes, so twenty of them is generous for "did the last day's commits break
+# something". Whether a *deeper* case exists is a question twenty minutes
+# cannot answer at all, and that is the weekly leg's job -- four hours, once,
+# rather than a daily bill nobody reads.
+#
+# The NVRTC oracle runs here too, in a job of its own. It needs a CUDA toolkit
+# and not a device -- NVRTC compiles to PTX and nothing is launched -- so the
+# nvrtc-cu12 wheel is enough, and GOCUDA_LIBNVRTC points the loader's search at
+# it. That is the same trick docs/toolchain.md records for running
+# TestGeneratedCCompiles on a machine with no GPU.
 #
 # A case this finds is a file under simt/testdata/fuzz/, which is committed by
 # hand after it has been read. That is on purpose: a corpus entry is a test
@@ -20,9 +29,12 @@ name: Fuzz
 
 on:
   schedule:
-    # 03:00 UTC daily. The time is arbitrary; what matters is that it is not
+    # 03:17 UTC daily. The time is arbitrary; what matters is that it is not
     # the top of the hour, where every scheduled workflow on GitHub queues.
     - cron: "17 3 * * *"
+    # Sundays, 02:17 UTC. A different minute as well as a different day, so a
+    # glance at a run's cron says which budget it got.
+    - cron: "17 2 * * 0"
   # So it can be run against a branch before merging something that touches
   # the generator, which is when it is most likely to have something to say.
   workflow_dispatch:
@@ -37,6 +49,11 @@ permissions:
 
 env:
   GOTOOLCHAIN: auto
+  # One place decides the budget, so the two jobs cannot drift apart: whatever
+  # a manual run asked for, else four hours on the Sunday cron, else twenty
+  # minutes. GitHub's `a && b || c` is its ternary, and `inputs.fuzztime` is
+  # empty on a schedule event, which is what makes the fallthrough work.
+  FUZZTIME: ${{ inputs.fuzztime || (github.event.schedule == '17 2 * * 0' && '4h') || '20m' }}
 
 jobs:
   fuzz:
@@ -64,13 +81,12 @@ jobs:
         run: g++ --version
 
       - name: Search
-        env:
-          FUZZTIME: ${{ inputs.fuzztime || '20m' }}
         run: |
           # -timeout 0 because go test's own default is ten minutes and the
-          # search is twenty: without it the binary panics halfway through and
-          # the job reports a timeout rather than whatever the fuzzer had found.
-          # The search is bounded by -fuzztime, and the job by the runner.
+          # search is twenty, or four hours on a Sunday: without it the binary
+          # panics partway through and the job reports a timeout rather than
+          # whatever the fuzzer had found. The search is bounded by -fuzztime,
+          # and the job by the runner.
           go test -timeout 0 -run '^$' -fuzz '^${{ matrix.target }}$' -fuzztime "$FUZZTIME" ./simt/
 
       # A failure writes the input that caused it into the package's testdata,
@@ -81,5 +97,55 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: fuzz-corpus-${{ matrix.target }}
+          path: simt/testdata/fuzz/
+          if-no-files-found: ignore
+
+  # The other oracle. It takes the whole of what the generator produces rather
+  # than the third the host oracle is in scope for -- barriers, warp
+  # primitives, atomics and shared tiles all compile here -- because it never
+  # executes anything. Four of the defect catalogue's eight ranks were found by
+  # NVRTC and only by NVRTC.
+  nvrtc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # The wheel is libnvrtc and nothing else: no driver, no nvcc, no device.
+      # The version is pinned because it is not only a library here -- the
+      # target's generatorNoise list whitelists four NVRTC diagnostic numbers
+      # as generator noise, and which numbers those are is a property of a
+      # particular NVRTC. 12.8 is what docs/toolchain.md's measurements and
+      # kernels/prebuilt's compute_75 artifacts were made against.
+      - name: Install NVRTC
+        run: |
+          pip install --target "$RUNNER_TEMP/nvrtc" nvidia-cuda-nvrtc-cu12==12.8.93
+          echo "GOCUDA_LIBNVRTC=$RUNNER_TEMP/nvrtc/nvidia/cuda_nvrtc/lib/libnvrtc.so.12" >>"$GITHUB_ENV"
+
+      # Says out loud that the library landed where the previous step promised,
+      # the way the other jobs assert g++ and nvidia-smi. GOCUDA_REQUIRE_NVRTC
+      # below would catch it anyway, but it would catch it after a checkout, a
+      # toolchain download and a compile, and name a Go test rather than a pip.
+      - name: Show the NVRTC library
+        run: ls -l "$GOCUDA_LIBNVRTC"
+
+      # GOCUDA_REQUIRE_NVRTC turns the target's "no CUDA toolkit available"
+      # skip into a failure. Without it this job is the worst outcome
+      # available: with GOCUDA_LIBNVRTC pointing anywhere wrong, the leg passes
+      # in three milliseconds having compiled nothing, and reports success.
+      - name: Search
+        env:
+          GOCUDA_REQUIRE_NVRTC: "1"
+        run: |
+          go test -tags cuda -timeout 0 -run '^$' \
+            -fuzz '^FuzzNVRTCAcceptsTheGeneratedC$' -fuzztime "$FUZZTIME" ./simt/
+
+      - name: Keep what it found
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-corpus-FuzzNVRTCAcceptsTheGeneratedC
           path: simt/testdata/fuzz/
           if-no-files-found: ignore
