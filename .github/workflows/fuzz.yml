@@ -1,0 +1,85 @@
+# The differential fuzzer, run for long enough to find something.
+#
+# This is deliberately NOT part of ci.yml. The seed corpus already runs there,
+# as ordinary tests under plain `go test`, and that is the regression suite:
+# it is what keeps a case the fuzzer once found from coming back, and it costs
+# a couple of seconds on every push. Searching for *new* cases is a different
+# job with a different budget, and putting it in CI would mean either a CI run
+# that takes half an hour or a search too short to reach anything.
+#
+# What runs here is the untagged half. FuzzNVRTCAcceptsTheGeneratedC needs a
+# CUDA toolkit and no runner has one -- the same reason ci.yml cannot check the
+# parity tests -- so the NVRTC oracle stays a local and self-hosted concern.
+#
+# A case this finds is a file under simt/testdata/fuzz/, which is committed by
+# hand after it has been read. That is on purpose: a corpus entry is a test
+# every future run pays for, and an automated commit would add them faster than
+# anybody diagnoses them.
+
+name: Fuzz
+
+on:
+  schedule:
+    # 03:00 UTC daily. The time is arbitrary; what matters is that it is not
+    # the top of the hour, where every scheduled workflow on GitHub queues.
+    - cron: "17 3 * * *"
+  # So it can be run against a branch before merging something that touches
+  # the generator, which is when it is most likely to have something to say.
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: How long to search, as a Go duration
+        default: 20m
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: auto
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    # A failing target stops at the first input it finds, so the two run as
+    # separate matrix legs: one target finding something must not hide whether
+    # the other would have.
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - FuzzHostAgreesWithEmulator
+          - FuzzOutsideTheSubsetIsRefused
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # FuzzHostAgreesWithEmulator compiles the emitter's generated CUDA C with
+      # a host C++ compiler and runs it, so the runner needs one. ubuntu-latest
+      # has g++ already; this says so out loud rather than relying on it, and
+      # fails here with a clear message if that ever stops being true.
+      - name: Show the host C++ compiler
+        run: g++ --version
+
+      - name: Search
+        env:
+          FUZZTIME: ${{ inputs.fuzztime || '20m' }}
+        run: |
+          # -timeout 0 because go test's own default is ten minutes and the
+          # search is twenty: without it the binary panics halfway through and
+          # the job reports a timeout rather than whatever the fuzzer had found.
+          # The search is bounded by -fuzztime, and the job by the runner.
+          go test -timeout 0 -run '^$' -fuzz '^${{ matrix.target }}$' -fuzztime "$FUZZTIME" ./simt/
+
+      # A failure writes the input that caused it into the package's testdata,
+      # where it is the whole of what somebody needs to reproduce the case.
+      # Keeping it is the point of the run.
+      - name: Keep what it found
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-corpus-${{ matrix.target }}
+          path: simt/testdata/fuzz/
+          if-no-files-found: ignore

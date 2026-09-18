@@ -670,6 +670,201 @@ A transpiler is trusted through evidence, not review.
 - [ ] **Differential fuzzing.** Generate random programs in the supported
       subset, run them on the CPU emulator and the GPU, compare. This is the
       backbone of the whole approach and should run continuously.
+
+      (2026-09-18) — the generator, both oracles and the corpus exist; the GPU
+      comparison does not, and cannot here. The definition above turned out to
+      be narrower than the item deserves: it names two backends, and there is a
+      **third that needs no device at all**. `internal/fuzz/hostrun` compiles
+      the emitter's generated CUDA C with an ordinary host C++ compiler behind
+      a small shim and runs it, so "compiles and computes something else" is
+      answerable on a machine with no GPU — which is what CI is. What still
+      needs hardware is only what the device does differently from any C++
+      implementation: the transcendentals, the warp primitives, `fminf`'s
+      treatment of a NaN, and what happens to a subnormal.
+
+      `internal/fuzz` is the generator: one IR rendered twice, as Go source for
+      `simt.Transpile` and as a `func(gpu.Ctx)` closure for `gpu.RunCPU`. The
+      closure is not an interpreter of Go semantics — it *is* Go, running the
+      same operations on the same types — which is what keeps the oracle from
+      being a second implementation somebody has to trust.
+
+      **Measured, on seeds disjoint from the ones the tests use.** The yield is
+      20000/20000: every generated program is accepted by the subset, so a fuzz
+      run tests the emitter rather than the refusal path. Feature coverage over
+      3,000 programs: `switch` 80%, `range` 70%, narrow element types 66%,
+      `SyncThreads` 45%, arrays 45%, shared memory 38%, atomics 32%, `float64`
+      24%, device functions 21%, warp primitives 7.5% — and **structs 0%**.
+      There is no struct node in the IR, which leaves the padding members, the
+      `sizeof` assertion standing in for offsets NVRTC cannot assert, and the
+      `ctype`/`ctypeElem` split untested by this route. That is the next thing
+      the generator wants, and the design is settled even though the code is
+      not:
+
+      - **A fixed catalogue of shapes, declared as real Go types** in
+        `internal/fuzz`, rather than shapes invented at run time. The closure
+        renderer has to hold real values and there is no way to make a Go type
+        at run time, so the catalogue is what lets both renderings be the same
+        type. Pick the shapes for their holes: `{int8; float32}` pads three
+        bytes, `{float32; int64}` pads four to reach an alignment of eight, and
+        a trailing hole needs a wide field first and a narrow one last.
+      - **Field access, not struct values.** A `Field` node -- base, index,
+        field -- whose `kind()` is the *field's* kind. That is what keeps the
+        change confined: every existing per-kind compiler in `closure.go` then
+        handles the result unchanged, and the struct never has to become a kind
+        of its own in the ~200 `case K…` sites those compilers are made of.
+      - **`hostrun` needs nothing.** It already marshals a struct slice as its
+        Go bytes, which is sound exactly because the emitter asserts the C
+        struct's size; that assertion is most of what this would be testing.
+      - The cost is per-(shape, field) typed accessors so the closure stays
+        unboxed, which is the property `closure.go`'s frame exists to have.
+
+      **NVRTC is the oracle that matters here**, and it needs no execution: the
+      emitter writes a `static_assert` on the struct's size, so a wrong layout
+      fails to compile. A generated struct reaching `cuda.Compile` is the whole
+      test.
+
+      41.1% of generated programs are in the host oracle's scope — a barrier, a
+      warp primitive, an atomic or a shared tile means something a sequential
+      run cannot reproduce — and 34.8% are also free of a transcendental, which
+      the differential excludes because `sinf` and Go's `math.Sin` are two
+      implementations of a function neither language requires to be correctly
+      rounded. The NVRTC oracle takes all of it.
+
+      **It found two defects in its first minutes**, both in what the catalogue
+      ranks first and neither visible to a golden or a parity test. `-(-c)` was
+      emitted as `--c`, which C++ lexes as predecrement: on a modifiable lvalue
+      that compiles, decrements the variable and yields the decremented value.
+      And `a := a + 1` was emitted as `int a = a + 1;`, where C++ starts the
+      new name at its declarator and Go starts it at the end of the
+      declaration — so the C read the variable being declared instead of the
+      one being shadowed. Both are fixed with tests that fail without the fix.
+
+      **The third finding was in the oracle**, which is the outcome the
+      target's failure message is written to allow for: `tolerance.Agree`
+      settled a NaN for a `float32` and let a `float64` fall through to
+      `reflect.DeepEqual`, so two NaNs in a `[]float64` were reported as
+      disagreeing — "b[2] = NaN, want NaN". A mismatch is a finding about one
+      of the two backends and not a verdict about which, and the emulator has
+      been the wrong one before. The rule is now asked once for both widths,
+      and `internal/tolerance` — which three callers depend on and which had no
+      tests at all — has them.
+
+      (2026-09-18, later) — **it runs continuously now**:
+      `.github/workflows/fuzz.yml`, daily and on demand, one matrix leg per
+      untagged target so that one finding cannot hide the other. The NVRTC
+      oracle stays out of it for the same reason the parity tests are out of
+      CI: no runner has a toolkit. A case it finds is uploaded as an artifact
+      and committed by hand after it has been read, because a corpus entry is
+      a test every future run pays for and an automated commit would add them
+      faster than anybody diagnoses them.
+
+      **Two more emitter defects from the sustained runs**, both invisible to
+      a golden and to a parity test. A `range` index the body assigns to was
+      emitted as the loop counter, so `p--` in the body decremented the loop
+      against its own `p++` and the kernel never terminated — Go's range
+      variable is per-iteration, and the fix is what the range *value* had
+      always done. And `o << (o & 31)` on a Go `int`, which is the narrowing
+      above.
+
+      The non-terminating case also found a hole in the oracle itself:
+      `hostrun.Run` did not bound the child, so one input took a whole fuzz
+      worker with it — the driver sat at 100% of a core for four and a half
+      minutes with no diagnosis and no failing case recorded. It has a
+      timeout now, and a `TimeoutError` distinct from a compile failure and
+      from a non-zero exit, because "does not finish" may be either the
+      generator's fault or the emitter's and the caller has to be able to say
+      which.
+
+      Two further findings were in the *generator* rather than the emitter,
+      which is the outcome the failure message is written to allow for. It clamped every float to ±1000 before
+      converting it to an integer — right in principle, since such a
+      conversion is implementation-dependent in Go and undefined in C — but
+      to a *signed* range, so a negative float reached a `uint32` and the two
+      backends disagreed on every element. And `tolerance.Agree` settled a NaN
+      for a `float32` and let a `float64` fall through to
+      `reflect.DeepEqual`, which compares them with `==`, so two NaNs in a
+      `[]float64` were reported as disagreeing. `NUMERICS.md` gained the
+      conversion rule, because it is a trap for a kernel author and not only
+      for a generator.
+
+      And the one this round was most pointed at. Go's builtin `min` and `max`
+      propagate a NaN operand where CUDA's `fminf` and `fmaxf` ignore one, so
+      `min(0.0/0.0, x)` is a NaN in Go and `x` on the device. That had been
+      recorded since the numerics round in the same sentence that said nothing
+      tested it and no committed kernel reached it; the fuzzer reached it in
+      **six seconds**, which is the whole argument for having one. It is
+      refused now, pointing at `gpu.Fmin`/`gpu.Fmax`, which already mean the
+      device's answer on both backends — the same resolution the `int`
+      narrowing got, for the same reason. The integer overloads are untouched.
+
+      And one it found in its own earlier fix: `shadowRename` reserved the
+      *escaped* name, so `double := double + 1` reserved "double_", found
+      nothing called that, and handed back the name the outer variable already
+      had. The rename renamed nothing and the defect it exists to fix was
+      still there. NVRTC's "used before its value is set" caught it — the same
+      signal that found the original.
+
+      **Still open, and the largest thing the fuzzer has turned up.** Go
+      defines signed integer overflow as wrapping; C leaves it *undefined*,
+      for `+`, `-`, `*`, unary `-` and `<<` alike. The generated code
+      therefore has no defined meaning on exactly the values Go does define,
+      and the difference is invisible: it compiles, and what it does depends
+      on the optimiser. The fuzzer hit it through `11 - (x << 63)`, where
+      `x << 63` is `MinInt64` and the subtraction overflows —
+      `fuzz.Generate(-279)` with inputs `205` reproduces it, and the host and
+      the emulator disagreed by whole powers of two on every element.
+
+      **Fixed** (2026-09-18), by the decision that the generated C should mean
+      what the Go means: `+`, `-`, `*`, unary `-` and `<<` on a signed integer
+      are emitted through the unsigned type of the same width. The conversion
+      is once per *region* of arithmetic rather than once per operator, or the
+      source would vanish under casts — `a + b*c` is one cast back and three
+      operands converted in, not a nest four deep. `/`, `%` and `>>` end a
+      region, meaning something different unsigned; `&`, `|`, `^` are left
+      outside too, so the rule has no exception.
+
+      It is not free in readability and that was the accepted cost: an index
+      expression `h[i+1]` becomes `h[(int)((unsigned int)(i) + 1u)]`. It is
+      very nearly free in everything else. Six of the twelve kernels changed,
+      and of their PTX **three are byte-identical** — FIR, Quantize, Transpose
+      — Gray is the same size, BandGain grows 28 bytes, and **Classify shrinks
+      by 483**. Removing an assumption the optimiser was entitled to make did
+      not cost instructions; in one case it saved them.
+
+      Two limits remain, and `SPEC.md` states both rather than leaving them to
+      be found: this makes the C *defined*, not *equal to Go*, for Go's `int`,
+      which wraps at 64 bits where the device wraps at 32; and `MinInt / -1` is
+      still undefined on the device, which routing through unsigned cannot fix.
+
+- [ ] **Signed zero, host against emulator.** The fuzzer's next find after the
+      wrapping went in, and **not** caused by it: `fuzz.Generate(620)` with
+      inputs `77` writes `+0` on the host where the emulator writes `-0`, and
+      it reproduces identically on the commit before. `internal/tolerance`
+      deliberately treats the two zeros as different results rather than a
+      rounding — a relative bound cannot tell them apart, their difference
+      being zero while their bits are not — so the differential reports it.
+      What is not yet established is which side is right, and whether it is a
+      constant-folding difference (Go folds a float constant expression at
+      arbitrary precision and rounds once) or something in the translation.
+      Not committed as a corpus entry, because an entry is a test and this one
+      fails.
+
+      **Seven defects in all, in roughly half an hour of searching**, five of
+      them in the emitter and two in the oracle. That ratio is worth
+      recording: an oracle this young has its own bugs, and a differential
+      that reports a mismatch as "a finding about one of them and not a
+      verdict about which" is what makes those cheap to tell apart.
+
+      What is committed: three targets in `simt/`, two of them running in CI on
+      every push. Go runs a fuzz target's seeds as ordinary tests under plain
+      `go test`, so the whole host differential costs CI 2.3s and no flag. The
+      third, `FuzzOutsideTheSubsetIsRefused`, is the only oracle there is for a
+      rule whose content is that something is refused: it puts each broken rule
+      inside a few hundred lines of generated control flow, where a rule that
+      reads the wrong scope stops firing and `simt/errors_test.go`'s three-line
+      kernels would never notice. Continuous fuzzing still wants a scheduled
+      workflow; it is a `-fuzztime` line, not a design.
+
 - [ ] **`compute-sanitizer`** (`memcheck`, `racecheck`, `initcheck`,
       `synccheck`) over every kernel in CI.
 - [x] **Barrier-divergence analysis.** (2026-09-18) — `internal/lower/diverge.go`,
@@ -735,7 +930,9 @@ A transpiler is trusted through evidence, not review.
       `fma` survives `--fmad=false`, so it is inside `hypotf` and is not
       evidence of source contraction — FIR and Quantize are. And Go's builtin
       `min`/`max` disagree with CUDA's on NaN exactly as `math.Min` did, which
-      nothing tests and no committed kernel reaches.
+      at the time nothing tested and no committed kernel reached. (The
+      differential fuzzer reached it later the same day, in six seconds; it is
+      refused now — see the fuzzing entry in Phase 3.)
 
       The tolerance rule is now one rule in `internal/tolerance`, where there
       were three conventions in three packages, and the exactness rule — when a

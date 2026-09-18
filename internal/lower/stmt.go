@@ -107,6 +107,74 @@ func (t *transpiler) assign(s *ast.AssignStmt) {
 	t.line("%s;", t.simple(s))
 }
 
+// shadowRename gives a declared variable a C name of its own when Go and C++
+// disagree about whether it is in scope in its own initialiser.
+//
+// Go says a variable declared in a function is in scope from the end of its
+// declaration, so `a := a + 1` reads the outer a and shadows it afterwards.
+// C++ says a name is in scope from its declarator, so `int a = a + 1;` reads
+// the variable being declared -- itself, uninitialised. The C++ is accepted,
+// and computes from whatever was in that stack slot.
+//
+// Nothing in the repository's own kernels does this and NVRTC only sometimes
+// remarks on it ("variable is used before its value is set"), which is why it
+// survived until a generated kernel wrote it. The fix is to stop the two names
+// being one: the new variable is emitted under a reserved name, and because
+// renamed is keyed on the object rather than on the text, every later use of
+// it follows while the outer variable keeps the name it had.
+//
+// Only a self-reference in the initialiser matters. An ordinary shadow --
+// `a := 1` inside a block that has an outer a -- means the same thing in both
+// languages and is left spelled as the author wrote it.
+func (t *transpiler) shadowRename(id *ast.Ident, rhs ast.Expr) {
+	if rhs == nil || id.Name == "_" {
+		return
+	}
+	obj := t.info.Defs[id]
+	if obj == nil {
+		return
+	}
+	shadows := false
+	ast.Inspect(rhs, func(n ast.Node) bool {
+		use, ok := n.(*ast.Ident)
+		if !ok || use.Name != id.Name {
+			return true
+		}
+		if outer := t.info.Uses[use]; outer != nil && outer != obj {
+			shadows = true
+			return false
+		}
+		return true
+	})
+	if !shadows {
+		return
+	}
+	if t.renamed == nil {
+		t.renamed = map[types.Object]string{}
+	}
+	// Reserved on the *Go* spelling and escaped afterwards, which is the order
+	// that matters: collectNames fills the table with what the author wrote,
+	// so reserving an already-escaped name asks the table about a string it
+	// has never seen. For a name needing no escape the two are the same and
+	// either order works; for one that is a C++ keyword they are not.
+	// `double := double + 1` reserved "double_", found nothing called that,
+	// and handed back "double_" -- the very name the outer variable already
+	// had, so the rename renamed nothing and the bug it exists to fix was
+	// still there. The fuzzer found that, through NVRTC's remark about a
+	// variable used before its value is set, which is the same signal that
+	// found the original.
+	t.renamed[obj] = cname(t.reserve(id.Name))
+}
+
+// cnameOf is the C name of one object: its Go name escaped, unless it is one
+// of the few shadowRename had to move out of the way.
+func (t *transpiler) cnameOf(obj types.Object, goName string) string {
+	if n, ok := t.renamed[obj]; ok {
+		return n
+	}
+	return cname(goName)
+}
+
 // define renders a `:=` declaration as `T name = rhs`, without a terminator.
 // Statements and for-clauses both need it, and resolving the declared object
 // in one place keeps the two from deriving the C type differently.
@@ -127,6 +195,7 @@ func (t *transpiler) define(id *ast.Ident, rhs ast.Expr) string {
 		t.poison(obj)
 		return ""
 	}
+	t.shadowRename(id, rhs)
 	decl, ok := t.declare(id)
 	if !ok {
 		return ""
@@ -147,7 +216,7 @@ func (t *transpiler) declare(id *ast.Ident) (string, bool) {
 		return "", false
 	}
 	before := len(t.diags)
-	decl := t.cdecl(obj.Type(), cname(id.Name), id.Pos())
+	decl := t.cdecl(obj.Type(), t.cnameOf(obj, id.Name), id.Pos())
 	if len(t.diags) > before {
 		// The variable exists but has no device type. Every later use of it
 		// would be a fresh complaint about the same declaration.
@@ -685,8 +754,13 @@ func (t *transpiler) decl(s *ast.DeclStmt) {
 					t.poison(obj)
 					continue
 				}
+				if len(vs.Values) != 0 {
+					// `var a = a + 1` has the same scope rule as `a := a + 1`:
+					// Go starts the new variable at the end of the spec.
+					t.shadowRename(n, vs.Values[i])
+				}
 				before := len(t.diags)
-				decl := t.cdecl(obj.Type(), cname(n.Name), n.Pos())
+				decl := t.cdecl(obj.Type(), t.cnameOf(obj, n.Name), n.Pos())
 				if len(t.diags) > before {
 					// Every later use of a variable with no device type would
 					// repeat this one refusal.
@@ -871,7 +945,7 @@ func (t *transpiler) takeLabel() *labelState {
 // the scope of an initialised variable without running its initialiser, and
 // `if c { continue outer }; v := float32(1)` is exactly that shape: valid Go
 // that NVRTC would reject with an error about generated code.
-func (t *transpiler) loopBody(b *ast.BlockStmt, head string, lbl *labelState) {
+func (t *transpiler) loopBody(b *ast.BlockStmt, head []string, lbl *labelState) {
 	t.breakables = append(t.breakables, breakLoop)
 	defer func() { t.breakables = t.breakables[:len(t.breakables)-1] }()
 
@@ -882,8 +956,8 @@ func (t *transpiler) loopBody(b *ast.BlockStmt, head string, lbl *labelState) {
 		t.line("{")
 		t.ind++
 	}
-	if head != "" {
-		t.line("%s", head)
+	for _, h := range head {
+		t.line("%s", h)
 	}
 	for _, s := range b.List {
 		t.mark = len(t.diags)
@@ -912,7 +986,7 @@ func (t *transpiler) forStmt(s *ast.ForStmt) {
 		}
 		t.line("for (%s; %s; %s)", t.simple(s.Init), cond, t.simple(s.Post))
 	}
-	t.loopBody(s.Body, "", lbl)
+	t.loopBody(s.Body, nil, lbl)
 }
 
 // rangeStmt lowers `for i := range x` and `for i, v := range x`, where x is a
@@ -988,9 +1062,28 @@ func (t *transpiler) rangeStmt(s *ast.RangeStmt) {
 		defer t.release(name)
 	}
 
+	// Go's range variable is per-iteration, and C's loop counter is the loop.
+	// A body that assigns to the index therefore means two different things:
+	// in Go it changes this iteration's copy and the loop is unaffected, and
+	// in C it steers the iteration. The fuzzer found the sharpest version of
+	// that -- a `p--` against the counter's `p++`, which is a loop that never
+	// ends -- and it compiles without a word.
+	//
+	// So when the body writes to the index, the counter becomes a name of its
+	// own and the index is declared from it inside the body, which is exactly
+	// what the value below has always done and for the same reason. When the
+	// body does not, nothing changes, which is every kernel in this repository
+	// and every golden file.
+	var head []string
+	if t.assignsToIdent(s.Body, t.info.Defs[key]) {
+		idx := t.reserve(name + "_i")
+		defer t.release(idx)
+		head = append(head, fmt.Sprintf("%s %s = %s;", counter, name, idx))
+		name = idx
+	}
+
 	// The value is a copy in Go, so it is a local here too: writing to it must
 	// not reach the slice.
-	head := ""
 	if value != nil {
 		obj := t.info.Defs[value]
 		if obj == nil {
@@ -998,7 +1091,7 @@ func (t *transpiler) rangeStmt(s *ast.RangeStmt) {
 			return
 		}
 		elem := t.cdecl(obj.Type(), cname(value.Name), value.Pos())
-		head = fmt.Sprintf("%s = %s[%s];", elem, t.expr(s.X).at(precPostfix), name)
+		head = append(head, fmt.Sprintf("%s = %s[%s];", elem, t.expr(s.X).at(precPostfix), name))
 	}
 
 	// The limit becomes the right operand of a comparison, so anything binding
@@ -1006,6 +1099,42 @@ func (t *transpiler) rangeStmt(s *ast.RangeStmt) {
 	// compare first and mask afterwards.
 	t.line("for (%s %s = 0; %s < %s; %s++)", counter, name, name, limit.at(precRel+1), name)
 	t.loopBody(s.Body, head, lbl)
+}
+
+// assignsToIdent reports whether the statement assigns to obj: a plain or
+// compound assignment with it on the left, or a ++ or -- of it.
+//
+// A declaration that shadows the name is not an assignment to it, and this
+// does not have to exclude one, because go/types resolved every identifier to
+// an object before any of this ran: a shadowing declaration is a different
+// object, so it simply does not match.
+func (t *transpiler) assignsToIdent(n ast.Node, obj types.Object) bool {
+	if obj == nil {
+		return false
+	}
+	found := false
+	ast.Inspect(n, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		var targets []ast.Expr
+		switch st := n.(type) {
+		case *ast.AssignStmt:
+			targets = st.Lhs
+		case *ast.IncDecStmt:
+			targets = []ast.Expr{st.X}
+		default:
+			return true
+		}
+		for _, lhs := range targets {
+			if id, ok := unparen(lhs).(*ast.Ident); ok && t.info.Uses[id] == obj {
+				found = true
+				return false
+			}
+		}
+		return true
+	})
+	return found
 }
 
 // rangeValue resolves the second range variable, reporting the blank one and

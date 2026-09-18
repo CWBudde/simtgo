@@ -126,10 +126,19 @@ implementation. `--ftz` has nothing to do with it. A subnormal argument or
 result of `expf` is therefore not covered by the sentence above; nothing else
 measured here is affected.
 
-**[unverified]** No subnormal has ever been through a device from this
-repository. No test generates one, and the parity tests use normally
-distributed inputs, so what the hardware does with one is an open question
-rather than an established property.
+**[unverified]** No subnormal has ever been through a **device** from this
+repository, and that part is unchanged: the parity tests use normally
+distributed inputs, so what the hardware does with one is still an open
+question rather than an established property.
+
+**[measured]** Subnormals have now been through the _generated C_, which is a
+weaker statement and worth keeping separate from the one above.
+`internal/fuzz/hostrun` compiles the emitter's output with a host C++ compiler
+and runs it, and the fuzz generator's input distribution puts the smallest
+subnormal, both zeros, both infinities and a NaN into every buffer it makes.
+The host and `gpu.RunCPU` agree on all of them, bit for bit. That says the
+translation preserves them on x86-64; it says nothing about sm_75, where the
+question above is still open.
 
 ## Division, square root and the library functions
 
@@ -196,18 +205,46 @@ documents the remaining special values; **[cited]** Go specifies
 
 ### Go's `min` and `max` are a different function
 
-**[measured]** The builtins lower to CUDA's `min`/`max`
-(`internal/lower/expr.go`), and NVRTC compiles `min(a, b)` and `fminf(a, b)` to
-the **same** PTX instruction — a probe containing both emits one `min.f32` and
-stores its result twice.
+**[cited]** In Go they are not the same function as CUDA's: the specification
+says a builtin `min` with a NaN operand returns NaN, and CUDA's `fminf` follows
+IEEE `minNum`, which ignores a NaN operand and returns the number.
 
-**[cited]** In Go they are not the same function: the specification says a
-builtin `min` with a NaN operand returns NaN.
+**[measured]** So a kernel written with `min(a, b)` agreed with itself on both
+backends for ordinary numbers and disagreed the moment a NaN reached it. This
+section used to end "nothing currently tests this"; the differential fuzzer
+tested it, in six seconds, by putting NaN in the input distribution and
+generating `min(0.0/0.0, x)`.
 
-So a kernel written with `min(a, b)` agrees with itself on both backends for
-ordinary numbers and disagrees the moment a NaN reaches it — the emulator
-propagates and the device does not. Nothing currently tests this, and no kernel
-in `kernels/` is affected. Prefer `gpu.Fmin` where a NaN is possible.
+**The float builtins are now refused**, pointing at `gpu.Fmin`/`gpu.Fmax`,
+which mean the device's answer on both backends — see `SPEC.md`. The _integer_
+overloads still lower to CUDA's `min`/`max` and are untouched, no integer being
+a NaN.
+
+**[measured]** For the record, since it is what made the disagreement invisible:
+NVRTC compiles `min(a, b)` and `fminf(a, b)` to the **same** PTX instruction. A
+probe containing both emits one `min.f32` and stores its result twice, so the
+generated code gave no sign that the two languages disagreed about it.
+
+## Converting a float to an integer it does not fit
+
+**[cited]** Neither language promises anything. Go's specification says that in
+a non-constant conversion, "if the result type cannot represent the value the
+conversion succeeds but the result value is implementation-dependent"; C leaves
+the same conversion undefined. So a float outside the destination's range is
+one of the few places where the emulator and the device may legitimately
+disagree and neither is wrong.
+
+**[measured]** The differential fuzzer walked into it, and the case is worth
+recording because it is not the obvious one. Its generator already clamped
+every float to ±1000 before converting, which is in range for a signed 32-bit
+integer — and not for an _unsigned_ one, where a negative value fits nothing.
+Converting `-4.0f` to a `uint32` gave one answer on the host and another in the
+emulator, on every element of the buffer. The clamp now takes the
+destination's signedness into account.
+
+Nothing refuses this at lowering, and nothing can: the value is not known until
+the kernel runs. Clamp before converting, and clamp to a floor the destination
+can hold.
 
 ## The tolerance policy
 
@@ -323,7 +360,8 @@ In rough order of how much it would be worth learning:
    come down from `1e-5` to something derived rather than guessed.
 3. **Whether the device's `fminf` prefers −0.** Asserted by
    `TestFminFmaxParity`, documented by nobody.
-4. **Subnormals.** Not flushed, per the PTX; never exercised.
+4. **Subnormals.** Not flushed, per the PTX; exercised through the generated
+   C on a host compiler, never through a device.
 5. **`arm64`.** The emulator contracts there and the tolerances were not set
    for it.
 6. **`float64`.** `BandGain` is the only kernel that uses it, its

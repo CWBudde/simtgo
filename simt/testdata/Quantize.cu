@@ -27,5 +27,5 @@ extern "C" __global__ void Quantize(int* __restrict__ code, int code_len, long l
 		clipped[i] = false;
 	}
 	code[i] = q;
-	energy[i] = (long long)(q) * (long long)(q);
+	energy[i] = (long long)((unsigned long long)((long long)(q)) * (unsigned long long)((long long)(q)));
 }

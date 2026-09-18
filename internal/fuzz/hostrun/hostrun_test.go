@@ -520,36 +520,11 @@ func compare(t *testing.T, name string, got, want any, tol float64) int {
 	return diffs
 }
 
-// same decides one element.
+// same decides one element, which internal/tolerance.Agree is the rule for.
 //
-// The order of the questions is the point. Bit equality comes first, so it is
-// what an ordinary element is judged by. Then the values no tolerance relates
-// to anything -- a NaN, an infinity, and the pair of zeros, which a relative
-// bound cannot tell apart because their difference is zero. Only two ordinary
-// finite numbers reach the bound, which is where NUMERICS.md says a bound
-// belongs.
-func same(got, want any, tol float64) bool {
-	g, ok := got.(float32)
-	if !ok {
-		return reflect.DeepEqual(got, want)
-	}
-	w := want.(float32)
-	gd, wd := float64(g), float64(w)
-	switch {
-	case math.Float32bits(g) == math.Float32bits(w):
-		return true
-	case math.IsNaN(gd) || math.IsNaN(wd):
-		return math.IsNaN(gd) && math.IsNaN(wd)
-	case math.IsInf(gd, 0) || math.IsInf(wd, 0), g == 0 && w == 0:
-		return false
-	case tol > 0:
-		// internal/tolerance is the one comparison rule, and Close is its
-		// per-element half, so this asks it rather than restating it. The
-		// cases above are the ones no tolerance relates -- a NaN to anything,
-		// an infinity to a finite value, and the two zeros to each other --
-		// and they are settled first precisely so that what reaches Close is a
-		// pair of finite numbers, which is all the rule claims to be about.
-		return tolerance.Close(g, w, tol)
-	}
-	return false
-}
+// It is one line because the rule belongs in one place: bit equality first,
+// then the values no tolerance relates -- a NaN, an infinity against a finite
+// number, the two zeros -- and only a pair of ordinary finite numbers judged
+// against the bound. This file used to state all of that itself, which is
+// exactly how the repository came to have three comparison rules before.
+func same(got, want any, tol float64) bool { return tolerance.Agree(got, want, tol) }

@@ -111,6 +111,38 @@ var refusals = []refusal{{
 	body: "func K(ctx gpu.Ctx, y []int32, n []uint8) { y[0] = y[1] << n[0] }",
 	want: "so `<<` on one can give a different answer",
 }, {
+	// Found by the differential fuzzer in six seconds, having been recorded
+	// as known and untested since the numerics round.
+	name: "the builtin min on floats",
+	body: "func K(ctx gpu.Ctx, y []float32, a, b float32) { y[0] = min(a, b) }",
+	want: "write gpu.Fmin(a, b)",
+}, {
+	name: "the builtin max on float64",
+	body: "//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float64, a, b float64) { y[0] = max(a, b) }",
+	want: "write gpu.Fmax64(a, b)",
+}, {
+	// The narrowing SPEC.md calls the one deliberate infidelity, caught where
+	// it escapes. A left shift is what takes an int past the 32 bits the
+	// device keeps, and the excuse -- that an int is an index and an index is
+	// bounded by the grid -- stops holding exactly there.
+	name: "a Go int shifted left by a computed amount",
+	body: "func K(ctx gpu.Ctx, y []int32, k int) { o := ctx.GlobalID(); y[0] = int32(o << (k & 31)) }",
+	want: "is 64 bits in Go and 32 on the device",
+}, {
+	// The same shape through a device function's parameter, so the rule is
+	// seen to read the type rather than the spelling of a known local.
+	name: "a Go int shifted left inside a device function",
+	body: "func wide(a, b int) int { return a << b }\n\n" +
+		"func K(ctx gpu.Ctx, y []int32) { y[0] = int32(wide(ctx.GlobalID(), 3)) }",
+	want: "is 64 bits in Go and 32 on the device",
+}, {
+	// A constant shift is left alone -- see TestConstantShiftsAreAccepted --
+	// but not one the C type cannot take. Go defines this as zero and C
+	// leaves it undefined, so it is a wrong answer with nothing to report it.
+	name: "a shift wider than the C type",
+	body: "func K(ctx gpu.Ctx, y []int32, a int32) { y[0] = a << 40 }",
+	want: "undefined on the device",
+}, {
 	name: "uint",
 	body: "func K(ctx gpu.Ctx, n uint, a []float32) { a[0] = float32(n) }",
 	want: "use uint32 or uint64",

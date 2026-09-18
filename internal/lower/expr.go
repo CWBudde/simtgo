@@ -121,6 +121,14 @@ func (t *transpiler) expr(e ast.Expr) cexpr {
 	if t.failed() {
 		return atom("")
 	}
+	// Inside an open unsigned domain, anything that is not itself part of the
+	// wrapping arithmetic is a boundary: it is computed as it always was and
+	// converted into the domain here. That this is the only place the
+	// conversion is written is what keeps it to one per operand rather than
+	// one per operator -- see wrapDomain.
+	if t.wrapUnsigned != "" && !t.inWrapDomain(e) {
+		return t.enterWrapAs(e)
+	}
 	// Anything go/types folded to a constant is emitted as a literal, which
 	// covers literals, named constants and constant arithmetic alike.
 	if tv, ok := t.info.Types[e]; ok && tv.Value != nil {
@@ -145,7 +153,10 @@ func (t *transpiler) expr(e ast.Expr) cexpr {
 		}
 		switch e.Op {
 		case token.SUB, token.ADD, token.NOT:
-			return cexpr{fmt.Sprintf("%s%s", e.Op, t.expr(e.X).at(precPrefix)), precPrefix}
+			if s, u, ok := t.wrapTypeOf(e); ok && t.wrapUnsigned == "" {
+				return t.openWrap(s, u, func() cexpr { return t.unaryPlain(e) })
+			}
+			return t.unaryPlain(e)
 		case token.XOR:
 			return cexpr{"~" + t.expr(e.X).at(precPrefix), precPrefix}
 		}
@@ -179,8 +190,186 @@ func (t *transpiler) expr(e ast.Expr) cexpr {
 	return atom("")
 }
 
+// unsignedOf is the unsigned C type of the same width, for the round trip
+// signedShiftLeft makes. Only the two signed types the subset allows an
+// operator on are here; the narrow ones never reach an operator at all.
+var unsignedOf = map[string]string{
+	"int":       "unsigned int",
+	"long long": "unsigned long long",
+}
+
+// wrapDomain is how the emitter keeps Go's arithmetic meaning what it says.
+//
+// Go defines signed integer overflow as wrapping: int32(1<<30) * 4 is 0, and
+// every bit shifted or carried off the top is simply gone. C leaves the same
+// arithmetic *undefined*, which is not a wrong number but a licence for the
+// compiler to assume it cannot happen -- so the generated kernel had no defined
+// meaning on exactly the values the Go source did define, it compiled without a
+// word, and what it did depended on the optimiser. The differential fuzzer
+// found it on `11 - (x << 63)`, where the shift is MinInt64 and the subtraction
+// overflows; the host run and the emulator then disagreed by whole powers of
+// two on every element of the buffer.
+//
+// Unsigned arithmetic is modular by definition in C, so the fix is to compute
+// there and convert back. The conversion back is defined as the two's
+// complement reinterpretation from C++20 on and implementation-defined before
+// it, in the way every target this emitter has runs.
+//
+// The whole difficulty is doing it without burying the source. Converting at
+// every operator turns `a + b*c` into
+//
+//	(int)((unsigned int)(a) + (unsigned int)((int)((unsigned int)(b) * (unsigned int)(c))))
+//
+// so instead a *region* of wrapping arithmetic is converted once at its
+// boundary:
+//
+//	(int)((unsigned int)(a) + (unsigned int)(b) * (unsigned int)(c))
+//
+// wrapUnsigned names the open region's type, or is empty. Inside one, + - *
+// and << of that same signed type emit plainly, because the arithmetic already
+// is unsigned; everything else is a boundary and is converted in by expr.
+//
+// Two operators stay outside deliberately. `/`, `%` and `>>` *mean* something
+// different on unsigned operands, so they end the region and their operands are
+// computed signed. `&`, `|` and `^` would be safe either way -- they are
+// bit-identical at the same width -- and are left outside too, because one rule
+// is easier to hold than a rule with an exception, and they are not where
+// overflow lives.
+//
+// What this does NOT fix, and SPEC.md says so: Go's int is 64 bits and the
+// device's is 32, so wrapping makes the C *defined* without making it *equal*
+// to Go. And `MinInt / -1` is MinInt in Go and undefined in C, which routing
+// through unsigned cannot fix, unsigned division being a different operation.
+
+// wrapTypeOf reports the signed and unsigned C types of an expression that is
+// wrapping arithmetic, and whether it is any.
+func (t *transpiler) wrapTypeOf(e ast.Expr) (signed, unsigned string, ok bool) {
+	switch e := e.(type) {
+	case *ast.BinaryExpr:
+		switch e.Op {
+		case token.ADD, token.SUB, token.MUL, token.SHL:
+		default:
+			return "", "", false
+		}
+	case *ast.UnaryExpr:
+		// Unary plus is the identity and cannot overflow; unary minus can, on
+		// the most negative value of its type.
+		if e.Op != token.SUB {
+			return "", "", false
+		}
+	default:
+		return "", "", false
+	}
+	tv, okT := t.info.Types[e]
+	if !okT || tv.Type == nil || tv.Value != nil {
+		// A folded constant is a literal, not arithmetic: go/types already did
+		// the sum, at arbitrary precision, and checked that it fits.
+		return "", "", false
+	}
+	basic, okB := tv.Type.Underlying().(*types.Basic)
+	if !okB || basic.Info()&types.IsInteger == 0 || basic.Info()&types.IsUnsigned != 0 {
+		return "", "", false
+	}
+	signed = t.ctype(tv.Type, e.Pos())
+	unsigned, ok = unsignedOf[signed]
+	if !ok {
+		return "", "", false
+	}
+	return signed, unsigned, true
+}
+
+// inWrapDomain reports whether e belongs to the region already open, rather
+// than being a boundary that has to be converted into it.
+func (t *transpiler) inWrapDomain(e ast.Expr) bool {
+	_, u, ok := t.wrapTypeOf(unparen(e))
+	return ok && u == t.wrapUnsigned
+}
+
+// openWrap renders a region and converts its result back to the signed type.
+func (t *transpiler) openWrap(signed, unsigned string, render func() cexpr) cexpr {
+	savedS, savedU := t.wrapSigned, t.wrapUnsigned
+	t.wrapSigned, t.wrapUnsigned = signed, unsigned
+	inner := render()
+	t.wrapSigned, t.wrapUnsigned = savedS, savedU
+	return cexpr{fmt.Sprintf("(%s)(%s)", signed, inner.s), precPrefix}
+}
+
+// outsideWrap renders e with no region open, and converts nothing. It is for
+// the operands that are not terms of the arithmetic -- a shift count.
+func (t *transpiler) outsideWrap(e ast.Expr) cexpr {
+	savedS, savedU := t.wrapSigned, t.wrapUnsigned
+	t.wrapSigned, t.wrapUnsigned = "", ""
+	c := t.expr(e)
+	t.wrapSigned, t.wrapUnsigned = savedS, savedU
+	return c
+}
+
+// enterWrapAs renders a boundary expression and converts it into the open
+// region.
+//
+// A non-negative integer constant takes the unsigned suffix instead of a cast,
+// because `5u` is the same value as `(unsigned int)(5)` and reads as what the
+// author wrote. A negative one keeps the cast: the modular representative of
+// -5 is 4294967291, and writing that would hide the source.
+func (t *transpiler) enterWrapAs(e ast.Expr) cexpr {
+	unsigned := t.wrapUnsigned
+	if tv, ok := t.info.Types[e]; ok && tv.Value != nil {
+		if v, exact := constant.Uint64Val(constant.ToInt(tv.Value)); exact {
+			return number(strconv.FormatUint(v, 10) + unsignedSuffix(unsigned))
+		}
+	}
+	return cexpr{fmt.Sprintf("(%s)(%s)", unsigned, t.outsideWrap(e).s), precPrefix}
+}
+
+// unsignedSuffix is the literal suffix that gives a constant the region's type,
+// so that a small one is not an int in a long long expression.
+func unsignedSuffix(unsigned string) string {
+	if unsigned == "unsigned long long" {
+		return "ull"
+	}
+	return "u"
+}
+
+// unarySep is the space that keeps a unary operator from fusing with its
+// operand into a different token.
+//
+// Go's -(-c) and C's are the same expression, but the obvious spelling of it
+// is "--c", which C++ lexes by maximal munch as the predecrement operator.
+// Where c is a modifiable lvalue that compiles, so nothing reports it: the
+// generated kernel decrements c and yields the decremented value, where the Go
+// negated it twice and changed nothing. The compile error it gives on a
+// prvalue -- "expression must be a modifiable lvalue" -- is the lucky half of
+// the same bug.
+//
+// Only + and - can fuse. "!!x" is two logical nots and "~~x" two complements;
+// neither pair is a token in C++, and neither needs the space.
+//
+// The test for it is the operand's rendered text rather than its AST, because
+// what fuses is what is written: a negative constant folded to "-5", a
+// parenthesised expression, and a nested unary all arrive here as strings, and
+// only the first character decides.
+func unarySep(op token.Token, operand string) string {
+	if operand == "" {
+		return ""
+	}
+	switch op {
+	case token.SUB:
+		if operand[0] == '-' {
+			return " "
+		}
+	case token.ADD:
+		if operand[0] == '+' {
+			return " "
+		}
+	}
+	return ""
+}
+
 func (t *transpiler) binary(e *ast.BinaryExpr) cexpr {
 	if t.refuseNarrowBinary(e.X, e.Y, e.Op, e.Pos()) {
+		return atom("")
+	}
+	if t.refuseWideShift(e.X, e.Y, e.Op, e.Pos()) {
 		return atom("")
 	}
 	if e.Op == token.EQL || e.Op == token.NEQ {
@@ -196,7 +385,23 @@ func (t *transpiler) binary(e *ast.BinaryExpr) cexpr {
 			}
 		}
 	}
+	if s, u, ok := t.wrapTypeOf(e); ok && t.wrapUnsigned == "" {
+		return t.openWrap(s, u, func() cexpr { return t.binaryPlain(e) })
+	}
+	return t.binaryPlain(e)
+}
+
+// binaryPlain renders the operator itself, with no question of the unsigned
+// domain: by the time it runs, either the domain is open and this node belongs
+// to it, or there is none.
+func (t *transpiler) binaryPlain(e *ast.BinaryExpr) cexpr {
 	if p, ok := cBinaryPrec[e.Op]; ok {
+		if e.Op == token.SHL || e.Op == token.SHR {
+			// A shift count is a count, not a term of the arithmetic, so it is
+			// rendered outside the domain. Dragging it in would convert it for
+			// nothing and read as though the width mattered.
+			return cexpr{fmt.Sprintf("%s %s %s", t.expr(e.X).at(p), e.Op, t.outsideWrap(e.Y).at(p+1)), p}
+		}
 		return cexpr{fmt.Sprintf("%s %s %s", t.expr(e.X).at(p), e.Op, t.expr(e.Y).at(p+1)), p}
 	}
 	if e.Op == token.AND_NOT { // Go's &^ has no C equivalent
@@ -207,6 +412,12 @@ func (t *transpiler) binary(e *ast.BinaryExpr) cexpr {
 	}
 	t.fail(e.Pos(), "unsupported operator %s", e.Op)
 	return atom("")
+}
+
+// unaryPlain is binaryPlain's counterpart for a negation.
+func (t *transpiler) unaryPlain(e *ast.UnaryExpr) cexpr {
+	x := t.expr(e.X).at(precPrefix)
+	return cexpr{e.Op.String() + unarySep(e.Op, x) + x, precPrefix}
 }
 
 // narrowOperand reports e's Go type when it is one of the storage-only narrow
@@ -267,6 +478,71 @@ func (t *transpiler) refuseNarrowBinary(x, y ast.Expr, op token.Token, pos token
 	return true
 }
 
+// refuseWideShift refuses the two shifts whose answer depends on a width the
+// two languages do not share.
+//
+// The first is the narrowing itself, caught where it escapes. Go's int is 64
+// bits and the device's is 32, which SPEC.md calls the one deliberate
+// infidelity and excuses on the grounds that an index is bounded by the grid
+// anyway. A shift is where that stops being true: `o << (o & 31)` is computed
+// in 64 bits by Go and in 32 by the device, and for o = 29 that is
+// 15569256448 against -1610612736. The fuzzer wrote exactly that, fed it to an
+// array index, and the two backends read different elements -- so the excuse
+// had a hole in it and this is the hole closed. A *constant* shift is left
+// alone: `x << 3` is what a real kernel writes, and its result is as bounded
+// as x is, which is the case the excuse was actually about.
+//
+// The second is a constant shift the C type cannot take at all. Go defines
+// x << 40 for a 32-bit x -- it is zero -- and C makes it undefined behaviour,
+// so this is a wrong answer with nothing to report it. That one applies to
+// every width, int32 and int64 alike, and to >> as much as to <<.
+//
+// What is deliberately not refused: int32 or int64 shifted by a non-constant.
+// Both are the same width in both languages, so the only disagreement left is
+// an amount that reaches the width at run time, and telling `x << (k & 31)` --
+// which is how one writes it safely -- from `x << k` needs a range analysis
+// this does not have. SPEC.md says so rather than leaving it to be found.
+func (t *transpiler) refuseWideShift(x, y ast.Expr, op token.Token, pos token.Pos) bool {
+	if op != token.SHL && op != token.SHR {
+		return false
+	}
+	tv, ok := t.info.Types[x]
+	if !ok || tv.Type == nil {
+		return false
+	}
+	basic, ok := tv.Type.Underlying().(*types.Basic)
+	if !ok {
+		return false
+	}
+	// The width of the *C* type, which for Go's int is the whole point: 32,
+	// not the 64 Go computes in. A kind not listed here is either refused
+	// elsewhere -- the narrow integers, which no operator takes -- or not an
+	// integer at all.
+	var width int
+	switch basic.Kind() {
+	case types.Int, types.Uint, types.Int32, types.Uint32:
+		width = 32
+	case types.Int64, types.Uint64:
+		width = 64
+	default:
+		return false
+	}
+
+	n, isConst := t.constInt(y)
+	if !isConst {
+		if op == token.SHL && (basic.Kind() == types.Int || basic.Kind() == types.Uint) {
+			t.fail(pos, "%s is 64 bits in Go and 32 on the device, so `<<` by an amount this code computes can give a different answer on each; hold the value in an int32, which is 32 bits in both, or in an int64 when the high word is wanted", tv.Type)
+			return true
+		}
+		return false
+	}
+	if n >= width {
+		t.fail(pos, "shifting %s by %d is undefined on the device: it is %d bits there, and C leaves a shift that wide undefined where Go defines it", tv.Type, n, width)
+		return true
+	}
+	return false
+}
+
 func (t *transpiler) call(c *ast.CallExpr) cexpr {
 	fun := unparen(c.Fun)
 
@@ -314,6 +590,43 @@ func (t *transpiler) call(c *ast.CallExpr) cexpr {
 					t.fail(c.Pos(), "%s, so %s has no overload for it; write %s(int32(a), int32(b)) and convert back with %s(...)",
 						narrowWhy(typ), f.Name, f.Name, typ)
 					return atom("")
+				}
+			}
+			// A float operand is refused for a sharper reason: the two
+			// builtins disagree about NaN. Go's min and max propagate one --
+			// the specification says so -- and CUDA's fminf and fmaxf follow
+			// IEEE minNum, which ignores a NaN operand and returns the number.
+			// So min(0.0/0.0, x) is NaN in Go and x on the device, and the
+			// same expression computes two different things with nothing to
+			// report it.
+			//
+			// The differential fuzzer found this in six seconds of searching.
+			// It had been recorded as known and untested since the numerics
+			// round -- "nothing tests it and no committed kernel reaches it"
+			// -- which is exactly the kind of claim a fuzzer is for.
+			//
+			// gpu.Fmin and gpu.Fmax are the spelling that means the device's
+			// answer, and the emulator implements them to match, so the
+			// refusal has somewhere to point. The integer overloads are
+			// untouched: no integer is a NaN, so there is nothing to disagree
+			// about.
+			for _, a := range c.Args {
+				if tv, ok := t.info.Types[a]; ok && tv.Type != nil {
+					if b, ok := tv.Type.Underlying().(*types.Basic); ok && b.Info()&types.IsFloat != 0 {
+						// gpu.Fmin / gpu.Fmin64, and the C they lower to,
+						// which is fminf for a float and fmin for a double.
+						fn, cfn := "Fmin", "fmin"
+						if f.Name == "max" {
+							fn, cfn = "Fmax", "fmax"
+						}
+						suffix := "f"
+						if b.Kind() == types.Float64 {
+							fn, suffix = fn+"64", ""
+						}
+						t.fail(c.Pos(), "%s propagates a NaN in Go and the device's %s%s ignores one, so the same expression computes two different things; write gpu.%s(a, b), which means the device's answer on both",
+							f.Name, cfn, suffix, fn)
+						return atom("")
+					}
 				}
 			}
 			return atom("%s(%s)", f.Name, t.args(c))
@@ -531,7 +844,7 @@ func (t *transpiler) ident(id *ast.Ident) cexpr {
 		t.fail(id.Pos(), "nil has no device equivalent")
 		return atom("")
 	}
-	return atom("%s", cname(id.Name))
+	return atom("%s", t.cnameOf(obj, id.Name))
 }
 
 // typeOf reports e's checked type, refusing rather than panicking when the

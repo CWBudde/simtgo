@@ -142,8 +142,12 @@ The 64-bit types are `long long` and never `long`, which is 8 bytes on Linux
 and 4 on Windows.
 
 **Go's `int` is 64-bit and CUDA's is 32-bit.** That narrowing is the one
-deliberate infidelity, and it holds only by value, where an index is bounded by
-the grid anyway. As a slice element, an array element or a struct field it is
+deliberate infidelity, and it holds by value, where an index is bounded by the
+grid. Where a value can leave those bounds it is refused rather than excused: a
+left shift by a computed amount is the shape that does, and the differential
+fuzzer found it by writing `o << (o & 31)` and reading the two answers, which
+differ by more than the high word — see "Shifts, where the two widths
+disagree". As a slice element, an array element or a struct field it is
 not a lost high word but a different _stride_, and the host copies Go's layout
 regardless — so `[]int` is refused. It used to lower cleanly and return the
 wrong numbers.
@@ -338,6 +342,62 @@ is what the diagnostic contains. `simt/spec_test.go` checks both directions.
 - incrementing a narrow slot — diagnostic: `` `++` is refused anyway ``
 - min on narrow elements — diagnostic: `min has no overload for it`
 - a shift by a narrow count — diagnostic: ``so `<<` on one can give a different answer``
+
+### min and max, where the two disagree about NaN
+
+- the builtin `min`/`max` on `float32` — diagnostic: `write gpu.Fmin(a, b)`
+- the builtin `min`/`max` on `float64` — diagnostic: `write gpu.Fmax64(a, b)`
+
+Go's `min` and `max` propagate a NaN operand; CUDA's `fminf` and `fmaxf` follow
+IEEE minNum and ignore one, returning the number. So `min(0.0/0.0, x)` is a NaN
+in Go and `x` on the device. `gpu.Fmin` and `gpu.Fmax` are the spelling that
+means the device's answer, and the emulator implements them to match. The
+**integer** overloads are untouched: no integer is a NaN.
+
+### Shifts, where the two widths disagree
+
+- a Go `int` shifted left by a computed amount — diagnostic:
+  `is 64 bits in Go and 32 on the device`
+- a shift by a constant the C type cannot take — diagnostic:
+  `undefined on the device`
+
+A _constant_ left shift of an `int` is accepted: its result is as bounded as
+the value is, which is the case the narrowing above was always about. What is
+**not** checked, and is stated here rather than left to be found: `int32` or
+`int64` shifted by a computed amount. Both are the same width in both
+languages, so the only disagreement left is a count that reaches the width at
+run time — Go defines that as zero and C leaves it undefined — and telling
+`x << (k & 31)`, which is how one writes it safely, from `x << k` needs a
+range analysis the lowering does not have.
+
+## 3a. Signed overflow wraps, as Go says it does
+
+**Go defines signed integer overflow as wrapping**; C leaves it _undefined_,
+which is not a wrong number but a licence for the compiler to assume it cannot
+happen. So `+`, `-`, `*`, unary `-` and `<<` on a signed integer are emitted
+through the **unsigned type of the same width** and converted back, which is
+the only spelling of modular arithmetic C defines.
+
+The conversion happens once per _region_, not once per operator, or the source
+would disappear under casts:
+
+```c
+int y = (int)((unsigned int)(a) + (unsigned int)(b) * (unsigned int)(c));
+```
+
+`/`, `%` and `>>` end a region rather than joining it, because they mean
+something different on unsigned operands; `&`, `|` and `^` would be safe either
+way and are left outside too, so that the rule has no exception to remember.
+
+Two things this does **not** do:
+
+- **It does not make Go's `int` equal to C's.** Go wraps at 64 bits and the
+  device at 32, which is the narrowing above. Wrapping makes the C _defined_,
+  not _equal_.
+- **`MinInt / -1` is still undefined on the device.** It is `MinInt` in Go, and
+  routing it through unsigned cannot help — unsigned division is a different
+  operation. Nothing refuses it, because the values are not known until the
+  kernel runs.
 
 ### Types that cannot cross
 

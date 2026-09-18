@@ -206,6 +206,17 @@ type transpiler struct {
 	// name -- the index a `for _, v := range` still needs -- can be chosen
 	// where it cannot collide with one the author wrote.
 	names map[string]bool
+	// renamed holds the locals whose C name had to differ from their Go one,
+	// keyed on the object so that every use follows the declaration. It is
+	// empty for almost every kernel: see shadowRename for the one case that
+	// fills it.
+	renamed map[types.Object]string
+	// wrapSigned and wrapUnsigned are the open unsigned-arithmetic domain, or
+	// "" when there is none. See wrapDomain in expr.go: Go's signed overflow
+	// wraps and C's is undefined, so a region of + - * and << is computed in
+	// the unsigned type of the same width and converted back once at its
+	// boundary rather than once per operator.
+	wrapSigned, wrapUnsigned string
 	// labels holds the labelled loops currently open, keyed by their Go name.
 	labels map[string]*labelState
 	// pendingLabel is the label the next loop will carry. It is claimed by
@@ -331,7 +342,7 @@ func (t *transpiler) line(format string, args ...any) {
 
 // kernel emits the __global__ entry point for fd.
 func (t *transpiler) kernel(fd *ast.FuncDecl) {
-	t.names = collectNames(fd)
+	t.names, t.renamed = collectNames(fd), nil
 	// The permission is the kernel's, and it covers every device function
 	// lowered into the same translation unit. What is being opted into is the
 	// cost of a launch, and the kernel is what gets launched -- the same
@@ -515,7 +526,8 @@ func (t *transpiler) deviceFunc(pos token.Pos, obj *types.Func) (string, bool) {
 	defer delete(t.lowering, obj)
 
 	savedCurrent, savedDevice, savedResult, savedNames := t.current, t.inDevice, t.result, t.names
-	t.current, t.inDevice, t.names = obj, true, collectNames(fd)
+	savedRenamed := t.renamed
+	t.current, t.inDevice, t.names, t.renamed = obj, true, collectNames(fd), nil
 	t.result = nil
 	if sig.Results().Len() == 1 {
 		t.result = sig.Results().At(0).Type()
@@ -537,6 +549,7 @@ func (t *transpiler) deviceFunc(pos token.Pos, obj *types.Func) (string, bool) {
 	t.ind = savedInd
 
 	t.current, t.inDevice, t.result, t.names = savedCurrent, savedDevice, savedResult, savedNames
+	t.renamed = savedRenamed
 
 	if t.deviceNames == nil {
 		t.deviceNames = map[*types.Func]string{}

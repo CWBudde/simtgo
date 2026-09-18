@@ -37,7 +37,7 @@ extern "C" __global__ void BandGain(float* __restrict__ y, int y_len, const floa
 	float taps[4] = {};
 	for (int j = 0; j < 4; j++)
 	{
-		int k = i + j - 2;
+		int k = (int)((unsigned int)(i) + (unsigned int)(j) - 2u);
 		if (k >= 0 && k < x_len)
 		{
 			taps[j] = x[k];

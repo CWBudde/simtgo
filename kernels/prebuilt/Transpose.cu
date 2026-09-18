@@ -8,13 +8,13 @@ extern "C" __global__ void Transpose(float* __restrict__ out, int out_len, const
 	int y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
 	if (x < (int)(w) && y < (int)(h))
 	{
-		tile[ty * 16 + tx] = in[y * (int)(w) + x];
+		tile[(int)((unsigned int)(ty) * 16u + (unsigned int)(tx))] = in[(int)((unsigned int)(y) * (unsigned int)((int)(w)) + (unsigned int)(x))];
 	}
 	__syncthreads();
-	int ox = (int)blockIdx.y * 16 + tx;
-	int oy = (int)blockIdx.x * 16 + ty;
+	int ox = (int)((unsigned int)((int)blockIdx.y) * 16u + (unsigned int)(tx));
+	int oy = (int)((unsigned int)((int)blockIdx.x) * 16u + (unsigned int)(ty));
 	if (ox < (int)(h) && oy < (int)(w))
 	{
-		out[oy * (int)(h) + ox] = tile[tx * 16 + ty];
+		out[(int)((unsigned int)(oy) * (unsigned int)((int)(h)) + (unsigned int)(ox))] = tile[(int)((unsigned int)(tx) * 16u + (unsigned int)(ty))];
 	}
 }

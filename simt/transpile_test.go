@@ -58,6 +58,10 @@ func transpile(t *testing.T, body string) *simt.Unit {
 // wrong is silent -- the generated code compiles and computes something else
 // -- so both disagreements are pinned here, together with the cases that must
 // stay free of parentheses.
+// The unsigned casts throughout are the wrapping domain -- see wrapDomain in
+// internal/lower/expr.go -- and they change none of the precedence these cases
+// are about: the grouping in each want is still exactly what C needs to parse
+// the Go the way Go parses it.
 func TestCPrecedence(t *testing.T) {
 	const decl = "func K(ctx gpu.Ctx, y []float32, a, b, c int32) "
 	cases := []struct{ name, body, want string }{{
@@ -65,17 +69,22 @@ func TestCPrecedence(t *testing.T) {
 		body: decl + "{ if a&b == c { y[0] = 1 } }",
 		want: "if ((a & b) == c)",
 	}, {
+		// The shift is emitted through its unsigned counterpart, because a
+		// signed left shift that overflows is undefined in C and wraps in Go;
+		// see signedShiftLeft. The precedence point this case exists for is
+		// unchanged and if anything plainer: the sum is what the conversion
+		// wraps, so the shift happened first.
 		name: "shift binds looser than addition in C",
 		body: decl + "{ y[0] = float32(a<<b + c) }",
-		want: "(float)((a << b) + c)",
+		want: "(float)((int)(((unsigned int)(a) << b) + (unsigned int)(c)))",
 	}, {
 		name: "a left-associative chain needs no grouping",
 		body: decl + "{ y[0] = float32(a - b - c) }",
-		want: "(float)(a - b - c)",
+		want: "(float)((int)((unsigned int)(a) - (unsigned int)(b) - (unsigned int)(c)))",
 	}, {
 		name: "the right operand of an equal level does",
 		body: decl + "{ y[0] = float32(a - (b - c)) }",
-		want: "(float)(a - (b - c))",
+		want: "(float)((int)((unsigned int)(a) - ((unsigned int)(b) - (unsigned int)(c))))",
 	}, {
 		name: "a condition is not wrapped twice",
 		body: "func K(ctx gpu.Ctx, y []float32) { i := ctx.GlobalID(); if i < len(y) { y[i] = 1 } }",
@@ -83,7 +92,7 @@ func TestCPrecedence(t *testing.T) {
 	}, {
 		name: "and-not lowers to a masked complement",
 		body: decl + "{ y[0] = float32(a&^b + c) }",
-		want: "(float)((a & ~b) + c)",
+		want: "(float)((int)((unsigned int)(a & ~b) + (unsigned int)(c)))",
 	}}
 
 	for _, tc := range cases {
@@ -91,6 +100,290 @@ func TestCPrecedence(t *testing.T) {
 			got := transpile(t, tc.body).Source
 			if !strings.Contains(got, tc.want) {
 				t.Errorf("generated CUDA does not contain %q:\n%s", tc.want, got)
+			}
+		})
+	}
+}
+
+// TestUnaryOperatorsDoNotFuse is a lexing rule rather than a precedence one,
+// and it is here because the fuzzer found it: a generated kernel wrote the
+// equivalent of -(-c) and the emitter produced "--c".
+//
+// C++ lexes by maximal munch, so "--c" is the predecrement operator. On the
+// operand the fuzzer happened to produce -- a cast, which is a prvalue --
+// NVRTC refused it with "expression must be a modifiable lvalue", and that is
+// the harmless half of the bug. On a plain variable it compiles, decrements
+// the variable and yields the decremented value, where the Go negated twice
+// and changed nothing: a wrong answer and a side effect the source never had,
+// with nothing to report it.
+//
+// The last two cases are the negative control. "~~" and "!!" are not tokens in
+// C++, so a space there would be noise, and a rule that inserted one anyway
+// would be pinned here as correct.
+func TestUnaryOperatorsDoNotFuse(t *testing.T) {
+	const decl = "func K(ctx gpu.Ctx, y []int32, c int32) "
+	cases := []struct{ name, body, want string }{{
+		name: "a negation of a negation",
+		body: decl + "{ y[0] = -(-c) }",
+		want: "y[0] = (int)(- -(unsigned int)(c));",
+	}, {
+		name: "the same thing written with a space, which Go already allows",
+		body: decl + "{ y[0] = - -c }",
+		want: "y[0] = (int)(- -(unsigned int)(c));",
+	}, {
+		name: "three of them",
+		body: decl + "{ y[0] = -(-(-c)) }",
+		want: "y[0] = (int)(- - -(unsigned int)(c));",
+	}, {
+		// Unwrapped, unlike the negations above: unary plus is the identity,
+		// so it has no overflow to define and wrapDomain leaves it alone.
+		name: "a unary plus of a unary plus",
+		body: decl + "{ y[0] = +(+c) }",
+		want: "y[0] = + +c;",
+	}, {
+		name: "a binary minus before a unary one already had its space",
+		body: decl + "{ y[0] = c - (-c) }",
+		want: "y[0] = (int)((unsigned int)(c) - -(unsigned int)(c));",
+	}, {
+		name: "two complements are not a token",
+		body: decl + "{ y[0] = ^(^c) }",
+		want: "y[0] = ~~c;",
+	}, {
+		name: "two logical nots are not a token either",
+		body: "func K(ctx gpu.Ctx, y []int32, p bool) { if !(!p) { y[0] = 1 } }",
+		want: "if (!!p)",
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := transpile(t, tc.body).Source
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("generated CUDA does not contain %q:\n%s", tc.want, got)
+			}
+		})
+	}
+}
+
+// TestRangeIndexIsPerIteration is the third thing the fuzzer found, and the
+// only one of them that did not terminate.
+//
+// Go's range variable is a fresh variable each iteration, so assigning to it
+// changes this iteration's copy and leaves the loop alone. C's counter *is*
+// the loop. Emitting the index as the counter therefore turns `p--` in the
+// body into a decrement of the loop, which against the counter's `p++` is a
+// loop that never ends -- and it compiles without a word. The generated kernel
+// sat at 100% of a core until something killed it.
+//
+// The fix is what the range *value* has always done, for the same reason and
+// stated in the same words at the site: the counter gets a name of its own and
+// the index is declared from it inside the body. The third case is the one
+// that shows the ordering matters: the value is still read at the counter, not
+// at the index the body has been moving, because in Go it is v[i] for the
+// iteration's own i.
+//
+// The second case is the control, and the reason this is not done
+// unconditionally: a body that does not write to the index means the same
+// thing either way, and every kernel in this repository and every golden file
+// is that case.
+func TestRangeIndexIsPerIteration(t *testing.T) {
+	const prelude = "package kernels\n\nimport \"github.com/CWBudde/gocuda/gpu\"\n\n"
+	cases := []struct {
+		name, body string
+		want, not  []string
+	}{{
+		name: "a body that decrements the index",
+		body: "func K(ctx gpu.Ctx, y []int32) {\n\tfor p := range y {\n\t\ty[p] = int32(p)\n\t\tp--\n\t}\n}",
+		want: []string{"for (int p_i = 0; p_i < y_len; p_i++)", "int p = p_i;"},
+	}, {
+		name: "a body that only reads it is left alone",
+		body: "func K(ctx gpu.Ctx, y []int32) {\n\tfor p := range y {\n\t\ty[p] = int32(p)\n\t}\n}",
+		want: []string{"for (int p = 0; p < y_len; p++)"},
+		not:  []string{"p_i"},
+	}, {
+		name: "the value is read at the counter, not at the moved index",
+		body: "func K(ctx gpu.Ctx, y []int32, v []int32) {\n\tfor p, e := range v {\n\t\tp = 0\n\t\ty[p] = e\n\t}\n}",
+		want: []string{"for (int p_i = 0; p_i < v_len; p_i++)", "int p = p_i;", "int e = v[p_i];"},
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fsys := fstest.MapFS{"k.go": &fstest.MapFile{Data: []byte(prelude + tc.body)}}
+			u, err := simt.Transpile(fsys, "K")
+			if err != nil {
+				t.Fatalf("Transpile: %v", err)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(u.Source, want) {
+					t.Errorf("generated CUDA does not contain %q:\n%s", want, u.Source)
+				}
+			}
+			for _, not := range tc.not {
+				if strings.Contains(u.Source, not) {
+					t.Errorf("generated CUDA contains %q, which this case should not need:\n%s", not, u.Source)
+				}
+			}
+		})
+	}
+}
+
+// TestWrappingArithmetic pins the shape of the unsigned domain, which is the
+// whole of what makes it bearable.
+//
+// Go defines signed overflow as wrapping and C leaves it undefined, so the
+// arithmetic is computed in the unsigned type of the same width. Doing that per
+// *operator* would bury the source: `a + b*c` would become a cast four deep.
+// Doing it per *region* keeps one conversion at each boundary, and these cases
+// are what says it stayed that way.
+//
+// The last three are the boundaries. `/` means something different on unsigned
+// operands, so it ends the region rather than joining it; an unsigned kernel
+// has nothing to define, since its arithmetic already wraps in C; and a float
+// has no wrapping to speak of.
+func TestWrappingArithmetic(t *testing.T) {
+	const prelude = "package kernels\n\nimport \"github.com/CWBudde/gocuda/gpu\"\n\n"
+	cases := []struct{ name, body, want string }{{
+		// One conversion back, three operands converted in -- not one cast
+		// pair per operator, which is the point of the whole design.
+		name: "a mixed expression converts once at its boundary",
+		body: "func K(ctx gpu.Ctx, y []int32, a, b, c int32) { y[0] = a + b*c }",
+		want: "y[0] = (int)((unsigned int)(a) + (unsigned int)(b) * (unsigned int)(c));",
+	}, {
+		name: "a chain stays one region",
+		body: "func K(ctx gpu.Ctx, y []int32, a, b, c int32) { y[0] = a + b + c }",
+		want: "y[0] = (int)((unsigned int)(a) + (unsigned int)(b) + (unsigned int)(c));",
+	}, {
+		name: "negation, which overflows on the most negative value",
+		body: "func K(ctx gpu.Ctx, y []int32, a int32) { y[0] = -a }",
+		want: "y[0] = (int)(-(unsigned int)(a));",
+	}, {
+		name: "int64 uses the 64-bit unsigned type",
+		body: "func K(ctx gpu.Ctx, y []int64, a, b int64) { y[0] = a*b + 7 }",
+		want: "y[0] = (long long)((unsigned long long)(a) * (unsigned long long)(b) + 7ull);",
+	}, {
+		// The shifted value belongs to the region and the count does not: a
+		// count is not a term of the arithmetic, and converting it would read
+		// as though its width mattered.
+		name: "a shift keeps its count outside",
+		body: "func K(ctx gpu.Ctx, y []int32, a, b int32) { y[0] = a<<2 + b }",
+		want: "y[0] = (int)(((unsigned int)(a) << 2) + (unsigned int)(b));",
+	}, {
+		name: "division ends the region",
+		body: "func K(ctx gpu.Ctx, y []int32, a, b int32) { y[0] = a + b/2 }",
+		want: "y[0] = (int)((unsigned int)(a) + (unsigned int)(b / 2));",
+	}, {
+		name: "an unsigned kernel is left alone",
+		body: "func K(ctx gpu.Ctx, y []uint32, a, b uint32) { y[0] = a + b*3 }",
+		want: "y[0] = a + b * 3u;",
+	}, {
+		name: "a float expression is left alone",
+		body: "func K(ctx gpu.Ctx, y []float32, a, b float32) { y[0] = a + b*2.0 }",
+		want: "y[0] = a + b * 2.0f;",
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fsys := fstest.MapFS{"k.go": &fstest.MapFile{Data: []byte(prelude + tc.body)}}
+			u, err := simt.Transpile(fsys, "K")
+			if err != nil {
+				t.Fatalf("Transpile: %v", err)
+			}
+			if !strings.Contains(u.Source, tc.want) {
+				t.Errorf("generated CUDA does not contain %q:\n%s", tc.want, u.Source)
+			}
+		})
+	}
+}
+
+// TestShiftsThatStayAccepted is the other half of the wide-shift rule, and the
+// half that decides whether it is worth having: a check that refuses too much
+// is easy and useless.
+//
+// Every kernel here writes a shift the rule has to leave alone. A constant
+// shift of an int is the case the narrowing was always about -- its result is
+// as bounded as the value is -- and it is what kernels/gray.go writes. A right
+// shift cannot grow a value, so the narrowing's premise holds however the
+// count is computed. And int32 and int64 are the same width in both languages,
+// so a computed count on one of those is outside what this rule claims; that
+// it is also outside what anything checks is stated in SPEC.md rather than
+// left to be discovered here.
+func TestShiftsThatStayAccepted(t *testing.T) {
+	const prelude = "package kernels\n\nimport \"github.com/CWBudde/gocuda/gpu\"\n\n"
+	cases := []struct{ name, body string }{{
+		name: "an int shifted left by a constant",
+		body: "func K(ctx gpu.Ctx, y []int32) { o := ctx.GlobalID(); y[0] = int32(o << 3) }",
+	}, {
+		name: "an int shifted right by a computed amount",
+		body: "func K(ctx gpu.Ctx, y []int32, k int) { o := ctx.GlobalID(); y[0] = int32(o >> (k & 31)) }",
+	}, {
+		name: "an int32 shifted left by a computed amount",
+		body: "func K(ctx gpu.Ctx, y []int32, a, k int32) { y[0] = a << (k & 31) }",
+	}, {
+		name: "an int32 shifted by the widest constant it can take",
+		body: "func K(ctx gpu.Ctx, y []int32, a int32) { y[0] = a << 31 }",
+	}, {
+		name: "an int64 shifted by a constant an int could not take",
+		body: "func K(ctx gpu.Ctx, y []int64, a int64) { y[0] = a << 40 }",
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fsys := fstest.MapFS{"k.go": &fstest.MapFile{Data: []byte(prelude + tc.body)}}
+			if _, err := simt.Transpile(fsys, "K"); err != nil {
+				t.Fatalf("refused a shift the rule has no business refusing: %v", err)
+			}
+		})
+	}
+}
+
+// TestShadowingInitialiserReadsTheOuterVariable is the second thing the fuzzer
+// found, and the worse of the two.
+//
+// Go starts a variable's scope at the end of its declaration, so `a := a + 1`
+// reads the outer a and shadows it from the next statement on. C++ starts a
+// name at its declarator, so "int a = a + 1;" reads the variable being
+// declared, before it has a value. That is accepted, computes from whatever
+// the stack slot held, and NVRTC only sometimes remarks on it -- which is how
+// a rule this basic went unnoticed until a generated kernel wrote one.
+//
+// The last case is the control, and the reason the fix is not simply to rename
+// every shadow: an ordinary one means the same thing in both languages, and a
+// kernel should read as the author wrote it.
+func TestShadowingInitialiserReadsTheOuterVariable(t *testing.T) {
+	const decl = "func K(ctx gpu.Ctx, y []int32, a int32) "
+	cases := []struct {
+		name, body string
+		want       []string
+	}{{
+		name: "a short declaration initialised from what it shadows",
+		body: decl + "{\n\t{\n\t\ta := a + 1\n\t\ty[0] = a\n\t}\n}",
+		want: []string{"int a2 = (int)((unsigned int)(a) + 1u);", "y[0] = a2;"},
+	}, {
+		name: "the same rule for var",
+		body: decl + "{\n\t{\n\t\tvar a int32 = a + 7\n\t\ty[0] = a\n\t}\n}",
+		want: []string{"int a2 = (int)((unsigned int)(a) + 7u);", "y[0] = a2;"},
+	}, {
+		name: "inside a loop body, where the outer name is the parameter",
+		body: decl + "{\n\tfor i := 0; i < 1; i++ {\n\t\ta := a * 2\n\t\ty[0] = a\n\t}\n}",
+		want: []string{"int a2 = (int)((unsigned int)(a) * 2u);", "y[0] = a2;"},
+	}, {
+		// Each shadow reads the one before it, so the names have to keep
+		// counting rather than both landing on a2.
+		name: "shadowed twice, each from the last",
+		body: decl + "{\n\t{\n\t\ta := a + 1\n\t\t{\n\t\t\ta := a * 3\n\t\t\ty[0] = a\n\t\t}\n\t}\n}",
+		want: []string{"int a2 = (int)((unsigned int)(a) + 1u);", "int a3 = (int)((unsigned int)(a2) * 3u);", "y[0] = a3;"},
+	}, {
+		name: "an ordinary shadow is left as the author spelled it",
+		body: decl + "{\n\t{\n\t\ta := int32(1)\n\t\ty[0] = a\n\t}\n}",
+		want: []string{"int a = 1;", "y[0] = a;"},
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := transpile(t, tc.body).Source
+			for _, want := range tc.want {
+				if !strings.Contains(got, want) {
+					t.Errorf("generated CUDA does not contain %q:\n%s", want, got)
+				}
 			}
 		})
 	}
@@ -109,7 +402,7 @@ func TestShadowedLen(t *testing.T) {
 		"\t}\n"+
 		"\ty[0] = float32(len(x))\n"+ // the parameter again, once the shadow is gone
 		"}")
-	for _, want := range []string{"if (i < x_len)", "int x = i + 1;", "y[0] = (float)(x_len);"} {
+	for _, want := range []string{"if (i < x_len)", "int x = (int)((unsigned int)(i) + 1u);", "y[0] = (float)(x_len);"} {
 		if !strings.Contains(u.Source, want) {
 			t.Errorf("generated CUDA does not contain %q:\n%s", want, u.Source)
 		}
@@ -345,11 +638,11 @@ func TestSwitch(t *testing.T) {
 		// the comparisons stand as they are.
 		name: "a case with several values tests each of them",
 		body: decl + "{ switch a { case b, b + 1: y[0] = 1 } }",
-		want: []string{"if (switch_tag == b || switch_tag == b + 1)"},
+		want: []string{"if (switch_tag == b || switch_tag == (int)((unsigned int)(b) + 1u))"},
 	}, {
 		name: "an initialiser gets its own scope",
 		body: decl + "{ switch c := a + b; c { case 1: y[0] = 1 } }",
-		want: []string{"int c = a + b;", "switch (c)"},
+		want: []string{"int c = (int)((unsigned int)(a) + (unsigned int)(b));", "switch (c)"},
 	}}
 
 	for _, tc := range cases {
@@ -626,7 +919,7 @@ func TestParallelAssignment(t *testing.T) {
 		body: "func K(ctx gpu.Ctx, y []float32, n int32) {\n" +
 			"\ti := 0\n\tj := int(n) - 1\n" +
 			"\tfor i < j {\n\t\ty[i], y[j] = y[j], y[i]\n\t\ti, j = i+1, j-1\n\t}\n}",
-		want: []string{"int i_tmp = i + 1;", "int j_tmp = j - 1;", "i = i_tmp;", "j = j_tmp;"},
+		want: []string{"int i_tmp = (int)((unsigned int)(i) + 1u);", "int j_tmp = (int)((unsigned int)(j) - 1u);", "i = i_tmp;", "j = j_tmp;"},
 	}}
 
 	for _, tc := range cases {
@@ -1079,7 +1372,7 @@ func TestAtomics(t *testing.T) {
 	}, {
 		name: "the index may be an expression",
 		body: decl + "{ i := ctx.GlobalID(); gpu.AtomicAddI32(h, i+1, 1) }",
-		want: "atomicAdd(&h[i + 1], 1);",
+		want: "atomicAdd(&h[(int)((unsigned int)(i) + 1u)], 1);",
 	}, {
 		// A shared tile is a __shared__ array rather than a pointer parameter,
 		// so its address is generic; the hardware resolves that back to a
@@ -1189,7 +1482,7 @@ func TestNarrowStorage(t *testing.T) {
 		// with the arithmetic in between happening at int32.
 		name: "int32 out, uint8 back in",
 		body: "func K(ctx gpu.Ctx, out, x []uint8) { out[0] = uint8(int32(x[0]) * 2) }",
-		want: "out[0] = (unsigned char)((int)(x[0]) * 2);",
+		want: "out[0] = (unsigned char)((int)((unsigned int)((int)(x[0])) * 2u));",
 	}, {
 		// The things that are not arithmetic and have to keep working, or the
 		// feature is storage nobody can reach.
@@ -1336,7 +1629,7 @@ func TestWarpPrimitives(t *testing.T) {
 	}, {
 		name: "down, with an expression for the delta",
 		body: decl + "{ i := ctx.GlobalID(); y[0] = ctx.ShuffleDownF32(y[1], i+1) }",
-		want: "y[0] = __shfl_down_sync(0xffffffff, y[1], i + 1);",
+		want: "y[0] = __shfl_down_sync(0xffffffff, y[1], (int)((unsigned int)(i) + 1u));",
 	}, {
 		name: "ballot returns the mask itself",
 		body: decl + "{ h[0] = int32(ctx.Ballot(y[0] > 0)) }",
