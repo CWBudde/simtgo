@@ -538,6 +538,7 @@ cmd/gocuda/    vet and generate; calls NVRTC in process, no driver needed
 kernels/       the example kernels, embedded as source
 kernels/prebuilt/  generated: CUDA C, PTX, and the build gate
 internal/jit/  compile, cache and load, shared by both tracks
+internal/tolerance/ what "close enough" means, shared by every parity test
 examples/      vecadd, fir, magnitude, tilefir
 ```
 

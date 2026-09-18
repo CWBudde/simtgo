@@ -672,8 +672,40 @@ A transpiler is trusted through evidence, not review.
       backbone of the whole approach and should run continuously.
 - [ ] **`compute-sanitizer`** (`memcheck`, `racecheck`, `initcheck`,
       `synccheck`) over every kernel in CI.
-- [ ] **Barrier-divergence analysis.** A `__syncthreads()` that only some
-      threads of a block reach is undefined behaviour. Reject it statically.
+- [x] **Barrier-divergence analysis.** (2026-09-18) — `internal/lower/diverge.go`,
+      three rules: a barrier under a thread-varying condition, a barrier inside
+      a loop whose trip count is thread-varying, and a barrier preceded by a
+      return under a thread-varying condition. The middle one is the one a
+      lexical rule misses and the one that matters here, because it is the
+      shape every staging loop in the repo has. It follows `readonly.go` —
+      memoised per declaration, a separate cycle guard, pessimistic about
+      anything it cannot read — and is interprocedural, since a barrier inside
+      a helper is a barrier at the call site.
+
+      Two facts made it tractable and both were checked rather than assumed:
+      Go's own `goto` is refused, so every `goto` in the output is the
+      emitter's and a structured analysis over the Go AST is sound; and a
+      barrier can only be an `*ast.ExprStmt`, since it returns nothing and
+      `simple()` would not take it in a `for` clause.
+
+      **It found two live bugs, and one of them was a fix from earlier the same
+      day.** `TypedProbe`'s early return before a barrier had been turned into
+      a guard, which moved the problem rather than removing it: the guarded
+      branch called a helper that barriers inside, so the same thread missed
+      the same rendezvous one level down. And `WarpSum` in the analyzer
+      fixtures wrote `ctx.LaneID() == 0 && ctx.Any(v != 0)`, where Go's `&&`
+      short-circuits and so does the C — `__any_sync` ran on lane 0 alone while
+      the emitter passed a full-warp mask, the participation promise broken by
+      the spelling itself.
+
+      That second one is also the honest limit: the rules work over statements
+      and do not see into a condition. Extending them there would refuse
+      `ctx.Any(p) && ctx.All(q)`, which is legitimate, because `Any` and `All`
+      are warp-uniform and the pass holds the warp primitives to the stricter
+      block lattice. Closing it properly needs a warp level in the lattice.
+      Both limits are written down at the site rather than left to be
+      rediscovered.
+
 - [ ] **Aliasing.** Detect, or explicitly document, two slice parameters bound
       to the same device buffer. Largely done for the SIMT track by the
       `const`/`__restrict__` work in Phase 2: `Kernel.Launch` compares device
@@ -684,10 +716,51 @@ A transpiler is trusted through evidence, not review.
       which never sees the caller's slices.
 - [ ] **Debug mode.** Emit bounds checks, device `printf` and a trap, behind a
       flag — the closest thing to a panic the device can offer.
-- [ ] **Numerical policy.** Write down `float32` semantics, FMA contraction and
-      denormal handling, and set the tolerance policy tests use.
-- [ ] **A written spec of the supported subset** — grammar and semantics, not
-      prose in a README. This is the contract.
+- [x] **Numerical policy.** (2026-09-18) — `NUMERICS.md`, organised so that
+      every claim is labelled **measured**, **cited** or **unverified**, which
+      is the only honest way to write one where there is no device.
+
+      The measurements went further than reading the artifacts. `cuda.Compile`
+      passes exactly one NVRTC option, `--gpu-architecture`, so every numerical
+      setting is a default nobody chose; recompiling `FIR.cu`, `Quantize.cu`
+      and `Magnitude.cu` with only that option reproduces the committed PTX
+      **byte for byte**, and flipping each flag in turn shows what it would
+      change (`--fmad=false` removes the `fma`, `--ftz=true` adds `.ftz`,
+      `--prec-div=false` gives `div.full.f32`, `--prec-sqrt=false` gives
+      `sqrt.approx.f32`). So the defaults are established rather than assumed.
+
+      Three findings the plan did not anticipate. `--ftz=false` is not the
+      whole story: a kernel calling `expf` emits an `ex2.approx.ftz.f32` inside
+      `expf`'s own implementation, which the flag does not reach. `Magnitude`'s
+      `fma` survives `--fmad=false`, so it is inside `hypotf` and is not
+      evidence of source contraction — FIR and Quantize are. And Go's builtin
+      `min`/`max` disagree with CUDA's on NaN exactly as `math.Min` did, which
+      nothing tests and no committed kernel reaches.
+
+      The tolerance rule is now one rule in `internal/tolerance`, where there
+      were three conventions in three packages, and the exactness rule — when a
+      test may demand equality rather than closeness — is promoted from
+      scattered comments to something stated. Five of the nine float32 helpers
+      gained parity tests, and six of them went through NVRTC for the first
+      time.
+
+- [x] **A written spec of the supported subset** — grammar and semantics, not
+      prose in a README. This is the contract. (2026-09-18) — `SPEC.md`, and
+      the half that makes it a contract is `simt/spec_test.go`, which fails in
+      both directions: a refusal the transpiler enforces and the document
+      omits, or a rule the document claims and no test pins. Both were watched
+      failing before the commit, because a cross-check nobody has seen fail is
+      not a cross-check. It keys on the diagnostic's own wording rather than on
+      rule numbers invented for the purpose, so the document quotes what a
+      reader will actually see in their terminal.
+
+      Writing it was worth it for what the inventory turned up quite apart from
+      the document: the README's generated-CUDA sample still showed unqualified
+      pointers, its `GlobalID()` lowering was missing the cast that makes the
+      axis accessors return `int`, its type table marked the narrow integers
+      position-dependent and said nothing of the kind about `int`, and the
+      refusal list named seven rules out of seventy-two while reading as
+      closed.
 
 ## Phase 4 — Host runtime for real workloads (M)
 

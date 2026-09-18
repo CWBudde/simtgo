@@ -9,7 +9,10 @@ Rust_ post with two Go analogues: a **SIMT track** (`simt`) that lowers a Go
 subset to CUDA C at the source level, and a **tile track** (`tile`) that
 records a graph of ops and fuses it into one generated kernel. `README.md` is
 the full design rationale; `PLAN.md` is the roadmap from PoC to 1.0 and tracks
-which phases are done.
+which phases are done. `SPEC.md` is the contract — what the subset accepts and
+refuses, checked against `simt/errors_test.go` by `simt/spec_test.go` — and
+`NUMERICS.md` says what the device does to a `float32` and what a test may
+therefore assert.
 
 ## Commands
 
@@ -138,7 +141,21 @@ reference, so a shared misunderstanding cannot pass as agreement.
 
 - **Refuse, never mistranslate.** Anything outside the subset gets a
   `Diagnostic` with a position. `simt/errors_test.go` pins that boundary —
-  extend it when the subset moves.
+  extend it when the subset moves, and `SPEC.md` with it, or `simt/spec_test.go`
+  fails. It checks both ways: a refusal the code enforces and the contract
+  omits, and a rule the contract claims that nothing pins.
+- **A barrier is on the block's common path.** `ctx.SyncThreads()` and the
+  `_sync` warp built-ins are refused under a thread-varying condition, inside a
+  loop whose trip count varies between threads, or after a thread-varying
+  `return` (`internal/lower/diverge.go`, interprocedural, following
+  `readonly.go`'s shape). Block-uniform — and so fine to branch on — are
+  `BlockIdx*`, `BlockDim*`, `GridDim*`, scalar parameters, `len()` and the
+  constants. The rules do not see inside a condition, so a short-circuited
+  `&&` can still break the warp participation promise; that is stated at the
+  site.
+- **One comparison rule.** `internal/tolerance` is the single definition of
+  what "close enough" means, and `NUMERICS.md` says when a test may demand
+  exact equality instead.
 - **Go `int` narrows to C `int`** (32-bit). This is the one deliberate
   infidelity; indices are bounded by the grid.
 - `ctx.AssumeBlockDim(n)` emits no code; it records a launch requirement that
