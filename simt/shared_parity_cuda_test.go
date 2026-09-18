@@ -227,11 +227,19 @@ func TestLaunchRefusesTheWrongSharedSpelling(t *testing.T) {
 
 // typedProbe stages through a tile per element type and through a device
 // function that has one of its own, which is the construct A3 made legal.
+//
+// The ragged tail is guarded rather than returned from, and that is not a
+// style preference. An early return before a barrier is a thread that never
+// arrives at it, which is undefined on the device and, until the block barrier
+// learned to be left, an unkillable hang under RunCPU. This probe had exactly
+// that shape and survived only because the test below launches a geometry in
+// which the guard is never true. Guarding instead keeps every thread on the
+// same path through the barrier, which is what the kernels in kernels/ do too.
 const typedProbe = `package kernels
 
 import "github.com/CWBudde/gocuda/gpu"
 
-//gocuda:ignore
+//gocuda:device
 func staged(ctx gpu.Ctx, v int64) int64 {
 	scratch := ctx.SharedI64(64)
 	scratch[ctx.ThreadIdx()%64] = v * 2
@@ -244,13 +252,14 @@ func TypedProbe(ctx gpu.Ctx, out []int64, x []int32) {
 	narrow := ctx.SharedU32(64)
 	t := ctx.ThreadIdx() % 64
 	i := ctx.GlobalID()
-	if i >= len(out) {
-		return
+	if i < len(out) {
+		wide[t] = int64(x[i])
+		narrow[t] = uint32(x[i])
 	}
-	wide[t] = int64(x[i])
-	narrow[t] = uint32(x[i])
 	ctx.SyncThreads()
-	out[i] = staged(ctx, wide[t]) + int64(narrow[t])
+	if i < len(out) {
+		out[i] = staged(ctx, wide[t]) + int64(narrow[t])
+	}
 }
 `
 
