@@ -27,12 +27,12 @@ func TestGPUPackageMatchesReal(t *testing.T) {
 	if len(pkgs) != 1 || pkgs[0].Types == nil {
 		t.Fatalf("loading %s returned %d usable packages", GPUPkgPath, len(pkgs))
 	}
-	real, synth := pkgs[0].Types, GPUPackage()
+	realPkg, synth := pkgs[0].Types, GPUPackage()
 
 	t.Run("PackageScope", func(t *testing.T) {
-		compareNames(t, "package scope", deviceNames(real.Scope()), deviceNames(synth.Scope()))
-		for _, name := range deviceNames(real.Scope()) {
-			r, s := real.Scope().Lookup(name), synth.Scope().Lookup(name)
+		compareNames(t, "package scope", deviceNames(realPkg.Scope()), deviceNames(synth.Scope()))
+		for _, name := range deviceNames(realPkg.Scope()) {
+			r, s := realPkg.Scope().Lookup(name), synth.Scope().Lookup(name)
 			if r == nil || s == nil {
 				continue
 			}
@@ -53,7 +53,7 @@ func TestGPUPackageMatchesReal(t *testing.T) {
 	})
 
 	t.Run("CtxMethods", func(t *testing.T) {
-		realCtx, synthCtx := namedCtx(t, real), namedCtx(t, synth)
+		realCtx, synthCtx := namedCtx(t, realPkg), namedCtx(t, synth)
 		// Only the method set is compared. The synthetic Ctx is an empty
 		// struct where the real one carries six unexported fields, which is
 		// deliberate: they hold the CPU emulator's state and are invisible to
@@ -80,8 +80,8 @@ func TestGPUPackageMatchesReal(t *testing.T) {
 	// run-time path, "no device equivalent" from the analyzer -- and neither
 	// says that the emitter is what needs updating.
 	t.Run("EmitterKnowsEverySymbol", func(t *testing.T) {
-		for _, name := range deviceNames(real.Scope()) {
-			obj := real.Scope().Lookup(name)
+		for _, name := range deviceNames(realPkg.Scope()) {
+			obj := realPkg.Scope().Lookup(name)
 			if _, isFunc := obj.(*types.Func); !isFunc {
 				continue
 			}
@@ -98,7 +98,7 @@ func TestGPUPackageMatchesReal(t *testing.T) {
 				t.Errorf("gpu.%s has no entry in gpuFuncs, gpuFuncs64 or gpuAtomics; the emitter cannot lower it", name)
 			}
 		}
-		for name := range methodSigs(namedCtx(t, real)) {
+		for name := range methodSigs(namedCtx(t, realPkg)) {
 			// The shared tiles and AssumeBlockDim are lowered by dedicated
 			// code rather than by a table entry -- the tiles because a tile is
 			// a declaration and not an expression, and AssumeBlockDim because
@@ -196,22 +196,22 @@ func keys(m map[string]*types.Signature) []string {
 	return out
 }
 
-func compareNames(t *testing.T, what string, real, synth []string) {
+func compareNames(t *testing.T, what string, realNames, synthNames []string) {
 	t.Helper()
 	inSynth := map[string]bool{}
-	for _, n := range synth {
+	for _, n := range synthNames {
 		inSynth[n] = true
 	}
 	inReal := map[string]bool{}
-	for _, n := range real {
+	for _, n := range realNames {
 		inReal[n] = true
 	}
-	for _, n := range real {
+	for _, n := range realNames {
 		if !inSynth[n] {
 			t.Errorf("%s: %s exists in package gpu but not in the synthetic model", what, n)
 		}
 	}
-	for _, n := range synth {
+	for _, n := range synthNames {
 		if !inReal[n] {
 			t.Errorf("%s: %s exists in the synthetic model but not in package gpu", what, n)
 		}

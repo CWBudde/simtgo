@@ -38,6 +38,11 @@ linters:
     # number is not an incidental cost there; and fmt.Errorf with no verb is
     # errors.New wearing a disguise, which is worth catching for its own sake.
     - perfsprint
+    # A local named `any`, `min` or `real` compiles and reads at its use site
+    # exactly as the builtin would. In a repository whose subject is which type
+    # a value has, a variable that looks like `any` is worse than merely
+    # confusing.
+    - predeclared
 
   settings:
     errcheck:

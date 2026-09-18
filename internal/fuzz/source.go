@@ -334,10 +334,10 @@ func sharedSuffix(k Kind) string {
 func expand(e Expr) string { return exprText(e, token.LowestPrec) }
 
 // exprText renders e, parenthesising it when the context binds tighter than
-// its own operator. min is the precedence at or below which a binary node has
-// to be wrapped; a unary operand passes unaryPrec, which is above every binary
-// level, so any binary child of a unary operator is wrapped.
-func exprText(e Expr, min int) string {
+// its own operator. minPrec is the precedence at or below which a binary node
+// has to be wrapped; a unary operand passes unaryPrec, which is above every
+// binary level, so any binary child of a unary operator is wrapped.
+func exprText(e Expr, minPrec int) string {
 	switch e := e.(type) {
 	case *Lit:
 		return litText(e)
@@ -354,7 +354,7 @@ func exprText(e Expr, min int) string {
 		// Go's binary operators are all left-associative, so an equal-level
 		// node is transparent on the left and has to be wrapped on the right.
 		s := exprText(e.X, prec) + " " + e.Op.String() + " " + exprText(e.Y, prec+1)
-		if prec < min {
+		if prec < minPrec {
 			return "(" + s + ")"
 		}
 		return s

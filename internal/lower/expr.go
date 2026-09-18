@@ -46,9 +46,9 @@ type cexpr struct {
 }
 
 // at renders c in a context that requires an operand binding at least as
-// tightly as min.
-func (c cexpr) at(min int) string {
-	if c.prec < min {
+// tightly as minPrec.
+func (c cexpr) at(minPrec int) string {
+	if c.prec < minPrec {
 		return "(" + c.s + ")"
 	}
 	return c.s

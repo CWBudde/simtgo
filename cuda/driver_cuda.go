@@ -500,11 +500,11 @@ func NVRTCVersion() (major, minor int, err error) {
 	if err := loadNVRTC(); err != nil {
 		return 0, 0, err
 	}
-	var maj, min int32
-	if r := nvrtcVersion(&maj, &min); r != nvrtcSuccess {
+	var cMajor, cMinor int32
+	if r := nvrtcVersion(&cMajor, &cMinor); r != nvrtcSuccess {
 		return 0, 0, nvrtcError(r, "nvrtcVersion")
 	}
-	return int(maj), int(min), nil
+	return int(cMajor), int(cMinor), nil
 }
 
 // The two success codes, named here so the call sites read as they did when

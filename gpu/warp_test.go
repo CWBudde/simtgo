@@ -121,24 +121,24 @@ func TestButterflyReductionSumsTheWarp(t *testing.T) {
 func TestVotes(t *testing.T) {
 	const block = 32
 	ballot := make([]uint32, block)
-	any := make([]bool, block)
-	all := make([]bool, block)
+	anyVote := make([]bool, block)
+	allVote := make([]bool, block)
 	active := make([]uint32, block)
 	gpu.RunCPU(1, block, func(ctx gpu.Ctx) {
 		lane := ctx.LaneID()
 		ballot[lane] = ctx.Ballot(lane%2 == 0)
-		any[lane] = ctx.Any(lane == 7)
-		all[lane] = ctx.All(lane < gpu.WarpSize)
+		anyVote[lane] = ctx.Any(lane == 7)
+		allVote[lane] = ctx.All(lane < gpu.WarpSize)
 		active[lane] = ctx.ActiveMask()
 	})
 	for lane := range block {
 		if ballot[lane] != 0x55555555 {
 			t.Fatalf("lane %d: ballot %#x, want %#x", lane, ballot[lane], uint32(0x55555555))
 		}
-		if !any[lane] {
+		if !anyVote[lane] {
 			t.Fatalf("lane %d: Any over a predicate one lane passes was false", lane)
 		}
-		if !all[lane] {
+		if !allVote[lane] {
 			t.Fatalf("lane %d: All over a predicate every lane passes was false", lane)
 		}
 		if active[lane] != 0xffffffff {
@@ -149,10 +149,10 @@ func TestVotes(t *testing.T) {
 	// All is a vote, not a broadcast: one dissenting lane turns it false
 	// everywhere.
 	gpu.RunCPU(1, block, func(ctx gpu.Ctx) {
-		all[ctx.LaneID()] = ctx.All(ctx.LaneID() != 13)
+		allVote[ctx.LaneID()] = ctx.All(ctx.LaneID() != 13)
 	})
 	for lane := range block {
-		if all[lane] {
+		if allVote[lane] {
 			t.Fatalf("lane %d: All was true although lane 13 voted against", lane)
 		}
 	}
