@@ -938,7 +938,7 @@ func (t *transpiler) takeLabel() *labelState {
 // the scope of an initialised variable without running its initialiser, and
 // `if c { continue outer }; v := float32(1)` is exactly that shape: valid Go
 // that NVRTC would reject with an error about generated code.
-func (t *transpiler) loopBody(b *ast.BlockStmt, head string, lbl *labelState) {
+func (t *transpiler) loopBody(b *ast.BlockStmt, head []string, lbl *labelState) {
 	t.breakables = append(t.breakables, breakLoop)
 	defer func() { t.breakables = t.breakables[:len(t.breakables)-1] }()
 
@@ -949,8 +949,8 @@ func (t *transpiler) loopBody(b *ast.BlockStmt, head string, lbl *labelState) {
 		t.line("{")
 		t.ind++
 	}
-	if head != "" {
-		t.line("%s", head)
+	for _, h := range head {
+		t.line("%s", h)
 	}
 	for _, s := range b.List {
 		t.mark = len(t.diags)
@@ -979,7 +979,7 @@ func (t *transpiler) forStmt(s *ast.ForStmt) {
 		}
 		t.line("for (%s; %s; %s)", t.simple(s.Init), cond, t.simple(s.Post))
 	}
-	t.loopBody(s.Body, "", lbl)
+	t.loopBody(s.Body, nil, lbl)
 }
 
 // rangeStmt lowers `for i := range x` and `for i, v := range x`, where x is a
@@ -1055,9 +1055,28 @@ func (t *transpiler) rangeStmt(s *ast.RangeStmt) {
 		defer t.release(name)
 	}
 
+	// Go's range variable is per-iteration, and C's loop counter is the loop.
+	// A body that assigns to the index therefore means two different things:
+	// in Go it changes this iteration's copy and the loop is unaffected, and
+	// in C it steers the iteration. The fuzzer found the sharpest version of
+	// that -- a `p--` against the counter's `p++`, which is a loop that never
+	// ends -- and it compiles without a word.
+	//
+	// So when the body writes to the index, the counter becomes a name of its
+	// own and the index is declared from it inside the body, which is exactly
+	// what the value below has always done and for the same reason. When the
+	// body does not, nothing changes, which is every kernel in this repository
+	// and every golden file.
+	var head []string
+	if t.assignsToIdent(s.Body, t.info.Defs[key]) {
+		idx := t.reserve(name + "_i")
+		defer t.release(idx)
+		head = append(head, fmt.Sprintf("%s %s = %s;", counter, name, idx))
+		name = idx
+	}
+
 	// The value is a copy in Go, so it is a local here too: writing to it must
 	// not reach the slice.
-	head := ""
 	if value != nil {
 		obj := t.info.Defs[value]
 		if obj == nil {
@@ -1065,7 +1084,7 @@ func (t *transpiler) rangeStmt(s *ast.RangeStmt) {
 			return
 		}
 		elem := t.cdecl(obj.Type(), cname(value.Name), value.Pos())
-		head = fmt.Sprintf("%s = %s[%s];", elem, t.expr(s.X).at(precPostfix), name)
+		head = append(head, fmt.Sprintf("%s = %s[%s];", elem, t.expr(s.X).at(precPostfix), name))
 	}
 
 	// The limit becomes the right operand of a comparison, so anything binding
@@ -1073,6 +1092,42 @@ func (t *transpiler) rangeStmt(s *ast.RangeStmt) {
 	// compare first and mask afterwards.
 	t.line("for (%s %s = 0; %s < %s; %s++)", counter, name, name, limit.at(precRel+1), name)
 	t.loopBody(s.Body, head, lbl)
+}
+
+// assignsToIdent reports whether the statement assigns to obj: a plain or
+// compound assignment with it on the left, or a ++ or -- of it.
+//
+// A declaration that shadows the name is not an assignment to it, and this
+// does not have to exclude one, because go/types resolved every identifier to
+// an object before any of this ran: a shadowing declaration is a different
+// object, so it simply does not match.
+func (t *transpiler) assignsToIdent(n ast.Node, obj types.Object) bool {
+	if obj == nil {
+		return false
+	}
+	found := false
+	ast.Inspect(n, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		var targets []ast.Expr
+		switch st := n.(type) {
+		case *ast.AssignStmt:
+			targets = st.Lhs
+		case *ast.IncDecStmt:
+			targets = []ast.Expr{st.X}
+		default:
+			return true
+		}
+		for _, lhs := range targets {
+			if id, ok := unparen(lhs).(*ast.Ident); ok && t.info.Uses[id] == obj {
+				found = true
+				return false
+			}
+		}
+		return true
+	})
+	return found
 }
 
 // rangeValue resolves the second range variable, reporting the blank one and

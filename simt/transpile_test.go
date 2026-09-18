@@ -153,6 +153,68 @@ func TestUnaryOperatorsDoNotFuse(t *testing.T) {
 	}
 }
 
+// TestRangeIndexIsPerIteration is the third thing the fuzzer found, and the
+// only one of them that did not terminate.
+//
+// Go's range variable is a fresh variable each iteration, so assigning to it
+// changes this iteration's copy and leaves the loop alone. C's counter *is*
+// the loop. Emitting the index as the counter therefore turns `p--` in the
+// body into a decrement of the loop, which against the counter's `p++` is a
+// loop that never ends -- and it compiles without a word. The generated kernel
+// sat at 100% of a core until something killed it.
+//
+// The fix is what the range *value* has always done, for the same reason and
+// stated in the same words at the site: the counter gets a name of its own and
+// the index is declared from it inside the body. The third case is the one
+// that shows the ordering matters: the value is still read at the counter, not
+// at the index the body has been moving, because in Go it is v[i] for the
+// iteration's own i.
+//
+// The second case is the control, and the reason this is not done
+// unconditionally: a body that does not write to the index means the same
+// thing either way, and every kernel in this repository and every golden file
+// is that case.
+func TestRangeIndexIsPerIteration(t *testing.T) {
+	const prelude = "package kernels\n\nimport \"github.com/CWBudde/gocuda/gpu\"\n\n"
+	cases := []struct {
+		name, body string
+		want, not  []string
+	}{{
+		name: "a body that decrements the index",
+		body: "func K(ctx gpu.Ctx, y []int32) {\n\tfor p := range y {\n\t\ty[p] = int32(p)\n\t\tp--\n\t}\n}",
+		want: []string{"for (int p_i = 0; p_i < y_len; p_i++)", "int p = p_i;"},
+	}, {
+		name: "a body that only reads it is left alone",
+		body: "func K(ctx gpu.Ctx, y []int32) {\n\tfor p := range y {\n\t\ty[p] = int32(p)\n\t}\n}",
+		want: []string{"for (int p = 0; p < y_len; p++)"},
+		not:  []string{"p_i"},
+	}, {
+		name: "the value is read at the counter, not at the moved index",
+		body: "func K(ctx gpu.Ctx, y []int32, v []int32) {\n\tfor p, e := range v {\n\t\tp = 0\n\t\ty[p] = e\n\t}\n}",
+		want: []string{"for (int p_i = 0; p_i < v_len; p_i++)", "int p = p_i;", "int e = v[p_i];"},
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fsys := fstest.MapFS{"k.go": &fstest.MapFile{Data: []byte(prelude + tc.body)}}
+			u, err := simt.Transpile(fsys, "K")
+			if err != nil {
+				t.Fatalf("Transpile: %v", err)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(u.Source, want) {
+					t.Errorf("generated CUDA does not contain %q:\n%s", want, u.Source)
+				}
+			}
+			for _, not := range tc.not {
+				if strings.Contains(u.Source, not) {
+					t.Errorf("generated CUDA contains %q, which this case should not need:\n%s", not, u.Source)
+				}
+			}
+		})
+	}
+}
+
 // TestShiftsThatStayAccepted is the other half of the wide-shift rule, and the
 // half that decides whether it is worth having: a check that refuses too much
 // is easy and useless.
