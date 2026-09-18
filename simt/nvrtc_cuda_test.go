@@ -41,18 +41,29 @@ func TestGeneratedCCompiles(t *testing.T) {
 	const arch = "compute_75"
 	cases := []struct{ name, body string }{{
 		// Whether the built-ins the emitter reaches have double overloads
-		// NVRTC can see with no headers included. min/max are the ones expr.go
-		// maps directly, and a comment claiming CUDA provides them is not a
-		// measurement.
-		name: "float64 arithmetic, min/max on doubles, and 64-bit literals",
+		// NVRTC can see with no headers included. fmin/fmax are what a double
+		// min or max lowers to now -- the builtins are refused on floats,
+		// because Go's propagate a NaN and CUDA's ignore one -- and a comment
+		// claiming CUDA provides the double overloads is not a measurement.
+		name: "float64 arithmetic, fmin/fmax on doubles, and 64-bit literals",
 		body: "//gocuda:float64\n" +
 			"func K(ctx gpu.Ctx, out, a, b []float64) {\n" +
 			"\ti := ctx.GlobalID()\n" +
 			"\tif i < len(out) {\n" +
-			"\t\tlo := min(a[i], b[i])\n" +
-			"\t\thi := max(a[i], b[i])\n" +
+			"\t\tlo := gpu.Fmin64(a[i], b[i])\n" +
+			"\t\thi := gpu.Fmax64(a[i], b[i])\n" +
 			"\t\tvar n int64 = 9007199254740993\n" +
 			"\t\tout[i] = lo*2.5 + hi + float64(n%7)\n" +
+			"\t}\n}",
+	}, {
+		// The integer overloads, which are untouched: no integer is a NaN, so
+		// there is nothing for the two to disagree about, and these are still
+		// what expr.go maps min and max directly onto.
+		name: "min and max on integers",
+		body: "func K(ctx gpu.Ctx, out []int64, a []int32, b int32) {\n" +
+			"\ti := ctx.GlobalID()\n" +
+			"\tif i < len(out) {\n" +
+			"\t\tout[i] = int64(min(a[i], b)) + int64(max(a[i], b))\n" +
 			"\t}\n}",
 	}, {
 		// NVRTC accepted this happily while the counter was an int, which is
