@@ -32,12 +32,35 @@ type Unit struct {
 	Name          string // the Go function's name, also the C entry point
 	RequiredBlock int    // block size the kernel demands, 0 when it declares none
 	SharedBytes   int    // total statically declared __shared__ bytes
+	// DynSharedWidth is the size in bytes of one element of the kernel's
+	// dynamically sized __shared__ tile, and 0 when it declares none. One
+	// field says both things because no element type is zero bytes wide, and
+	// the host needs exactly this much: whether to size the dynamic block at
+	// all, and what to multiply the caller's element count by.
+	DynSharedWidth int
+	// Params describes the kernel's parameters after the gpu.Ctx, in the order
+	// a launch supplies them. It travels with the unit for the same reason
+	// RequiredBlock does: what the source says about a parameter is discovered
+	// here, and a launch is where it has to be honoured.
+	Params []Param
 	// SourceHash identifies Source, and is what an ahead-of-time artifact is
 	// filed under. Hashing the generated CUDA C rather than the Go source
 	// means a change to the emitter invalidates a prebuilt just as a change to
 	// the kernel does, and that comments and formatting in the Go source,
 	// which cannot affect the output, do not.
 	SourceHash string
+}
+
+// A Param is one of a kernel's parameters, as the generated C declares it.
+//
+// ReadOnly is what the launch-time aliasing check reads: every pointer in the
+// generated signature is __restrict__, which promises the parameters do not
+// overlap, and that promise can only be broken by a buffer something writes.
+// It is meaningful only for a slice -- a scalar is a copy.
+type Param struct {
+	Name     string
+	Slice    bool
+	ReadOnly bool
 }
 
 // SourceHash is the identity of a piece of generated CUDA C. It is the whole
@@ -76,11 +99,13 @@ func Kernel(fset *token.FileSet, info *types.Info, files []*ast.File, fd *ast.Fu
 	}
 	src := t.buf.String()
 	return &Unit{
-		Source:        src,
-		Name:          fd.Name.Name,
-		RequiredBlock: t.requiredBlock,
-		SharedBytes:   t.sharedBytes,
-		SourceHash:    SourceHash(src),
+		Source:         src,
+		Name:           fd.Name.Name,
+		RequiredBlock:  t.requiredBlock,
+		SharedBytes:    t.sharedBytes,
+		DynSharedWidth: t.dynSharedWidth,
+		Params:         t.paramInfo,
+		SourceHash:     SourceHash(src),
 	}, nil
 }
 
@@ -134,10 +159,36 @@ type transpiler struct {
 	// The key is the checked object rather than its name, so a declaration
 	// shadowing a slice parameter cannot be mistaken for it.
 	lens map[types.Object]string
-	// requiredBlock and sharedBytes accumulate what the kernel demands of its
-	// launch; see Unit.
+	// requiredBlock, sharedBytes and paramInfo accumulate what the kernel
+	// demands of its launch; see Unit.
 	requiredBlock int
 	sharedBytes   int
+	// dynShared is the Go name of the kernel's dynamically sized tile, empty
+	// until one is declared -- which is both the "at most one" check and what
+	// names the first of the two in the refusal. dynSharedLen is the parameter
+	// the launch fills with its length, and dynSharedWidth the element's size
+	// in bytes, which is what turns the caller's element count into bytes.
+	dynShared      string
+	dynSharedLen   string
+	dynSharedWidth int
+	// sigNames is every C identifier the kernel's own signature spells, both
+	// the parameters and the lengths generated for its slices. A dynamic
+	// tile's generated length has to be checked against it, and unlike the
+	// parameters it is only discovered while the body is lowered.
+	sigNames  map[string]string
+	paramInfo []Param
+	// written memoises the read-only analysis, and analysing is its cycle
+	// guard; see readonly.go.
+	written   map[*ast.FuncDecl]map[types.Object]bool
+	analysing map[*ast.FuncDecl]bool
+	// uses memoises the barrier-divergence summaries, varying the uniformity
+	// set each one was computed against, and diverging is that walk's cycle
+	// guard; see diverge.go. They are separate from the three above because
+	// the two analyses answer different questions about the same declarations
+	// and neither needs the other's intermediate state.
+	uses      map[*ast.FuncDecl]barrierUse
+	varying   map[*ast.FuncDecl]map[types.Object]bool
+	diverging map[*ast.FuncDecl]bool
 	// diags collects every construct this kernel was refused for.
 	diags []Diagnostic
 	// mark is len(diags) when the current statement began. Refusals are
@@ -179,6 +230,9 @@ type transpiler struct {
 	// prototypes, because a prototype may name one.
 	structNames map[*types.Named]string
 	structDefs  []string
+	// structLayouts records the padding members emitted for each struct, which
+	// is what a positional literal has to step over.
+	structLayouts map[*types.Named]structLayout
 	// deviceProtos and deviceDefs accumulate the emitted device functions.
 	// Prototypes are written before any definition, which is what makes the
 	// order of the Go declarations irrelevant.
@@ -220,6 +274,35 @@ func collectNames(fn *ast.FuncDecl) map[string]bool {
 		return true
 	})
 	return names
+}
+
+// collectDeclared records every variable fn declares, with the position of its
+// first spelling, and nothing else.
+//
+// It is the precise counterpart to collectNames, which is deliberately blunt
+// because it only has to keep a generated name from colliding with anything at
+// all. Here bluntness would cost a refusal somebody could not act on: a struct
+// field lives in its own C namespace and can share a spelling with a variable
+// without either becoming the other, so counting one as a collision would
+// refuse a kernel that is perfectly translatable. What becomes a C variable is
+// a Go variable that is not a field, so that is what this collects.
+func collectDeclared(info *types.Info, fn *ast.FuncDecl) map[string]token.Pos {
+	out := map[string]token.Pos{}
+	ast.Inspect(fn, func(n ast.Node) bool {
+		id, ok := n.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		v, ok := info.Defs[id].(*types.Var)
+		if !ok || v.IsField() {
+			return true
+		}
+		if _, seen := out[id.Name]; !seen {
+			out[id.Name] = id.Pos()
+		}
+		return true
+	})
+	return out
 }
 
 func (t *transpiler) fail(pos token.Pos, format string, args ...any) {
@@ -283,30 +366,46 @@ func (t *transpiler) kernel(fd *ast.FuncDecl) {
 	// A name clash is a fact about the signature, not a reason to stop: the
 	// body is lowered anyway so that its own problems are reported in the
 	// same run. Nothing is emitted while any diagnostic stands.
-	t.checkLengthNames(params[1:])
+	t.checkGeneratedNames(fd, params[1:])
 
+	// Divergence is a property of the whole call graph rather than of any one
+	// statement, so it is asked once about the kernel here rather than at each
+	// barrier as the body is rendered. It emits nothing; every answer it has
+	// is a refusal.
+	t.checkDivergence(fd)
+
+	written := t.writtenParams(fd)
 	var decls []string
 	for _, p := range params[1:] {
 		name := cname(p.name)
 		switch typ := p.typ.(type) {
 		case *types.Slice:
 			elem := t.ctypeElem(typ.Elem(), p.pos)
+			readOnly := !written[p.obj]
 			// A Go slice carries its length; C does not, so every slice
 			// parameter lowers to a pointer plus an explicit length.
-			decls = append(decls, fmt.Sprintf("%s* %s", elem, name), fmt.Sprintf("int %s_len", name))
+			decls = append(decls, pointerDecl(elem, name, readOnly), fmt.Sprintf("int %s_len", name))
 			t.lens[p.obj] = name + "_len"
+			t.paramInfo = append(t.paramInfo, Param{Name: p.name, Slice: true, ReadOnly: readOnly})
 		default:
 			t.checkParamType(p.typ, p.pos)
 			decls = append(decls, t.cdecl(p.typ, name, p.pos))
+			t.paramInfo = append(t.paramInfo, Param{Name: p.name})
 		}
 	}
 
-	// The entry point is rendered first, because that is what discovers the
-	// device functions it calls, and written last, because C needs them
-	// declared before it sees the call.
+	// The body is rendered first, because that is what discovers the device
+	// functions it calls -- and also the dynamically sized shared tile, whose
+	// generated length is a parameter, so the signature cannot be written
+	// until the body has been read. The definitions are written last for the
+	// other half of the same reason: C needs them before it sees the call.
+	body := t.capture(func() { t.block(fd.Body) })
+	if t.dynSharedLen != "" {
+		decls = append(decls, "int "+t.dynSharedLen)
+	}
 	entry := t.capture(func() {
 		t.line("extern \"C\" __global__ void %s(%s)", fd.Name.Name, strings.Join(decls, ", "))
-		t.block(fd.Body)
+		t.buf.WriteString(body)
 	})
 
 	t.line("// generated by github.com/CWBudde/gocuda/simt from %s", t.fset.Position(fd.Pos()).Filename)
@@ -353,7 +452,7 @@ func (t *transpiler) deviceFunc(pos token.Pos, obj *types.Func) (string, bool) {
 	}
 	if t.isKernelDecl(fd) {
 		t.fail(pos, "%s is a kernel; a kernel cannot be called from a kernel. "+
-			"Mark it //gocuda:ignore to make it a device function instead", obj.Name())
+			"Mark it %s to make it a device function instead", obj.Name(), DeviceDirective)
 		return "", false
 	}
 	if fd.Recv != nil {
@@ -499,14 +598,15 @@ func (t *transpiler) fileOf(pos token.Pos) *ast.File {
 // length C does not carry.
 func (t *transpiler) signature(fd *ast.FuncDecl) string {
 	params := t.deviceParams(fd)
-	t.checkLengthNames(params)
+	t.checkGeneratedNames(fd, params)
+	written := t.writtenParams(fd)
 	decls := make([]string, 0, len(params))
 	for _, p := range params {
 		name := cname(p.name)
 		switch typ := p.typ.(type) {
 		case *types.Slice:
 			elem := t.ctypeElem(typ.Elem(), p.pos)
-			decls = append(decls, fmt.Sprintf("%s* %s", elem, name), fmt.Sprintf("int %s_len", name))
+			decls = append(decls, pointerDecl(elem, name, !written[p.obj]), fmt.Sprintf("int %s_len", name))
 			t.lens[p.obj] = name + "_len"
 		default:
 			t.checkParamType(p.typ, p.pos)
@@ -514,6 +614,24 @@ func (t *transpiler) signature(fd *ast.FuncDecl) string {
 		}
 	}
 	return strings.Join(decls, ", ")
+}
+
+// pointerDecl declares the pointer half of a slice parameter.
+//
+// Both qualifiers are claims about the whole kernel rather than decoration.
+// const says this pointer is never written through, on any path the parameter
+// reaches, which readonly.go proves conservatively. __restrict__ says no other
+// pointer parameter reaches the same memory, which the Go source cannot
+// promise at all -- VecAdd(ctx, c, a, b) may be handed one buffer three times
+// -- so Kernel.Launch checks it against the buffers actually bound and refuses
+// an overlap, and calls inside the translation unit are checked where they are
+// lowered. An unchecked __restrict__ would be undefined behaviour dressed as a
+// speed-up.
+func pointerDecl(elem, name string, readOnly bool) string {
+	if readOnly {
+		return fmt.Sprintf("const %s* __restrict__ %s", elem, name)
+	}
+	return fmt.Sprintf("%s* __restrict__ %s", elem, name)
 }
 
 // deviceParams is fd's parameters without a leading gpu.Ctx.
@@ -525,25 +643,79 @@ func (t *transpiler) deviceParams(fd *ast.FuncDecl) []param {
 	return params
 }
 
-// checkLengthNames refuses a kernel whose own parameters clash with the length
-// parameters synthesised for its slices.
+// checkGeneratedNames refuses a function in which a name the emitter generates
+// is already the name of one of the author's own variables.
 //
-// The readable x_len spelling is worth keeping, so the clash is reported here,
-// against the Go source, rather than left to NVRTC -- which would complain
-// about a duplicate parameter in generated code the author never wrote. The
-// tile track spells lengths the same way but names its parameters p0, p1, ...
-// itself, so it has nothing to check.
-func (t *transpiler) checkLengthNames(params []param) {
+// The emitter writes into the same C namespace the kernel does, and it writes
+// two kinds of name there: the x_len carried alongside every slice, and the
+// trailing underscore cname adds to a C++ keyword. Neither is visible in the
+// Go source, and both were reachable, silently:
+//
+//	func K(ctx gpu.Ctx, y []float32) {    // y_len is generated
+//	    y_len := int32(3)                 // and so is this, now
+//	    if i < len(y) { ... }             // reads 3
+//	}
+//
+//	func K(ctx gpu.Ctx, y []float32, int int32) {  // int is emitted as int_
+//	    int_ := int32(99)                          // so is this
+//	    y[i] = float32(int_) + float32(int)        // both read 99
+//	}
+//
+// Each compiles under NVRTC and computes something the Go says nothing about,
+// which is the failure this emitter exists to rule out. Only the first
+// collision was checked before, and only against another parameter, so a local
+// reached neither. Checking against every variable the function declares
+// covers both, and covers a shared tile and a range variable with them, since
+// the emitter names those from the source too.
+//
+// A device function is checked over its own body: its parameters and locals
+// are what share a C scope with its generated lengths. The kernel additionally
+// records sigNames, because a dynamically sized tile generates a length while
+// the body is lowered, long after this runs.
+func (t *transpiler) checkGeneratedNames(fd *ast.FuncDecl, params []param) {
 	generated := make(map[string]string, len(params))
 	for _, p := range params {
 		if _, ok := p.typ.(*types.Slice); ok {
 			generated[cname(p.name)+"_len"] = p.name
 		}
 	}
-	for _, p := range params {
-		if slice, ok := generated[cname(p.name)]; ok {
-			t.fail(p.pos, "parameter %s collides with the length generated for slice parameter %s; rename it", p.name, slice)
+	declared := collectDeclared(t.info, fd)
+	for g, slice := range generated {
+		pos, taken := declared[g]
+		if !taken {
+			continue
 		}
+		t.fail(pos, "%s is the length generated for slice parameter %s, so in CUDA C the two would be one variable; rename it", g, slice)
+	}
+	// A C++ keyword is emitted with a trailing underscore, so a variable
+	// already spelled that way becomes the same C identifier. Sorted, because
+	// a map's order would shuffle the diagnostics between runs.
+	spellings := make([]string, 0, len(declared))
+	for name := range declared {
+		spellings = append(spellings, name)
+	}
+	sort.Strings(spellings)
+	for _, name := range spellings {
+		escaped := cname(name)
+		if escaped == name {
+			continue
+		}
+		if pos, taken := declared[escaped]; taken {
+			t.fail(pos, "%s is a C++ keyword and is emitted as %s, which is also declared here, so in CUDA C the two would be one variable; rename one of them", name, escaped)
+		}
+	}
+	if t.inDevice {
+		// A device function has its own parameters and no dynamic tile, so
+		// recording them would only let the kernel's tile collide with a name
+		// it never shares a scope with.
+		return
+	}
+	t.sigNames = make(map[string]string, 2*len(params))
+	for _, p := range params {
+		t.sigNames[cname(p.name)] = "parameter " + p.name
+	}
+	for g, slice := range generated {
+		t.sigNames[g] = "the length generated for slice parameter " + slice
 	}
 }
 
@@ -699,14 +871,16 @@ func (t *transpiler) ctype(typ types.Type, pos token.Pos) string {
 	}
 	switch basic.Kind() {
 	case types.Int8, types.Int16, types.Uint8, types.Uint16:
-		// Not refused because the widths disagree -- they match exactly -- but
-		// because the arithmetic does. Go computes int8*int8 in 8 bits and
-		// wraps; C promotes both to int, computes in 32, and truncates only at
-		// the assignment. `a, b := int8(100), int8(3); a*b/2` is 22 in Go and
-		// -106 in C. That is a different answer from code that compiled, which
-		// is the one thing this transpiler must never produce, so the narrow
-		// widths wait for a lowering that truncates at every step.
-		t.fail(pos, "unsupported type %s on the device: Go computes %s arithmetic in %d bits and C promotes it to int, so the two would disagree; use int32", typ, typ, 8*t.sizes.Sizeof(basic))
+		// Storage only, and this is the position that is not storage. The
+		// widths match exactly; the arithmetic does not. Go computes int8*int8
+		// in 8 bits and wraps, while C promotes both to int, computes in 32 and
+		// truncates only at the assignment, so `a, b := int8(100), int8(3);
+		// a*b/2` is 22 in Go and -106 in C. A variable, a by-value parameter or
+		// a result exists in order to be computed with, so one of these here
+		// would be an invitation to write exactly that expression -- whereas a
+		// slice element, an array element or a struct field is a place bytes
+		// live, which ctypeElem does accept.
+		t.fail(pos, "%s is storage only on the device: it may be a slice element, an array element or a struct field, but not a variable, a parameter or a result, because Go computes %s arithmetic in %d bits and C promotes it to int; hold the value in an int32 and convert with %s(...) when you store it", typ, typ, 8*t.sizes.Sizeof(basic), typ)
 		return "void"
 	case types.Uint, types.Uintptr:
 		// int gets the narrowing because an index is bounded by the grid.
@@ -736,5 +910,40 @@ func (t *transpiler) ctypeElem(typ types.Type, pos token.Pos) string {
 			return "void"
 		}
 	}
+	// The narrow integers are the mirror image of int: here the widths do line
+	// up, so the bytes cross unchanged, and it is only arithmetic that the two
+	// languages disagree about. An image buffer is the case that asks for this
+	// -- holding a []uint8 as []int32 quadruples both the transfer and the
+	// footprint to store numbers that fit in a byte -- so they are accepted
+	// exactly where a layout is what is being described. Every operator on one
+	// is refused (see narrowOperand), which is what keeps the disagreement from
+	// ever being reachable.
+	if c, ok := narrowCType(typ); ok {
+		return c
+	}
 	return t.ctype(typ, pos)
+}
+
+// narrowCType spells the storage-only integers, and reports false for every
+// other type.
+//
+// int8 becomes "signed char" and never "char": C leaves plain char's signedness
+// to the implementation, and nvcc's is signed on x86 and unsigned on aarch64,
+// so the one spelling that means int8 everywhere is the explicit one.
+func narrowCType(typ types.Type) (string, bool) {
+	basic, ok := typ.Underlying().(*types.Basic)
+	if !ok {
+		return "", false
+	}
+	switch basic.Kind() {
+	case types.Int8:
+		return "signed char", true
+	case types.Uint8:
+		return "unsigned char", true
+	case types.Int16:
+		return "short", true
+	case types.Uint16:
+		return "unsigned short", true
+	}
+	return "", false
 }

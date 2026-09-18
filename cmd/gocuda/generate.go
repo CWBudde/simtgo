@@ -368,6 +368,9 @@ func renderGen(o generateOptions, units []*lower.Unit, compiled map[string]compi
 			if u.SharedBytes != 0 {
 				fmt.Fprintf(&b, "\t\tSharedBytes:   %d,\n", u.SharedBytes)
 			}
+			if u.DynSharedWidth != 0 {
+				fmt.Fprintf(&b, "\t\tDynSharedWidth: %d,\n", u.DynSharedWidth)
+			}
 			if c.log != "" {
 				fmt.Fprintf(&b, "\t\tLog:           %q,\n", c.log)
 			}

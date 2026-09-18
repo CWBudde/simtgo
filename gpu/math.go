@@ -29,10 +29,61 @@ func Exp(x float32) float32 { return float32(math.Exp(float64(x))) }
 func Log(x float32) float32 { return float32(math.Log(float64(x))) }
 
 // Fmin returns the smaller of x and y (fminf).
-func Fmin(x, y float32) float32 { return float32(math.Min(float64(x), float64(y))) }
+//
+// It is not math.Min, and the difference is the whole point of writing it out.
+// Go's math.Min propagates NaN -- its own documentation says Min(x, NaN) = NaN
+// -- while C's fminf follows IEEE 754 minNum and returns the operand that is
+// not NaN. Wrapping math.Min would therefore have made the emulator and the
+// device disagree about a value no tolerance can reconcile: NaN against a
+// number. A parity test exists to catch exactly that, so it cannot be built
+// out of a helper that has it.
+func Fmin(x, y float32) float32 {
+	switch {
+	case isNaN(x):
+		return y
+	case isNaN(y):
+		return x
+	case x == y:
+		// Signed zeros compare equal, and fminf is specified to prefer the
+		// negative one. Testing the sign bit is the only way to tell them
+		// apart once == has said they are the same.
+		if signbit(x) {
+			return x
+		}
+		return y
+	case x < y:
+		return x
+	}
+	return y
+}
 
 // Fmax returns the larger of x and y (fmaxf).
-func Fmax(x, y float32) float32 { return float32(math.Max(float64(x), float64(y))) }
+//
+// The mirror of Fmin, and not math.Max, for the reason given there.
+func Fmax(x, y float32) float32 {
+	switch {
+	case isNaN(x):
+		return y
+	case isNaN(y):
+		return x
+	case x == y:
+		if signbit(x) {
+			return y
+		}
+		return x
+	case x > y:
+		return x
+	}
+	return y
+}
+
+// isNaN and signbit are spelled here rather than through math so that they
+// take a float32 and stay exact: converting to float64 to ask preserves both
+// answers, but the conversion is noise in a file whose subject is that
+// converting to float64 is precisely what changes the result.
+func isNaN(x float32) bool { return x != x }
+
+func signbit(x float32) bool { return math.Signbit(float64(x)) }
 
 // Float64 math, legal only in a kernel carrying //gocuda:float64. Each maps to
 // the unsuffixed CUDA built-in, which is the double one -- sqrt rather than
@@ -66,7 +117,29 @@ func Exp64(x float64) float64 { return math.Exp(x) }
 func Log64(x float64) float64 { return math.Log(x) }
 
 // Fmin64 returns the smaller of x and y (fmin).
-func Fmin64(x, y float64) float64 { return math.Min(x, y) }
+//
+// The NaN cases are taken out before math.Min sees them, for the reason Fmin
+// gives: math.Min propagates a NaN and fmin returns the operand that is not
+// one. Everything else is math.Min's, which unlike the float32 case exists and
+// documents the remaining special values -- -Inf wins, and Min(-0, +0) is -0,
+// which is what fmin does with them too.
+func Fmin64(x, y float64) float64 {
+	switch {
+	case math.IsNaN(x):
+		return y
+	case math.IsNaN(y):
+		return x
+	}
+	return math.Min(x, y)
+}
 
-// Fmax64 returns the larger of x and y (fmax).
-func Fmax64(x, y float64) float64 { return math.Max(x, y) }
+// Fmax64 returns the larger of x and y (fmax). The mirror of Fmin64.
+func Fmax64(x, y float64) float64 {
+	switch {
+	case math.IsNaN(x):
+		return y
+	case math.IsNaN(y):
+		return x
+	}
+	return math.Max(x, y)
+}

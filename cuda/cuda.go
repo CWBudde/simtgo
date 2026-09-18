@@ -192,6 +192,19 @@ type Argser interface {
 	KernelArgs() []Arg
 }
 
+// Ranger is implemented by a kernel argument that occupies a stretch of device
+// memory: its base address and its size in bytes.
+//
+// It exists so that a caller can ask whether two arguments are the same
+// memory. The generated kernels declare every pointer __restrict__, which
+// promises they are not, and this is what lets simt check that promise against
+// the buffers a launch actually binds instead of leaving it as undefined
+// behaviour. An argument that cannot answer -- a raw Arg, say -- is simply not
+// checked.
+type Ranger interface {
+	DeviceRange() (base DevPtr, bytes int)
+}
+
 // BuildArgs converts a call written in terms of Go values into the flat
 // parameter list the generated kernel expects, so a launch can be written to
 // mirror the Go kernel's own signature.

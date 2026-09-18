@@ -3,6 +3,7 @@ package simt
 import (
 	"fmt"
 	"io/fs"
+	"math"
 
 	"github.com/CWBudde/gocuda/cuda"
 	"github.com/CWBudde/gocuda/internal/jit"
@@ -27,10 +28,18 @@ type Kernel struct {
 	// answers the same question: what this PTX targets.
 	Arch string
 
-	// RequiredBlock and SharedBytes are what the kernel's source demands of a
-	// launch; see Unit.
-	RequiredBlock int
-	SharedBytes   int
+	// RequiredBlock, SharedBytes, DynSharedWidth and Params are what the
+	// kernel's source demands of a launch; see Unit.
+	RequiredBlock  int
+	SharedBytes    int
+	DynSharedWidth int
+	Params         []Param
+
+	// maxShared is what the device this kernel was built for offers per block,
+	// or 0 when there was nobody to ask. It is kept because a dynamic tile is
+	// sized at the launch rather than at Build, so that is the only place the
+	// total can be checked against the limit at all.
+	maxShared int
 
 	fn *cuda.Function
 }
@@ -110,15 +119,18 @@ func Build(dev *cuda.Context, fsys fs.FS, name string, opts ...BuildOption) (*Ke
 		return nil, err
 	}
 	k := &Kernel{
-		Name:          name,
-		Source:        u.Source,
-		PTX:           res.PTX,
-		Log:           res.Log,
-		Prebuilt:      res.Prebuilt,
-		Arch:          res.Arch,
-		RequiredBlock: u.RequiredBlock,
-		SharedBytes:   u.SharedBytes,
-		fn:            res.Func,
+		Name:           name,
+		Source:         u.Source,
+		PTX:            res.PTX,
+		Log:            res.Log,
+		Prebuilt:       res.Prebuilt,
+		Arch:           res.Arch,
+		RequiredBlock:  u.RequiredBlock,
+		SharedBytes:    u.SharedBytes,
+		DynSharedWidth: u.DynSharedWidth,
+		Params:         u.Params,
+		maxShared:      dev.MaxSharedMemPerBlock(),
+		fn:             res.Func,
 	}
 	if res.Prebuilt {
 		// Log is documented as NVRTC's compiler log, so on this path it holds
@@ -155,6 +167,147 @@ func (e *BlockSizeError) Error() string {
 	return fmt.Sprintf("simt: %s requires block == %d, got %d", e.Kernel, e.Want, e.Got)
 }
 
+// DynamicSharedError is a launch whose spelling does not match how the kernel
+// declares its shared memory.
+//
+// The two are separate calls rather than one with an optional size because the
+// mismatch is silent either way round: a kernel with a dynamic tile launched
+// through Launch gets zero bytes of it and reads off the end of nothing, and a
+// kernel without one launched through LaunchShared is handed a size for a tile
+// it does not have, plus an argument its signature has no parameter for. Both
+// are refused here, where the kernel's own answer is at hand.
+type DynamicSharedError struct {
+	Kernel  string
+	Dynamic bool // whether the kernel declares a dynamic tile
+}
+
+func (e *DynamicSharedError) Error() string {
+	if e.Dynamic {
+		return fmt.Sprintf("simt: %s declares a dynamically sized shared tile; launch it with LaunchShared, which sizes it", e.Kernel)
+	}
+	return fmt.Sprintf("simt: %s declares no dynamically sized shared tile; launch it with Launch", e.Kernel)
+}
+
+// AliasError is a launch that bound two of a kernel's slice parameters to
+// overlapping device memory while the kernel writes through one of them.
+type AliasError struct {
+	Kernel string
+	Write  string // the parameter the kernel writes through
+	Other  string // the parameter overlapping it
+}
+
+func (e *AliasError) Error() string {
+	return fmt.Sprintf("simt: %s: parameters %s and %s were given overlapping device memory, "+
+		"and the kernel writes through %s; the generated C declares every pointer __restrict__, "+
+		"which promises that they do not overlap",
+		e.Kernel, e.Write, e.Other, e.Write)
+}
+
+// ArgCountError is a launch that supplied a different number of arguments than
+// the kernel has parameters.
+//
+// Nothing downstream catches this. cuda.BuildArgs marshals whatever it is
+// given, and cuLaunchKernel reads as many parameters as the loaded function
+// declares from the array it was handed -- so too few arguments has the kernel
+// reading whatever follows the array, and too many is silently dropped. Both
+// are undefined behaviour that surfaces as wrong numbers rather than as an
+// error, which is why the count is checked against the signature that lowering
+// recorded.
+type ArgCountError struct {
+	Kernel string
+	Want   int // parameters the kernel declares, after the gpu.Ctx
+	Got    int // arguments the launch supplied
+}
+
+func (e *ArgCountError) Error() string {
+	return fmt.Sprintf("simt: %s takes %d launch argument(s), got %d", e.Kernel, e.Want, e.Got)
+}
+
+// checkArgs refuses a launch whose argument count does not match the kernel's.
+//
+// args is what reaches the driver, which for a kernel with a dynamically sized
+// shared tile is one longer than the caller wrote: LaunchSharedDim appends the
+// tile's length, and Params -- which describes the Go signature -- does not
+// include it. The extra is subtracted again before the numbers are reported,
+// so the error states the count the caller can actually see.
+func (k *Kernel) checkArgs(args []any) error {
+	extra := 0
+	if k.DynSharedWidth != 0 {
+		extra = 1
+	}
+	if got := len(args) - extra; got != len(k.Params) {
+		return &ArgCountError{Kernel: k.Name, Want: len(k.Params), Got: got}
+	}
+	return nil
+}
+
+// checkAliasing refuses a launch that breaks the __restrict__ promise.
+//
+// The Go source cannot make that promise: VecAdd(ctx, c, a, b) is three
+// parameters and may be handed one buffer three times. The qualifier is worth
+// having anyway -- it is most of what const/__restrict__ buys on a device --
+// so the promise is checked here, against the buffers the caller actually
+// bound, rather than left as undefined behaviour that shows up as wrong
+// numbers on one architecture.
+//
+// Two read-only parameters may share memory, and that is not an oversight:
+// what __restrict__ forbids is an object being modified through one pointer
+// and reached through another, so an overlap matters only when one side of it
+// is written. An argument that cannot report its range -- a raw cuda.Arg
+// holding a pointer -- is skipped, because there is nothing to compare.
+//
+// The CPU emulator makes no such check. RunCPU takes a closure, so the kernel's
+// slices never pass through it and it has no way to see that two of them are
+// the same Go slice; there the kernel is ordinary Go, where aliasing is
+// defined, so the two backends agree on everything except the diagnosis.
+func (k *Kernel) checkAliasing(args []any) error {
+	if len(args) < len(k.Params) {
+		// checkArgs has already refused this at every launch; pairing the
+		// arguments off anyway would be a guess about which is which.
+		return nil
+	}
+	type span struct {
+		base  cuda.DevPtr
+		bytes int
+		param int
+	}
+	var spans []span
+	// Over the parameters rather than over the arguments, because args may
+	// carry one more than Params describes: the length LaunchSharedDim
+	// appends for a dynamically sized tile. It is a scalar and always last,
+	// so the positions the two share still line up.
+	for i, p := range k.Params {
+		if !p.Slice {
+			continue
+		}
+		r, ok := args[i].(cuda.Ranger)
+		if !ok {
+			continue
+		}
+		base, bytes := r.DeviceRange()
+		if bytes == 0 {
+			continue
+		}
+		spans = append(spans, span{base: base, bytes: bytes, param: i})
+	}
+	for i, a := range spans {
+		for _, b := range spans[i+1:] {
+			if a.base >= b.base+cuda.DevPtr(b.bytes) || b.base >= a.base+cuda.DevPtr(a.bytes) {
+				continue
+			}
+			write, other := a.param, b.param
+			if k.Params[write].ReadOnly {
+				write, other = other, write
+			}
+			if k.Params[write].ReadOnly {
+				continue // both only read it, which restrict allows
+			}
+			return &AliasError{Kernel: k.Name, Write: k.Params[write].Name, Other: k.Params[other].Name}
+		}
+	}
+	return nil
+}
+
 // Launch runs the kernel over grid blocks of block threads. Arguments are
 // given as Go values -- device slices, float32, int32 -- in the same order as
 // the Go kernel's parameters, minus the gpu.Ctx.
@@ -162,6 +315,10 @@ func (e *BlockSizeError) Error() string {
 // A kernel that declared its block size with gpu.Ctx.AssumeBlockDim is refused
 // at any other size: its shared tiles are sized for that one geometry, so a
 // different block would stage the wrong number of samples and read past them.
+// A launch that binds one device buffer to two parameters is refused too, when
+// the kernel writes through either of them; see checkAliasing. So is one that
+// supplies the wrong number of arguments, which the driver would otherwise
+// read off the end of the parameter array; see checkArgs.
 func (k *Kernel) Launch(grid, block int, args ...any) error {
 	return k.LaunchDim(cuda.D1(grid), cuda.D1(block), args...)
 }
@@ -173,19 +330,82 @@ func (k *Kernel) Launch(grid, block int, args ...any) error {
 // AssumeBlockDim says how many threads fill a shared tile, not how they are
 // arranged, so a 16x16 block satisfies AssumeBlockDim(256).
 func (k *Kernel) LaunchDim(grid, block cuda.Dim3, args ...any) error {
-	threads := int(block.X) * int(block.Y) * int(block.Z)
-	if k.RequiredBlock != 0 && threads != k.RequiredBlock {
-		return &BlockSizeError{Kernel: k.Name, Want: k.RequiredBlock, Got: threads}
+	if k.DynSharedWidth != 0 {
+		return &DynamicSharedError{Kernel: k.Name, Dynamic: true}
 	}
-	flat, err := cuda.BuildArgs(args...)
-	if err != nil {
-		return err
-	}
-	return k.fn.LaunchSync(grid, block, 0, flat...)
+	return k.launch(grid, block, 0, args)
 }
 
 // LaunchN runs the kernel over enough blocks to cover n threads. Kernels guard
 // against the ragged tail themselves, exactly as in CUDA C.
 func (k *Kernel) LaunchN(n, block int, args ...any) error {
 	return k.Launch((n+block-1)/block, block, args...)
+}
+
+// LaunchShared runs a kernel that declares a dynamically sized shared tile,
+// giving that tile n elements.
+//
+// n is an element count and not a byte count on purpose. How wide an element
+// is was decided when the kernel was lowered -- it is the thing the emitter
+// knows and the caller would have to look up -- so the multiplication happens
+// here, against the width the Unit carries, rather than at every launch site.
+// The same count reaches the kernel as the length its len() reads, which is
+// why the two can never disagree.
+func (k *Kernel) LaunchShared(grid, block, n int, args ...any) error {
+	return k.LaunchSharedDim(cuda.D1(grid), cuda.D1(block), n, args...)
+}
+
+// LaunchSharedDim is LaunchShared over a grid of any rank.
+func (k *Kernel) LaunchSharedDim(grid, block cuda.Dim3, n int, args ...any) error {
+	if k.DynSharedWidth == 0 {
+		return &DynamicSharedError{Kernel: k.Name}
+	}
+	if n < 0 {
+		return fmt.Errorf("simt: %s: a shared tile of %d elements is not a size", k.Name, n)
+	}
+	// Both numbers derived from n are 32-bit on the device -- the byte count
+	// the driver is handed, and the length the kernel reads -- so a count that
+	// does not fit has to be refused here rather than wrapped. The limit check
+	// below cannot stand in for this one: the product is computed in a host
+	// int, so it is the truncation of n that comes first, and maxShared == 0,
+	// which is what "there was no device to ask" looks like, disables the
+	// limit check entirely.
+	if n > math.MaxInt32/k.DynSharedWidth {
+		return fmt.Errorf("simt: %s: a shared tile of %d elements of %d bytes does not fit a 32-bit size",
+			k.Name, n, k.DynSharedWidth)
+	}
+	dynBytes := n * k.DynSharedWidth
+	// The same check Build makes, and it has to be made again: this is the
+	// first moment the dynamic half of the total exists. cuLaunchKernel would
+	// refuse it too, with a generic error code and neither number in it.
+	if total := k.SharedBytes + dynBytes; k.maxShared > 0 && total > k.maxShared {
+		return &SharedMemoryError{Kernel: k.Name, Bytes: total, Limit: k.maxShared}
+	}
+	// The length is the last parameter of the generated signature, which is
+	// where the emitter appends it, so it goes last here too. Into a slice of
+	// its own, because appending to args would write into the caller's backing
+	// array whenever they passed one with room to spare.
+	full := make([]any, 0, len(args)+1)
+	full = append(append(full, args...), int32(n))
+	return k.launch(grid, block, dynBytes, full)
+}
+
+// launch is the half both spellings share: the block-size contract, the
+// argument marshalling, and the launch itself.
+func (k *Kernel) launch(grid, block cuda.Dim3, dynBytes int, args []any) error {
+	threads := int(block.X) * int(block.Y) * int(block.Z)
+	if k.RequiredBlock != 0 && threads != k.RequiredBlock {
+		return &BlockSizeError{Kernel: k.Name, Want: k.RequiredBlock, Got: threads}
+	}
+	if err := k.checkArgs(args); err != nil {
+		return err
+	}
+	if err := k.checkAliasing(args); err != nil {
+		return err
+	}
+	flat, err := cuda.BuildArgs(args...)
+	if err != nil {
+		return err
+	}
+	return k.fn.LaunchSync(grid, block, dynBytes, flat...)
 }

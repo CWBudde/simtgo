@@ -19,6 +19,9 @@ import (
 // source says about how it has to be launched.
 type Unit = lower.Unit
 
+// Param is one of a kernel's parameters, in the order a launch supplies them.
+type Param = lower.Param
+
 // GPUPkgPath is the import path of the kernel vocabulary package.
 const GPUPkgPath = lower.GPUPkgPath
 

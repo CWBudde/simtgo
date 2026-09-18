@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/CWBudde/gocuda/cuda"
+	"github.com/CWBudde/gocuda/internal/tolerance"
 	"github.com/CWBudde/gocuda/tile"
 )
 
@@ -34,18 +35,11 @@ func signal(n int, seed uint64) []float32 {
 	return xs
 }
 
-func assertClose(t *testing.T, got, want []float32, tol float64) {
-	t.Helper()
-	if len(got) != len(want) {
-		t.Fatalf("length %d, want %d", len(got), len(want))
-	}
-	for i := range got {
-		d := math.Abs(float64(got[i] - want[i]))
-		if d > tol*max(math.Abs(float64(want[i])), 1) {
-			t.Fatalf("element %d: got %v, want %v", i, got[i], want[i])
-		}
-	}
-}
+// The float32 comparisons here are tolerance.AssertClose, which is the same
+// rule the SIMT parity tests apply and is stated in NUMERICS.md. This file
+// used to carry a second copy of it under the same name, differing from the
+// other one in signature but not in what it bounded -- one rule spelled twice
+// is one rule waiting to become two.
 
 // TestPipeline checks the fused kernel against a plain Go implementation of
 // the same pipeline, and against the op-at-a-time path.
@@ -85,7 +79,7 @@ func TestPipeline(t *testing.T) {
 		}
 		want[i] = float32(math.Hypot(float64(acc), float64(im[i])))
 	}
-	assertClose(t, got, want, 1e-5)
+	tolerance.AssertClose(t, "fused vs reference", got, want, 1e-5)
 
 	stepwise, launches, err := out.MaterializeStepwise()
 	if err != nil {
@@ -94,7 +88,7 @@ func TestPipeline(t *testing.T) {
 	if launches != 3 {
 		t.Errorf("stepwise used %d launches, want 3 (scale, fir, hypot)", launches)
 	}
-	assertClose(t, stepwise, got, 1e-6)
+	tolerance.AssertClose(t, "stepwise vs fused", stepwise, got, 1e-6)
 }
 
 // TestShapeMismatch checks the runtime shape check that stands in for the

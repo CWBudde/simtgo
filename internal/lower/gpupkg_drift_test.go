@@ -99,13 +99,30 @@ func TestGPUPackageMatchesReal(t *testing.T) {
 			}
 		}
 		for name := range methodSigs(namedCtx(t, real)) {
-			// SharedF32 and AssumeBlockDim are lowered by dedicated code
-			// rather than by a table entry.
-			if name == "SharedF32" || name == "AssumeBlockDim" {
+			// The shared tiles and AssumeBlockDim are lowered by dedicated
+			// code rather than by a table entry -- the tiles because a tile is
+			// a declaration and not an expression, and AssumeBlockDim because
+			// it lowers to nothing at all. Both are still table-driven, by
+			// sharedElems and sharedDynElems, and a tile constructor missing
+			// from those is caught by the name comparison above rather than
+			// here: GPUPackage declares them straight from the same tables.
+			if _, ok := sharedElems[name]; ok {
+				continue
+			}
+			if _, ok := sharedDynElems[name]; ok {
+				continue
+			}
+			if name == "AssumeBlockDim" {
+				continue
+			}
+			if _, ok := ctxWarp[name]; ok {
+				// The warp-level methods have a table of their own: they take
+				// arguments, which ctxBuiltins cannot express, and the mask
+				// CUDA wants in front of those is the emitter's to supply.
 				continue
 			}
 			if _, ok := ctxBuiltins[name]; !ok {
-				t.Errorf("gpu.Ctx.%s has no entry in ctxBuiltins; the emitter cannot lower it", name)
+				t.Errorf("gpu.Ctx.%s has no entry in ctxBuiltins or ctxWarp; the emitter cannot lower it", name)
 			}
 		}
 	})
@@ -115,12 +132,14 @@ func TestGPUPackageMatchesReal(t *testing.T) {
 // have no place on a device, so the synthetic model deliberately omits them.
 // Anything not listed here is kernel vocabulary and must be modelled.
 var hostOnly = map[string]string{
-	"RunCPU":    "runs a kernel on the CPU; a kernel cannot launch itself",
-	"RunCPUDim": "runs a kernel on the CPU; a kernel cannot launch itself",
-	"Dim":       "launch geometry, which a kernel reads one axis at a time instead",
-	"D1":        "builds a Dim",
-	"D2":        "builds a Dim",
-	"D3":        "builds a Dim",
+	"RunCPU":          "runs a kernel on the CPU; a kernel cannot launch itself",
+	"RunCPUDim":       "runs a kernel on the CPU; a kernel cannot launch itself",
+	"RunCPUShared":    "runs a kernel on the CPU; a kernel cannot launch itself",
+	"RunCPUSharedDim": "runs a kernel on the CPU; a kernel cannot launch itself",
+	"Dim":             "launch geometry, which a kernel reads one axis at a time instead",
+	"D1":              "builds a Dim",
+	"D2":              "builds a Dim",
+	"D3":              "builds a Dim",
 }
 
 // deviceNames lists the exported members of s that a kernel may use.

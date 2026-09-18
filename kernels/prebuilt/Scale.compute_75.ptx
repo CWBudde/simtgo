@@ -40,7 +40,7 @@
 	cvta.to.global.u64 	%rd3, %rd2;
 	mul.wide.s32 	%rd4, %r1, 4;
 	add.s64 	%rd5, %rd3, %rd4;
-	ld.global.f32 	%f2, [%rd5];
+	ld.global.nc.f32 	%f2, [%rd5];
 	mul.f32 	%f3, %f2, %f1;
 	cvta.to.global.u64 	%rd6, %rd1;
 	add.s64 	%rd7, %rd6, %rd4;

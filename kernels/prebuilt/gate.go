@@ -19,12 +19,15 @@ var Gate = []Lowered{
 	BandGain,
 	Classify,
 	FIR,
+	Gray,
+	Histogram,
 	VecAdd,
 	Magnitude,
 	Quantize,
 	Scale,
 	Softclip,
 	Transpose,
+	WarpReduceSum,
 }
 
 // Names returns Gate as plain strings, for simt.VerifyPrebuilt.

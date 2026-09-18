@@ -14,7 +14,7 @@ import (
 // TestGolden pins the generated CUDA for every example kernel. Run with
 // GOCUDA_UPDATE=1 to refresh the golden files after an intentional change.
 func TestGolden(t *testing.T) {
-	for _, name := range []string{"VecAdd", "Magnitude", "Scale", "FIR", "Classify", "Softclip", "Transpose", "Quantize", "BandGain"} {
+	for _, name := range []string{"VecAdd", "Magnitude", "Scale", "FIR", "Classify", "Softclip", "Transpose", "Quantize", "BandGain", "Gray", "Histogram", "WarpReduceSum"} {
 		t.Run(name, func(t *testing.T) {
 			u, err := simt.Transpile(gocuda.Kernels(), name)
 			if err != nil {
@@ -140,9 +140,172 @@ func TestUnitRequirements(t *testing.T) {
 	// A kernel that says nothing about its geometry must not acquire a
 	// requirement out of thin air.
 	plain := transpile(t, "func K(ctx gpu.Ctx, y []float32) { y[ctx.GlobalID()] = 1 }")
-	if plain.RequiredBlock != 0 || plain.SharedBytes != 0 {
-		t.Errorf("RequiredBlock = %d, SharedBytes = %d, want 0 and 0", plain.RequiredBlock, plain.SharedBytes)
+	if plain.RequiredBlock != 0 || plain.SharedBytes != 0 || plain.DynSharedWidth != 0 {
+		t.Errorf("RequiredBlock = %d, SharedBytes = %d, DynSharedWidth = %d, want three zeros",
+			plain.RequiredBlock, plain.SharedBytes, plain.DynSharedWidth)
 	}
+
+	// Each tile is counted at its own element width, which comes from
+	// go/types rather than from a second table of widths in the emitter.
+	for _, tc := range []struct {
+		call string
+		want int
+	}{
+		{"SharedF32(4)", 16},
+		{"SharedI32(4)", 16},
+		{"SharedU32(4)", 16},
+		{"SharedF64(4)", 32},
+		{"SharedI64(4)", 32},
+		{"SharedU64(4)", 32},
+	} {
+		t.Run(tc.call, func(t *testing.T) {
+			u := transpile(t, "//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float32) { s := ctx."+tc.call+"; y[0] = float32(s[0]) }")
+			if u.SharedBytes != tc.want {
+				t.Errorf("SharedBytes = %d, want %d", u.SharedBytes, tc.want)
+			}
+			if u.DynSharedWidth != 0 {
+				t.Errorf("DynSharedWidth = %d, want 0 for a statically sized tile", u.DynSharedWidth)
+			}
+		})
+	}
+
+	// Tiles of different element types add up at their own widths.
+	both := transpile(t, "func K(ctx gpu.Ctx, y []float32) { a := ctx.SharedF32(4); b := ctx.SharedI64(2); y[0] = a[0] + float32(b[0]) }")
+	if want := 4*4 + 8*2; both.SharedBytes != want {
+		t.Errorf("SharedBytes = %d, want %d", both.SharedBytes, want)
+	}
+
+	// A dynamically sized tile contributes no static bytes and reports its
+	// element width instead, which is what the launch multiplies its element
+	// count by.
+	dyn := transpile(t, "func K(ctx gpu.Ctx, y []float32) { s := ctx.SharedDynI64(); y[0] = float32(s[0]) }")
+	if dyn.SharedBytes != 0 {
+		t.Errorf("SharedBytes = %d, want 0: a dynamic tile is not statically declared", dyn.SharedBytes)
+	}
+	if dyn.DynSharedWidth != 8 {
+		t.Errorf("DynSharedWidth = %d, want 8", dyn.DynSharedWidth)
+	}
+}
+
+// TestSharedTiles pins the lowering of every shared-tile constructor.
+//
+// The element type is the whole point: it is derived once, from the same
+// go/types view the rest of the emitter uses, so these cases are what say that
+// "derived" produced the spellings CUDA actually has.
+func TestSharedTiles(t *testing.T) {
+	cases := []struct{ name, body, want string }{{
+		name: "float32",
+		body: "func K(ctx gpu.Ctx, y []float32) { s := ctx.SharedF32(8); y[0] = s[0] }",
+		want: "__shared__ float s[8];",
+	}, {
+		name: "float64",
+		body: "//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float64) { s := ctx.SharedF64(8); y[0] = s[0] }",
+		want: "__shared__ double s[8];",
+	}, {
+		name: "int32",
+		body: "func K(ctx gpu.Ctx, y []int32) { s := ctx.SharedI32(8); y[0] = s[0] }",
+		want: "__shared__ int s[8];",
+	}, {
+		name: "int64",
+		body: "func K(ctx gpu.Ctx, y []int64) { s := ctx.SharedI64(8); y[0] = s[0] }",
+		want: "__shared__ long long s[8];",
+	}, {
+		name: "uint32",
+		body: "func K(ctx gpu.Ctx, y []uint32) { s := ctx.SharedU32(8); y[0] = s[0] }",
+		want: "__shared__ unsigned int s[8];",
+	}, {
+		name: "uint64",
+		body: "func K(ctx gpu.Ctx, y []uint64) { s := ctx.SharedU64(8); y[0] = s[0] }",
+		want: "__shared__ unsigned long long s[8];",
+	}, {
+		// A tile is addressable, which t.lens is the test for, so the atomics
+		// reach an int32 tile exactly as they reach a slice parameter.
+		name: "an atomic on an int32 tile",
+		body: "func K(ctx gpu.Ctx, y []int32) { s := ctx.SharedI32(8); gpu.AtomicAddI32(s, 0, 1); y[0] = s[0] }",
+		want: "atomicAdd(&s[0], 1)",
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := transpile(t, tc.body).Source
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("generated CUDA does not contain %q:\n%s", tc.want, got)
+			}
+		})
+	}
+}
+
+// TestSharedTileInADeviceFunction pins the accounting as well as the emission:
+// __shared__ inside a __device__ function is block-scoped storage, legal CUDA,
+// and counted on the kernel that reaches it because that is what has to ask
+// the device for it.
+func TestSharedTileInADeviceFunction(t *testing.T) {
+	u := transpile(t, "//gocuda:ignore\nfunc stage(ctx gpu.Ctx, x []float32) float32 {\n"+
+		"\ttile := ctx.SharedF32(64)\n"+
+		"\ttile[ctx.ThreadIdx()%64] = x[0]\n"+
+		"\tctx.SyncThreads()\n"+
+		"\treturn tile[0]\n}\n\n"+
+		"func K(ctx gpu.Ctx, y, x []float32) { y[0] = stage(ctx, x) + stage(ctx, x) }")
+	for _, want := range []string{
+		"__device__ float stage(const float* __restrict__ x, int x_len)",
+		"__shared__ float tile[64];",
+	} {
+		if !strings.Contains(u.Source, want) {
+			t.Errorf("generated CUDA does not contain %q:\n%s", want, u.Source)
+		}
+	}
+	// Reached twice, emitted once, counted once.
+	if n := strings.Count(u.Source, "__shared__ float tile[64];"); n != 1 {
+		t.Errorf("the tile is declared %d times, want 1", n)
+	}
+	if want := 4 * 64; u.SharedBytes != want {
+		t.Errorf("SharedBytes = %d, want %d", u.SharedBytes, want)
+	}
+}
+
+// TestDynamicSharedTile pins the lowering of the launch-sized tile: the
+// `extern __shared__` declaration, and the length parameter that lets len()
+// work and the launch say how long it is.
+func TestDynamicSharedTile(t *testing.T) {
+	u := transpile(t, "func K(ctx gpu.Ctx, y []float32) {\n"+
+		"\ts := ctx.SharedDynF32()\n"+
+		"\tfor i := ctx.ThreadIdx(); i < len(s); i += ctx.BlockDim() {\n\t\ts[i] = 1\n\t}\n"+
+		"\tctx.SyncThreads()\n"+
+		"\ty[0] = s[0]\n}")
+	for _, want := range []string{
+		// The generated length is the last parameter, where the emitter
+		// appends it and where LaunchShared passes it.
+		"extern \"C\" __global__ void K(float* __restrict__ y, int y_len, int s_len)",
+		"extern __shared__ float s[];",
+		"i < s_len",
+	} {
+		if !strings.Contains(u.Source, want) {
+			t.Errorf("generated CUDA does not contain %q:\n%s", want, u.Source)
+		}
+	}
+
+	// One per element type, since the spelling of the element is the only
+	// thing that differs.
+	for _, tc := range []struct{ call, want string }{
+		{"SharedDynF32", "extern __shared__ float s[];"},
+		{"SharedDynI32", "extern __shared__ int s[];"},
+		{"SharedDynI64", "extern __shared__ long long s[];"},
+		{"SharedDynU32", "extern __shared__ unsigned int s[];"},
+		{"SharedDynU64", "extern __shared__ unsigned long long s[];"},
+	} {
+		t.Run(tc.call, func(t *testing.T) {
+			got := transpile(t, "func K(ctx gpu.Ctx, y []float32) { s := ctx."+tc.call+"(); y[0] = float32(s[0]) }").Source
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("generated CUDA does not contain %q:\n%s", tc.want, got)
+			}
+		})
+	}
+	t.Run("SharedDynF64", func(t *testing.T) {
+		got := transpile(t, "//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float64) { s := ctx.SharedDynF64(); y[0] = s[0] }").Source
+		if want := "extern __shared__ double s[];"; !strings.Contains(got, want) {
+			t.Errorf("generated CUDA does not contain %q:\n%s", want, got)
+		}
+	})
 }
 
 // TestSwitch pins both lowerings of a Go switch. A switch whose cases are all
@@ -327,14 +490,14 @@ func TestDeviceFunctions(t *testing.T) {
 		body: "func total(xs []float32) float32 { s := float32(0)\nfor _, v := range xs { s += v }\nreturn s }\n\n" +
 			"func K(ctx gpu.Ctx, y, x []float32) { y[0] = total(x) }",
 		want: []string{
-			"__device__ float total(float* xs, int xs_len);",
+			"__device__ float total(const float* __restrict__ xs, int xs_len);",
 			"y[0] = total(x, x_len);",
 		},
 	}, {
 		name: "a helper with no result",
 		body: "func fill(xs []float32, v float32) { for i := range xs { xs[i] = v } }\n\n" +
 			"func K(ctx gpu.Ctx, y []float32) { fill(y, 1) }",
-		want: []string{"__device__ void fill(float* xs, int xs_len, float v);", "fill(y, y_len, 1.0f);"},
+		want: []string{"__device__ void fill(float* __restrict__ xs, int xs_len, float v);", "fill(y, y_len, 1.0f);"},
 	}, {
 		name: "a helper reached only through another helper",
 		body: "func inner(x float32) float32 { return x + 1 }\n\n" +
@@ -347,9 +510,29 @@ func TestDeviceFunctions(t *testing.T) {
 		},
 	}, {
 		// gpu.Ctx has no device representation, so it is dropped from the
-		// signature and from the call, the way a kernel's own is. The opt-out
+		// signature and from the call, the way a kernel's own is. The marker
 		// is what stops the helper being taken for a kernel in its own right.
-		name: "a helper taking gpu.Ctx, opted out of being a kernel",
+		name: "a helper taking gpu.Ctx, marked as a device function",
+		body: "//gocuda:device\nfunc where(ctx gpu.Ctx) int { return ctx.GlobalID() }\n\n" +
+			"func K(ctx gpu.Ctx, y []float32) { i := where(ctx); if i < len(y) { y[i] = 1 } }",
+		want: []string{"__device__ int where();", "int i = where();"},
+	}, {
+		// The same helper with a slice beside the Ctx, which is the shape that
+		// proves deviceParams and deviceArgs drop the Ctx in step: the
+		// signature loses it and so does the call, and the slice that follows
+		// still splits into a pointer and a length on both sides. An emitter
+		// that dropped it on one side only would emit a call C rejects.
+		name: "a marked helper whose Ctx is followed by a slice",
+		body: "//gocuda:device\nfunc mine(ctx gpu.Ctx, xs []float32) float32 { return xs[ctx.GlobalID()%len(xs)] }\n\n" +
+			"func K(ctx gpu.Ctx, y, x []float32) { y[0] = mine(ctx, x) }",
+		want: []string{
+			"__device__ float mine(const float* __restrict__ xs, int xs_len);",
+			"y[0] = mine(x, x_len);",
+		},
+	}, {
+		// //gocuda:ignore keeps meaning what it always meant: not a kernel.
+		// A helper that carries it is still lowered when a kernel calls it.
+		name: "//gocuda:ignore still opts a Ctx helper out of being a kernel",
 		body: "//gocuda:ignore\nfunc where(ctx gpu.Ctx) int { return ctx.GlobalID() }\n\n" +
 			"func K(ctx gpu.Ctx, y []float32) { i := where(ctx); if i < len(y) { y[i] = 1 } }",
 		want: []string{"__device__ int where();", "int i = where();"},
@@ -376,6 +559,203 @@ func TestDeviceFunctions(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestParallelAssignment pins the two-phase lowering that `a, b = c, d` needs.
+//
+// Go evaluates every value before it stores any of them, so a swap is a swap.
+// C has no such statement, and the emitter writes the phases out: a temporary
+// per value, then the assignments. Emitting the assignments directly would
+// compile and turn `a, b = b, a` into two copies of b, which is the failure
+// this whole package is arranged to rule out.
+func TestParallelAssignment(t *testing.T) {
+	cases := []struct {
+		name, body string
+		want       []string
+		absent     []string
+	}{{
+		name: "a swap goes through temporaries",
+		body: "func K(ctx gpu.Ctx, y []float32) { a, b := y[0], y[1]; a, b = b, a; y[0] = a + b }",
+		want: []string{"float a_tmp2 = b;", "float b_tmp2 = a;", "a = a_tmp2;", "b = b_tmp2;"},
+	}, {
+		name: "a declaration declares both, after both values are evaluated",
+		body: "func K(ctx gpu.Ctx, y []float32) { a, b := y[0], y[1]; y[0] = a - b }",
+		want: []string{"float a_tmp = y[0];", "float b_tmp = y[1];", "float a = a_tmp;", "float b = b_tmp;"},
+	}, {
+		// A mixed `:=`, where a exists and b does not: a is assigned and b is
+		// declared, and the value bound to b is the *old* a.
+		name: "a mixed short declaration",
+		body: "func K(ctx gpu.Ctx, y []float32) { a := float32(1); a, b := y[0], a; y[0] = a + b }",
+		want: []string{"float b_tmp = a;", "a = a_tmp;", "float b = b_tmp;"},
+	}, {
+		// The idiom this exists for. Neither subscript is written by the
+		// statement, so neither needs a temporary of its own and the generated
+		// C still reads like the Go.
+		name:   "swapping two elements needs no index temporaries",
+		body:   "func K(ctx gpu.Ctx, y []float32, n int32) { i, j := 0, int(n); y[i], y[j] = y[j], y[i]; y[0] = float32(i + j) }",
+		want:   []string{"float y_tmp = y[j];", "float y_tmp2 = y[i];", "y[i] = y_tmp;", "y[j] = y_tmp2;"},
+		absent: []string{"_idx"},
+	}, {
+		// And the case that forces one: Go evaluates the subscript against the
+		// old i, C would index with the new one. The emitted temporary is what
+		// keeps the two the same statement.
+		name: "an index that the statement itself writes is lifted out",
+		body: "func K(ctx gpu.Ctx, y []float32) { i := 0; i, y[i] = 1, 2; y[0] = float32(i) }",
+		want: []string{"int y_idx = i;", "i = i_tmp;", "y[y_idx] = y_tmp;"},
+	}, {
+		name: "two structs swap as values",
+		body: "type P struct{ X, Y float32 }\n\n" +
+			"func K(ctx gpu.Ctx, y []float32) { p, q := P{X: 1}, P{Y: 2}; p, q = q, p; y[0] = p.X + q.Y }",
+		want: []string{"P p_tmp2 = q;", "P q_tmp2 = p;"},
+	}, {
+		// Two swaps in one C scope must not declare the same temporary twice,
+		// which is why the generated names are never handed back.
+		name: "a second parallel assignment gets its own names",
+		body: "func K(ctx gpu.Ctx, y []float32) { a, b := y[0], y[1]; a, b = b, a; a, b = b, a; y[0] = a + b }",
+		want: []string{"float a_tmp2 = b;", "float a_tmp3 = b;"},
+	}, {
+		name: "struct fields swap",
+		body: "type P struct{ X, Y float32 }\n\n" +
+			"func K(ctx gpu.Ctx, y []float32, ps []P) { ps[0].X, ps[0].Y = ps[0].Y, ps[0].X; y[0] = 1 }",
+		want: []string{"float X_tmp = ps[0].Y;", "ps[0].X = X_tmp;", "ps[0].Y = Y_tmp;"},
+	}, {
+		// The loop step the for-clause refusal sends here, so that what the
+		// refusal advises is known to work.
+		name: "a two-variable loop step in the body",
+		body: "func K(ctx gpu.Ctx, y []float32, n int32) {\n" +
+			"\ti := 0\n\tj := int(n) - 1\n" +
+			"\tfor i < j {\n\t\ty[i], y[j] = y[j], y[i]\n\t\ti, j = i+1, j-1\n\t}\n}",
+		want: []string{"int i_tmp = i + 1;", "int j_tmp = j - 1;", "i = i_tmp;", "j = j_tmp;"},
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := transpile(t, tc.body).Source
+			for _, w := range tc.want {
+				if !strings.Contains(got, w) {
+					t.Errorf("generated CUDA does not contain %q:\n%s", w, got)
+				}
+			}
+			for _, w := range tc.absent {
+				if strings.Contains(got, w) {
+					t.Errorf("generated CUDA contains %q, which it should not:\n%s", w, got)
+				}
+			}
+		})
+	}
+}
+
+// TestReadOnlyParameters pins the const half of the pointer qualifiers.
+//
+// A parameter is const only when nothing writes through it on any path the
+// kernel reaches, which makes the analysis interprocedural: a slice is
+// forwarded to a device function as a bare pointer, and nothing at the call
+// site says what happens to it. Marking a written parameter const is a compile
+// error at best, so every case here is really asking whether the analysis
+// stayed pessimistic where it could not see.
+func TestReadOnlyParameters(t *testing.T) {
+	cases := []struct {
+		name, body string
+		want       []string
+	}{{
+		name: "what the kernel writes is not const, what it reads is",
+		body: "func K(ctx gpu.Ctx, y, x []float32) { i := ctx.GlobalID(); if i < len(y) { y[i] = x[i] } }",
+		want: []string{"float* __restrict__ y, int y_len, const float* __restrict__ x, int x_len"},
+	}, {
+		// The case the analysis exists for: nothing in K's own body writes y.
+		name: "a write inside a device function reaches the caller's parameter",
+		body: "func fill(xs []float32, v float32) { for i := range xs { xs[i] = v } }\n\n" +
+			"func K(ctx gpu.Ctx, y []float32) { fill(y, 1) }",
+		want: []string{
+			"__device__ void fill(float* __restrict__ xs, int xs_len, float v);",
+			"__global__ void K(float* __restrict__ y, int y_len)",
+		},
+	}, {
+		name: "a helper that only reads leaves both parameters const",
+		body: "func total(xs []float32) float32 { s := float32(0)\nfor _, v := range xs { s += v }\nreturn s }\n\n" +
+			"func K(ctx gpu.Ctx, y, x []float32) { y[0] = total(x) }",
+		want: []string{
+			"__device__ float total(const float* __restrict__ xs, int xs_len);",
+			"__global__ void K(float* __restrict__ y, int y_len, const float* __restrict__ x, int x_len)",
+		},
+	}, {
+		name: "a write two calls deep still reaches the parameter",
+		body: "func inner(xs []float32) { xs[0] = 1 }\n\n" +
+			"func outer(xs []float32) { inner(xs) }\n\n" +
+			"func K(ctx gpu.Ctx, y, x []float32) { outer(y); y[1] = x[0] }",
+		want: []string{
+			"__device__ void inner(float* __restrict__ xs, int xs_len);",
+			"__device__ void outer(float* __restrict__ xs, int xs_len);",
+		},
+	}, {
+		// An atomic is the one write that is not an assignment.
+		name: "an atomic counts as a write",
+		body: "func K(ctx gpu.Ctx, h []int32, x []int32) { gpu.AtomicAddI32(h, 0, x[0]) }",
+		want: []string{"int* __restrict__ h, int h_len, const int* __restrict__ x, int x_len"},
+	}, {
+		name: "an atomic inside a device function counts too",
+		body: "func bump(h []int32, i int) { gpu.AtomicAddI32(h, i, 1) }\n\n" +
+			"func K(ctx gpu.Ctx, h []int32) { bump(h, ctx.GlobalID()) }",
+		want: []string{"__global__ void K(int* __restrict__ h, int h_len)"},
+	}, {
+		name: "a write to a struct field of an element",
+		body: "type P struct{ X, Y float32 }\n\n" +
+			"func K(ctx gpu.Ctx, ps []P, qs []P) { ps[0].X = qs[0].Y }",
+		want: []string{"P* __restrict__ ps, int ps_len, const P* __restrict__ qs, int qs_len"},
+	}, {
+		name: "an increment is a write",
+		body: "func K(ctx gpu.Ctx, n []int32, x []int32) { n[0]++; n[1] = x[0] }",
+		want: []string{"int* __restrict__ n, int n_len, const int* __restrict__ x, int x_len"},
+	}, {
+		// A shared tile is not a parameter, so writing one says nothing about
+		// the parameter it was filled from.
+		name: "staging into a shared tile leaves the source const",
+		body: "func K(ctx gpu.Ctx, y, x []float32) {\n" +
+			"\tctx.AssumeBlockDim(64)\n\ts := ctx.SharedF32(64)\n" +
+			"\ts[ctx.ThreadIdx()] = x[ctx.GlobalID()]\n\tctx.SyncThreads()\n" +
+			"\ty[ctx.GlobalID()] = s[0]\n}",
+		want: []string{"float* __restrict__ y, int y_len, const float* __restrict__ x, int x_len"},
+	}, {
+		// Passing one buffer to two parameters is only a problem when the
+		// callee writes through one of them; two readers may share memory,
+		// because restrict is a promise about what is modified.
+		name: "a buffer passed twice to a helper that only reads",
+		body: "func dot(a, b []float32) float32 { s := float32(0)\nfor i := range a { s += a[i] * b[i] }\nreturn s }\n\n" +
+			"func K(ctx gpu.Ctx, y, x []float32) { y[0] = dot(x, x) }",
+		want: []string{"y[0] = dot(x, x_len, x, x_len);"},
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := transpile(t, tc.body).Source
+			for _, w := range tc.want {
+				if !strings.Contains(got, w) {
+					t.Errorf("generated CUDA does not contain %q:\n%s", w, got)
+				}
+			}
+		})
+	}
+}
+
+// TestUnitParams checks that what a launch needs to know about a parameter
+// travels with the unit: which arguments are buffers, and which of those the
+// kernel writes. The aliasing check at launch is exactly this list plus the
+// pointers the caller bound.
+func TestUnitParams(t *testing.T) {
+	u := transpile(t, "func K(ctx gpu.Ctx, y, x []float32, k float32) { y[0] = x[0] * k }")
+	want := []simt.Param{
+		{Name: "y", Slice: true},
+		{Name: "x", Slice: true, ReadOnly: true},
+		{Name: "k"},
+	}
+	if len(u.Params) != len(want) {
+		t.Fatalf("got %d parameters, want %d: %+v", len(u.Params), len(want), u.Params)
+	}
+	for i, p := range u.Params {
+		if p != want[i] {
+			t.Errorf("parameter %d is %+v, want %+v", i, p, want[i])
+		}
 	}
 }
 
@@ -528,7 +908,8 @@ func TestWideScalars(t *testing.T) {
 	u := transpile(t, "func K(ctx gpu.Ctx, a []int64, b []uint32, c []uint64, d []bool, n int64, m uint32) {\n"+
 		"\ta[0] = n\n\tb[0] = m\n\tc[0] = 7\n\td[0] = n > 0\n}")
 	for _, want := range []string{
-		"long long* a", "unsigned int* b", "unsigned long long* c", "bool* d",
+		"long long* __restrict__ a", "unsigned int* __restrict__ b",
+		"unsigned long long* __restrict__ c", "bool* __restrict__ d",
 		"long long n", "unsigned int m",
 		// The suffix is what keeps the literal's type the one Go gave it,
 		// rather than the first C++ type it happens to fit in.
@@ -544,7 +925,7 @@ func TestWideScalars(t *testing.T) {
 // constant keeps its precision rather than being rounded to a float.
 func TestFloat64Directive(t *testing.T) {
 	onFunc := transpile(t, "//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float64) { y[0] = 0.1 }")
-	if !strings.Contains(onFunc.Source, "double* y") {
+	if !strings.Contains(onFunc.Source, "double* __restrict__ y") {
 		t.Errorf("directive on the function had no effect:\n%s", onFunc.Source)
 	}
 	if !strings.Contains(onFunc.Source, "y[0] = 0.1;") {
@@ -559,7 +940,7 @@ func TestFloat64Directive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("directive in the package comment was not honoured: %v", err)
 	}
-	if !strings.Contains(u.Source, "double* y") {
+	if !strings.Contains(u.Source, "double* __restrict__ y") {
 		t.Errorf("file-wide directive had no effect:\n%s", u.Source)
 	}
 }
@@ -572,14 +953,18 @@ func TestFloat64Directive(t *testing.T) {
 // holds on whatever architecture and CUDA version the kernel is built for
 // rather than on the one it was written on. Offsets are missing from the
 // assertions because NVRTC compiles a string with no include path and so has no
-// offsetof; TestStructRoundTrip in the parity tests pins those instead.
+// offsetof; the padding this emits is what makes sizeof cover them, and
+// TestStructLayoutRoundTrip in the parity tests measures them on a device.
 func TestStructLayoutIsAsserted(t *testing.T) {
 	u := transpile(t, "type Shape struct {\n\tFloor float32\n\tCount int32\n\tBias  float64\n}\n\n"+
 		"//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float32, cfg Shape) { y[0] = cfg.Floor }")
 	for _, want := range []string{
+		// Nothing but the three fields. Floor ends at 4, Count ends at 8 and
+		// Bias starts there, and 8 + 8 is the whole struct, so this is a Go
+		// layout with no hole anywhere in it and the emitter must add nothing:
+		// padding a struct that needs none would churn every artifact it
+		// appears in to say what was already being said.
 		"struct Shape\n{\n\tfloat Floor;\n\tint Count;\n\tdouble Bias;\n};",
-		// 4 + 4 of Count, four bytes of padding, then Bias at 8: the padded
-		// case is the one where Go and C could part company.
 		`static_assert(sizeof(Shape) == 16,`,
 		`static_assert(alignof(Shape) == 8,`,
 		"y[0] = cfg.Floor;",
@@ -764,6 +1149,307 @@ func TestFloat64Math(t *testing.T) {
 		name: "the float32 helpers are untouched",
 		body: "func K(ctx gpu.Ctx, y []float32) { y[0] = gpu.Sqrt(y[1]) }",
 		want: "y[0] = sqrtf(y[1]);",
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := transpile(t, tc.body).Source
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("generated CUDA does not contain %q:\n%s", tc.want, got)
+			}
+		})
+	}
+}
+
+// TestNarrowStorage pins where the storage-only integers are allowed to be and
+// what they lower to.
+//
+// The four of them are the one part of the type map that is a position rule
+// rather than a name: the same type is a slice element, an array element or a
+// struct field and lowers fine, and is a variable or a parameter and is
+// refused -- TestUnsupported has that half. int8 is deliberately "signed char"
+// and not "char", whose signedness C leaves to the implementation, so the bare
+// spelling would mean one thing on x86 and another on aarch64.
+func TestNarrowStorage(t *testing.T) {
+	cases := []struct{ name, body, want string }{{
+		name: "as slice elements, all four widths",
+		body: "func K(ctx gpu.Ctx, a []uint8, b []int8, c []uint16, d []int16) { a[0] = 1 }",
+		want: "unsigned char* __restrict__ a, int a_len, const signed char* __restrict__ b, int b_len, const unsigned short* __restrict__ c, int c_len, const short* __restrict__ d, int d_len",
+	}, {
+		name: "as an array element",
+		body: "func K(ctx gpu.Ctx, y []uint8) { var buf [4]uint8; buf[0] = y[0]; y[1] = buf[0] }",
+		want: "unsigned char buf[4] = {};",
+	}, {
+		name: "as a struct field",
+		body: "type Px struct{ R, G, B uint8; A int16 }\n\n" +
+			"func K(ctx gpu.Ctx, y []float32, ps []Px) { y[0] = float32(int32(ps[0].R) + int32(ps[0].A)) }",
+		want: "\tunsigned char R;\n\tunsigned char G;\n\tunsigned char B;\n",
+	}, {
+		// Both directions of the conversion that makes the type usable at all,
+		// with the arithmetic in between happening at int32.
+		name: "int32 out, uint8 back in",
+		body: "func K(ctx gpu.Ctx, out, x []uint8) { out[0] = uint8(int32(x[0]) * 2) }",
+		want: "out[0] = (unsigned char)((int)(x[0]) * 2);",
+	}, {
+		// The things that are not arithmetic and have to keep working, or the
+		// feature is storage nobody can reach.
+		name: "len, index and range over a narrow slice",
+		body: "func K(ctx gpu.Ctx, out, x []uint8) {\n" +
+			"\tn := int32(0)\n\tfor i := range x {\n\t\tn += int32(x[i])\n\t}\n" +
+			"\tout[0] = uint8(n % int32(len(x)))\n}",
+		want: "for (int i = 0; i < x_len; i++)",
+	}, {
+		name: "a plain copy between narrow slots needs no conversion",
+		body: "func K(ctx gpu.Ctx, out, x []uint8) { out[0] = x[1] }",
+		want: "out[0] = x[1];",
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := transpile(t, tc.body).Source
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("generated CUDA does not contain %q:\n%s", tc.want, got)
+			}
+		})
+	}
+}
+
+// TestStructPadding pins the offset check.
+//
+// NVRTC has no offsetof, so the assertion that can be written is about sizes.
+// Filling every hole in Go's layout -- and the trailing one -- with an unsigned
+// char array makes the declared members occupy exactly Go's size, and C++ lays
+// members out in order at or after the end of the one before, so sizeof
+// agreeing is only possible if nothing was inserted and every field therefore
+// sits where Go put it. What is pinned here is that the padding appears where
+// Go has a hole and nowhere else, and that a positional literal steps over it
+// rather than initialising a field into it.
+func TestStructPadding(t *testing.T) {
+	cases := []struct{ name, body, want string }{{
+		name: "an internal hole is declared",
+		body: "type S struct{ A int32; B float64 }\n\n" +
+			"//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float32, s S) { y[0] = float32(s.A) + float32(s.B) }",
+		want: "struct S\n{\n\tint A;\n\tunsigned char gocuda_pad0[4];\n\tdouble B;\n};",
+	}, {
+		// The blind spot the trailing member closes: a byte inserted earlier
+		// could hide inside the slack at the end and leave sizeof unchanged.
+		name: "trailing slack is declared too",
+		body: "type S struct{ A float64; B int32 }\n\n" +
+			"//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float32, s S) { y[0] = float32(s.A) + float32(s.B) }",
+		want: "struct S\n{\n\tdouble A;\n\tint B;\n\tunsigned char gocuda_pad0[4];\n};",
+	}, {
+		name: "a layout with no holes gets no padding",
+		body: "type S struct{ A, B float32 }\n\n" +
+			"func K(ctx gpu.Ctx, y []float32, s S) { y[0] = s.A + s.B }",
+		want: "struct S\n{\n\tfloat A;\n\tfloat B;\n};",
+	}, {
+		name: "a positional literal steps over the padding",
+		body: "type S struct{ A int32; B float64 }\n\n" +
+			"//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float32) { s := S{1, 2}; y[0] = float32(s.A) + float32(s.B) }",
+		want: "S s = S{1, {}, 2.0};",
+	}, {
+		// An over-aligned field, where the hole is larger than the field before
+		// it rather than a leftover byte or two.
+		name: "a one-byte field before an eight-byte one",
+		body: "type S struct{ A uint8; B float64 }\n\n" +
+			"//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float32, s S) { y[0] = float32(int32(s.A)) + float32(s.B) }",
+		want: "\tunsigned char A;\n\tunsigned char gocuda_pad0[7];\n\tdouble B;\n",
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := transpile(t, tc.body).Source
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("generated CUDA does not contain %q:\n%s", tc.want, got)
+			}
+		})
+	}
+}
+
+// TestArrayStructField covers the field shape that was refused until the
+// offsets could be pinned: C puts an array's extent after the name, so the
+// field goes through cdecl like every other declaration, and the struct it
+// sits in is asserted the same way as any other.
+func TestArrayStructField(t *testing.T) {
+	u := transpile(t, "type Taps struct {\n\tGain float32\n\tW    [3]float32\n}\n\n"+
+		"func K(ctx gpu.Ctx, y []float32, ts []Taps) { y[0] = ts[0].Gain * ts[0].W[2] }")
+	for _, want := range []string{
+		"struct Taps\n{\n\tfloat Gain;\n\tfloat W[3];\n};",
+		"static_assert(sizeof(Taps) == 16,",
+		"static_assert(alignof(Taps) == 4,",
+		"y[0] = ts[0].Gain * ts[0].W[2];",
+	} {
+		if !strings.Contains(u.Source, want) {
+			t.Errorf("missing %q in:\n%s", want, u.Source)
+		}
+	}
+}
+
+// TestNarrowSwitch pins the one comparison of a narrow value that is not
+// refused, and says why it is the exception rather than an oversight.
+//
+// A switch is not an operator, and a C switch promotes its tag to int exactly
+// as an if would: the case labels are constants Go already checked fit the
+// narrow type, so every arm matches the same value in both languages. The
+// chained form is a different thing -- it declares a tag variable first, and a
+// narrow local is refused, which TestUnsupported pins.
+func TestNarrowSwitch(t *testing.T) {
+	u := transpile(t, "func K(ctx gpu.Ctx, y []float32, a []uint8) { switch a[0] {\ncase 1:\n\ty[0] = 1\ncase 255:\n\ty[0] = 2\n} }")
+	for _, want := range []string{"switch (a[0])", "case 1:", "case 255:"} {
+		if !strings.Contains(u.Source, want) {
+			t.Errorf("missing %q in:\n%s", want, u.Source)
+		}
+	}
+}
+
+// TestWarpPrimitives pins what the warp vocabulary lowers to.
+//
+// The interesting part is the argument the kernel never wrote: CUDA's _sync
+// built-ins take a participation mask, the Go spelling has none, and the
+// emitter writes 0xffffffff against the contract that every thread of the warp
+// reaches the call. Getting that wrong is undefined behaviour rather than a
+// wrong number, which is why it is pinned rather than trusted.
+func TestWarpPrimitives(t *testing.T) {
+	const decl = "func K(ctx gpu.Ctx, y []float32, h []int32) "
+	cases := []struct{ name, body, want string }{{
+		// Not threadIdx.x & 31: CUDA fills a warp with consecutive flat
+		// thread indices, so a 16x16 block would make every second row lane 0.
+		name: "the lane is the flat thread index modulo the warp size",
+		body: decl + "{ y[0] = float32(ctx.LaneID()) }",
+		want: "y[0] = (float)((int)((threadIdx.x + blockDim.x * (threadIdx.y + blockDim.y * threadIdx.z)) % 32));",
+	}, {
+		name: "a float shuffle carries the mask the kernel never wrote",
+		body: decl + "{ y[0] = ctx.ShuffleF32(y[1], 0) }",
+		want: "y[0] = __shfl_sync(0xffffffff, y[1], 0);",
+	}, {
+		name: "an int shuffle is the same built-in, resolved by argument",
+		body: decl + "{ h[0] = ctx.ShuffleI32(h[1], 3) }",
+		want: "h[0] = __shfl_sync(0xffffffff, h[1], 3);",
+	}, {
+		name: "xor",
+		body: decl + "{ y[0] = ctx.ShuffleXorF32(y[1], 16) }",
+		want: "y[0] = __shfl_xor_sync(0xffffffff, y[1], 16);",
+	}, {
+		name: "up",
+		body: decl + "{ h[0] = ctx.ShuffleUpI32(h[1], 1) }",
+		want: "h[0] = __shfl_up_sync(0xffffffff, h[1], 1);",
+	}, {
+		name: "down, with an expression for the delta",
+		body: decl + "{ i := ctx.GlobalID(); y[0] = ctx.ShuffleDownF32(y[1], i+1) }",
+		want: "y[0] = __shfl_down_sync(0xffffffff, y[1], i + 1);",
+	}, {
+		name: "ballot returns the mask itself",
+		body: decl + "{ h[0] = int32(ctx.Ballot(y[0] > 0)) }",
+		want: "h[0] = (int)(__ballot_sync(0xffffffff, y[0] > 0.0f));",
+	}, {
+		// C's __any_sync returns an int and Go's Any returns a bool. The
+		// comparison is written out rather than left to C++'s silent
+		// conversion, because the generated source is read by people.
+		name: "a vote becomes a comparison, because C returns an int",
+		body: decl + "{ if ctx.Any(y[0] > 0) { y[1] = 1 } }",
+		want: "if (__any_sync(0xffffffff, y[0] > 0.0f) != 0)",
+	}, {
+		name: "and so does All",
+		body: decl + "{ if ctx.All(y[0] > 0) { y[1] = 1 } }",
+		want: "if (__all_sync(0xffffffff, y[0] > 0.0f) != 0)",
+	}, {
+		// The comparison binds tighter than && in C as well as in Go, so the
+		// conjunction needs no parentheses and the negation does.
+		name: "a vote composes with a conjunction without gaining parentheses",
+		body: decl + "{ if ctx.Any(y[0] > 0) && ctx.All(y[1] > 0) { y[2] = 1 } }",
+		want: "if (__any_sync(0xffffffff, y[0] > 0.0f) != 0 && __all_sync(0xffffffff, y[1] > 0.0f) != 0)",
+	}, {
+		name: "a negated vote is parenthesised, because ! binds tighter than !=",
+		body: decl + "{ if !ctx.Any(y[0] > 0) { y[1] = 1 } }",
+		want: "if (!(__any_sync(0xffffffff, y[0] > 0.0f) != 0))",
+	}, {
+		// __activemask is the one that reads the mask rather than taking one,
+		// so it is also the one entry in the table with no mask argument.
+		name: "the active mask takes no mask",
+		body: decl + "{ h[0] = int32(ctx.ActiveMask()) }",
+		want: "h[0] = (int)(__activemask());",
+	}, {
+		name: "syncwarp is a statement and still carries the mask",
+		body: decl + "{ ctx.SyncWarp(); y[0] = 1 }",
+		want: "__syncwarp(0xffffffff);",
+	}, {
+		// gpu.WarpSize is a constant on both sides, so go/types folds it and
+		// the emitter never sees the selector at all. CUDA's own warpSize is
+		// an ordinary variable, and a bound divided by one would be a runtime
+		// division.
+		name: "WarpSize folds to a literal",
+		body: decl + "{ y[0] = float32(ctx.LaneID() % gpu.WarpSize) }",
+		want: "% 32)",
+	}, {
+		// A device function that takes a Ctx loses it from its C signature,
+		// exactly as the kernel does, and the built-ins are available there
+		// with nothing special: they are not promises about a launch, which is
+		// what SharedF32 and AssumeBlockDim are refused in one for.
+		name: "inside a device function taking a Ctx",
+		body: "//gocuda:ignore\nfunc lane(ctx gpu.Ctx) int { return ctx.LaneID() }\n\n" +
+			"func K(ctx gpu.Ctx, y []float32) { y[0] = float32(lane(ctx)) }",
+		want: "return (int)((threadIdx.x + blockDim.x * (threadIdx.y + blockDim.y * threadIdx.z)) % 32);",
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := transpile(t, tc.body).Source
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("generated CUDA does not contain %q:\n%s", tc.want, got)
+			}
+		})
+	}
+}
+
+// TestUniformBarriersLower is the emitted half of the barrier-divergence
+// rules: the shapes the check leaves alone have to keep producing the
+// __syncthreads() and the _sync built-ins they always did.
+//
+// It exists beside TestUniformBarriersAccepted in errors_test.go because the
+// two can fail apart. That one would still pass if the check were relaxed and
+// the emitter then dropped the barrier; this one reads the generated C. The
+// check emits nothing, so every line below is the line the emitter wrote
+// before it existed.
+func TestUniformBarriersLower(t *testing.T) {
+	cases := []struct{ name, body, want string }{{
+		name: "a block-uniform branch keeps its barrier",
+		body: "func K(ctx gpu.Ctx, y []float32) { s := ctx.SharedF32(4)\n" +
+			"if ctx.BlockIdx() == 0 { ctx.SyncThreads() }\ny[0] = s[0] }",
+		want: "if ((int)blockIdx.x == 0)",
+	}, {
+		// The staging loop out of FIR and Histogram, which is the shape the
+		// trip-count rule had to be written not to refuse.
+		name: "a thread-varying staging loop with the barrier after it",
+		body: "func K(ctx gpu.Ctx, y []float32) { s := ctx.SharedF32(4)\n" +
+			"for k := ctx.ThreadIdx(); k < 4; k += ctx.BlockDim() { s[k] = 1 }\n" +
+			"ctx.SyncThreads()\ny[0] = s[0] }",
+		want: "for (int k = (int)threadIdx.x; k < 4; k += (int)blockDim.x)",
+	}, {
+		name: "a ragged-tail guard with the barrier after it",
+		body: "func K(ctx gpu.Ctx, y []float32) { s := ctx.SharedF32(4)\n" +
+			"if ctx.GlobalID() < len(y) { s[0] = 1 }\nctx.SyncThreads()\ny[0] = s[0] }",
+		want: "__syncthreads();",
+	}, {
+		name: "a barrier in a loop the whole block runs the same number of times",
+		body: "func K(ctx gpu.Ctx, y []float32) { s := ctx.SharedF32(4)\n" +
+			"for k := 0; k < 4; k++ { ctx.SyncThreads() }\ny[0] = s[0] }",
+		want: "for (int k = 0; k < 4; k++)",
+	}, {
+		// WarpReduceSum's exchange, with the mask the emitter supplies: a
+		// uniform trip count is what makes that mask true.
+		name: "a warp exchange in a loop over constants",
+		body: "func K(ctx gpu.Ctx, y []float32) { v := y[ctx.GlobalID()]\n" +
+			"for off := gpu.WarpSize / 2; off > 0; off /= 2 { v += ctx.ShuffleDownF32(v, off) }\ny[0] = v }",
+		want: "v += __shfl_down_sync(0xffffffff, v, off);",
+	}, {
+		// The barrier is inside the __device__ function and the call is on the
+		// block's common path, which is what makes it every thread's barrier.
+		name: "a barrier inside a device function called by everyone",
+		body: "//gocuda:ignore\nfunc stage(ctx gpu.Ctx) float32 { s := ctx.SharedF32(4)\n" +
+			"ctx.SyncThreads()\nreturn s[0] }\n\n" +
+			"func K(ctx gpu.Ctx, y []float32) { v := stage(ctx)\n" +
+			"if ctx.GlobalID() < len(y) { y[0] = v } }",
+		want: "__device__ float stage()",
 	}}
 
 	for _, tc := range cases {

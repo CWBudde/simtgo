@@ -62,7 +62,7 @@ It compiles with the rest of the module, runs on the CPU through
 `gpu.RunCPU`, and is lowered to this:
 
 ```cuda
-extern "C" __global__ void FIR(float* y, int y_len, float* x, int x_len, float* h, int h_len)
+extern "C" __global__ void FIR(float* __restrict__ y, int y_len, const float* __restrict__ x, int x_len, const float* __restrict__ h, int h_len)
 {
 	__shared__ float tile[320];
 	int taps = h_len;
@@ -98,19 +98,25 @@ keep a shared misunderstanding from passing as agreement.
 ### The supported subset
 
 Slices lower to a pointer plus a length, so `len()` works. `:=`, `=`, compound
-assignment, `if`/`else`, three-clause `for`, `for i := range`,
+assignment, parallel assignment (`a, b = b, a`), `if`/`else`, three-clause
+`for`, `for i := range`,
 `for i, v := range`, `switch`, `break`, `continue`, their labelled forms,
 arithmetic, comparisons, indexing and conversions all translate.
 `gpu.Sqrt`, `gpu.Hypot` and friends become `sqrtf`, `hypotf`; `ctx.GlobalID()`
-becomes `blockIdx.x * blockDim.x + threadIdx.x`; `ctx.SharedF32(n)` becomes a
+becomes `(int)(blockIdx.x * blockDim.x + threadIdx.x)` — the cast is
+load-bearing, because CUDA's built-ins are unsigned and mixing them into Go's
+`int` comparisons would change answers; `ctx.SharedF32(n)` becomes a
 `__shared__` array. Struct literals and field access translate too.
 
 Grids and blocks have three axes. The unsuffixed accessors are `x`, which is
 CUDA's own spelling, and `ThreadIdxY`, `BlockIdxZ`, `GlobalIDY` and the rest
 are the other two; `GlobalID` also answers to `GlobalIDX`, because next to
 `GlobalIDY` the bare name reads like an oversight. Each is one built-in rather
-than a tuple — `x, y := ctx.GlobalID2()` would need multiple assignment, which
-the subset does not have. The host side matches: `Kernel.LaunchDim` and
+than a tuple. `x, y := ctx.GlobalID2()` is the _tuple_ form, which is still
+refused: a device function lowers to one C return type, and returning two
+would need out-parameters. Parallel assignment, which the subset now has, is a
+different feature and does not bring it closer — an intrinsic returning a pair
+would be destructured before any of that machinery ran. The host side matches: `Kernel.LaunchDim` and
 `gpu.RunCPUDim` take a three-axis extent, `Launch` and `RunCPU` stay the
 one-dimensional spelling, and `AssumeBlockDim` counts threads per block across
 all three axes, so a 16×16 block satisfies `AssumeBlockDim(256)`.
@@ -125,6 +131,39 @@ emitted, because in C it would leave the enclosing loop. A labelled `break` or
 `continue` becomes a `goto` to a target after the loop or at the end of its
 body; before that was implemented the label was dropped, which is the kind of
 silent mistranslation the rest of this section exists to rule out.
+
+Shared memory comes in one tile per element type — `ctx.SharedF32(n)`,
+`SharedF64`, `SharedI32`, `SharedI64`, `SharedU32`, `SharedU64` — each becoming
+a `__shared__` array of that type. `SharedF64` needs `//gocuda:float64` like
+any other double. There is no `SharedBool`: nothing wanted one, and a
+vocabulary is easier to widen than to narrow.
+
+A tile whose size is only known at launch is spelled without one:
+`ctx.SharedDynF32()` lowers to `extern __shared__ float s[];`, and its length
+travels as a generated parameter the launch fills, exactly as a slice's does.
+CUDA has a single dynamic `__shared__` block per launch, so a second such tile
+is refused — NVRTC accepts a second `extern __shared__` declaration without a
+word, of a different element type as readily as of the same one, and every one
+of them names the same bytes. Two names that silently alias is the
+mistranslation this emitter exists to refuse, and it is refused here rather
+than left to a compiler that will not object. The host side is
+`Kernel.LaunchShared`, which takes an element count; the emulator's is
+`gpu.RunCPUShared`. A dynamic tile is also what lets a kernel stop needing
+`AssumeBlockDim`, since the tile can be sized to the block instead of the block
+to the tile.
+
+Every pointer the emitter writes is `__restrict__`, and one the kernel never
+writes through is `const` as well — proved across the call graph, so a slice
+handed to a helper that writes it is not marked. `__restrict__` promises
+something Go cannot: `VecAdd(ctx, c, a, b)` may be given one buffer three
+times. So the promise is checked rather than assumed. `Kernel.Launch` compares
+the device ranges it was given and refuses an overlap with an `*AliasError`,
+and passing one slice twice to a helper that writes it is refused where it is
+lowered. Two _read-only_ parameters may share a buffer, deliberately: what
+`__restrict__` forbids is reaching a modified object through another pointer,
+so `dot(x, x)` is sound. The CPU emulator cannot check any of this — it never
+sees the caller's slices, because they arrive through a closure — and there a
+kernel is ordinary Go, where aliasing is defined.
 
 A kernel that sizes shared memory against a fixed block size says so with
 `ctx.AssumeBlockDim(n)`. It emits no code; it records the requirement, so that
@@ -151,6 +190,27 @@ is atomic enough to be faithful and deliberately not enough to hide a plain
 write racing an atomic — `go test -race` still reports that, because on the
 device it is a race too.
 
+`ctx.ShuffleF32`, `ShuffleXorI32`, `ShuffleDownF32` and the rest become
+`__shfl_sync`, `__shfl_xor_sync`, `__shfl_down_sync`; `ctx.Ballot`,
+`ctx.Any`, `ctx.All`, `ctx.ActiveMask`, `ctx.SyncWarp` and `ctx.LaneID`
+complete the warp vocabulary, and `gpu.WarpSize` is 32. NVRTC declares every
+one of them with no header included, which was measured rather than assumed.
+
+**None of them takes a participation mask.** CUDA's `_sync` forms do; the
+emitter writes `0xffffffff` and the Go-level contract is that every thread of
+the warp reaches the call — the same trade the atomics made by taking a buffer
+and an index instead of a pointer. The cost is real and worth stating: in a
+block that is not a multiple of 32 that mask names lanes which do not exist,
+which CUDA leaves undefined. Launch whole warps, and say so with
+`AssumeBlockDim` if the kernel depends on it.
+
+The emulator has no warps to borrow, so it builds one: a per-warp rendezvous
+between goroutines, with the same report-rather-than-panic discipline the
+shared tiles use. It diagnoses two things the device cannot — a call some
+threads never reach, and lanes meeting in different warp calls — and its
+`ActiveMask` is the arrival mask, which is not what the device would answer.
+A thread that has returned is not diagnosed, because CUDA permits exactly that.
+
 A kernel may call another function in its package, which is emitted as a
 `__device__` function alongside it: a prototype for each one the kernel
 reaches, then the definitions, then the entry point. Slice parameters split
@@ -158,27 +218,36 @@ into a pointer and a length there too, so the call passes both. Recursion is
 refused — there is no stack depth on the device to spend on it — and so are
 methods, generics, variadics, more than one result, and a _named_ result,
 which would be a local the body assigns to and a bare return that carries it.
-A function taking a `gpu.Ctx` **is** a kernel by the rule above, so calling
-one is refused unless it carries `//gocuda:ignore`, which already means
-"not a kernel"; the `Ctx` then vanishes from the C signature as the kernel's
-own does, and shared memory and `AssumeBlockDim` stay refused inside it,
-because both are promises about a launch. The CPU side needs nothing at all
+A function taking a `gpu.Ctx` **is** a kernel by the rule above, so calling one
+is refused unless it says otherwise. `//gocuda:device` is the spelling to
+reach for: it says what the helper _is_, and it is checked — on a function
+taking no `gpu.Ctx` it is refused, so it cannot become decoration.
+`//gocuda:ignore` still works and still means "not a kernel"; the `Ctx` then vanishes from the C signature as the kernel's
+own does. A device function may declare a shared tile of its own — that is
+block-scoped storage, which CUDA allocates once per function, and the bytes are
+accounted onto the kernel that reaches it. `AssumeBlockDim` stays refused
+there, and so does the dynamic tile: the first is a promise about a launch, and
+the second reads a length that arrives as a kernel parameter a helper cannot
+see. The CPU side needs nothing at all
 for any of this: a device function is ordinary Go, so `RunCPU` runs the very
 code the device compiles.
 
 #### Types
 
-| Go                          | CUDA                 |
-| --------------------------- | -------------------- |
-| `float32`                   | `float`              |
-| `float64`                   | `double`, opt-in     |
-| `int`, `int32`              | `int`                |
-| `int64`                     | `long long`          |
-| `uint32`                    | `unsigned int`       |
-| `uint64`                    | `unsigned long long` |
-| `bool`                      | `bool`               |
-| a named struct of the above | a CUDA `struct`      |
-| `[N]T` of the above         | `T name[N]`          |
+| Go                          | CUDA                                            |
+| --------------------------- | ----------------------------------------------- |
+| `float32`                   | `float`                                         |
+| `float64`                   | `double`, opt-in                                |
+| `int32`                     | `int`                                           |
+| `int`                       | `int`, **by value only**                        |
+| `int64`                     | `long long`                                     |
+| `uint32`                    | `unsigned int`                                  |
+| `uint64`                    | `unsigned long long`                            |
+| `bool`                      | `bool`                                          |
+| `int8`, `int16`             | `signed char`, `short`, storage only            |
+| `uint8`, `uint16`           | `unsigned char`, `unsigned short`, storage only |
+| a named struct of the above | a CUDA `struct`                                 |
+| `[N]T` of the above         | `T name[N]`                                     |
 
 The 64-bit types are `long long` and never `long`, which is 8 bytes on Linux
 and 4 on Windows.
@@ -188,8 +257,8 @@ comment. The cost is invisible in the source — the device runs a double at a
 fraction of the float32 rate, so a kernel that acquired one by accident would
 be correct and far slower — and the opt-in makes that something somebody wrote
 down. It covers the kernel's whole translation unit, device functions included;
-a helper may not carry its own, for the reason `SharedF32` and `AssumeBlockDim`
-may not either. `gpu.Sqrt` and friends stay `float32`; the double-precision
+a helper may not carry its own, for the reason `AssumeBlockDim` may not
+either. `gpu.Sqrt` and friends stay `float32`; the double-precision
 half is spelled `gpu.Sqrt64`, `gpu.Hypot64`, `gpu.Fmax64` and the rest, which
 become CUDA's unsuffixed `sqrt`, `hypot`, `fmax`. Reaching one of those without
 the directive is refused by name, and the refusal has to sit on the _call_
@@ -203,31 +272,65 @@ a struct field it is not a lost high word but a different stride, and
 `cuda.Upload` copies Go's layout regardless — so `[]int` is refused, along with
 `int` as a struct field. It used to lower cleanly and return the wrong numbers.
 
-`int8`, `int16`, `uint8` and `uint16` are refused too, and not for their width,
-which matches: Go computes `int8 * int8` in 8 bits and wraps, while C promotes
-both to `int` and truncates only at the assignment, so
-`a, b := int8(100), int8(3); a*b/2` is 22 in Go and −106 in C.
+`int8`, `int16`, `uint8` and `uint16` are **storage, not arithmetic**. They may
+be a slice element, an array element or a struct field — `[]uint8` is what an
+image buffer is — but never a variable, a parameter or a result, and no
+operator accepts one. The widths match; the arithmetic does not. Go computes
+`int8 * int8` in 8 bits and wraps, while C promotes both to `int` and truncates
+only at the assignment, so `a, b := int8(100), int8(3); a*b/2` is 22 in Go and
+−106 in C. Convert to `int32`, compute there, and convert back:
+
+```go
+v := int32(rgb[3*i])*77 + int32(rgb[3*i+1])*150 + int32(rgb[3*i+2])*29
+out[i] = uint8(v / 256)
+```
+
+Some of those operators would in fact agree — a compound assignment and `++`
+truncate at the store in both languages, and so do comparisons, `/` and `%`.
+They are refused anyway, because a rule that holds for every operator is one a
+reader can keep in their head, and because relaxing a refusal later costs
+nothing while retracting an acceptance costs a release.
 
 **A struct is laid out by Go and checked by CUDA.** The generated C carries
 what `go/types` says about the type:
 
 ```c
-struct Shape { float Floor; int Count; double Bias; };
+struct Shape
+{
+	float Floor;
+	int Count;
+	double Bias;
+};
 static_assert(sizeof(Shape) == 16, "gocuda: Shape is a different size in CUDA than in Go");
 static_assert(alignof(Shape) == 8, "gocuda: Shape is differently aligned in CUDA than in Go");
 ```
 
 The emitter never models the C ABI. It states Go's numbers and lets the C++
 compiler refuse them, so the guarantee holds wherever the kernel is built
-rather than where it was written. Offsets are missing because NVRTC compiles a
-string with no include path and so has no `offsetof`; `TestStructLayoutRoundTrip`
-pins those by reading each field back through the device instead, which
-exercises the `cuda.Upload` copy path a `static_assert` could only have had an
-opinion about. Struct literals lower positionally, because designated
-initialisers are C++20 and NVRTC defaults to C++17.
+rather than where it was written.
+
+**Every hole Go leaves is declared**, as an `unsigned char gocuda_padN[k]`
+member, the trailing one included. That is what makes the size assertion
+enough to pin the offsets, and the argument is short: with every hole spelled
+out the members already account for exactly Go's size, and C++ lays each member
+at or after the end of the one before it, so `sizeof` can only match if nothing
+further was inserted — and then every field sits where Go put it. The trailing
+member is load-bearing rather than tidy: without it, a byte inserted earlier
+could hide in the end slack and the size would still agree.
+
+This is a belt on top of braces rather than a fix for a disagreement anybody
+observed. NVRTC inserts exactly the holes Go does, so the assertions passed
+before the padding existed too; what changed is that they now _imply_ the
+offsets rather than merely being consistent with them. Offsets could not be
+asserted directly because NVRTC compiles a bare string with no include path:
+`offsetof`, `__builtin_offsetof` and `#include <cstddef>` are all unavailable,
+re-measured against 12.9 rather than taken on trust.
+
+Struct literals lower positionally and step over the padding, because
+designated initialisers are C++20 and NVRTC defaults to C++17.
 
 **An array is storage, not a value.** It can be declared, indexed, measured
-with `len` and ranged over. It cannot be a parameter — Go passes a copy and C
+with `len`, ranged over, and held as a struct field. It cannot be a parameter — Go passes a copy and C
 decays the parameter to a pointer, so a write inside the function would reach
 the caller's array — nor a result, which C cannot return at all, nor assigned
 whole, which C++ will not do. Wrap it in a struct if it has to travel; both
@@ -236,8 +339,26 @@ of reason: Go compares field by field and C++ gives a plain aggregate no
 operator at all.
 
 Everything else is **refused with a file and line**, never mistranslated:
-allocation, interfaces, goroutines, multiple assignment, methods, embedded
-fields, and any import other than package `gpu`. `simt/errors_test.go` pins
+allocation, interfaces, goroutines, tuple assignment from a call, methods,
+embedded fields, and any import other than package `gpu`. That list is
+illustrative rather than closed — the emitter carries some forty distinct
+refusal rules, and a few are worth knowing because nothing about the Go source
+suggests them:
+
+- A variable spelled like a name the emitter generates. A slice `y` brings an
+  `y_len` with it, and a C++ keyword is emitted with a trailing underscore, so
+  a local called `y_len`, or one called `int_` beside a parameter called `int`,
+  would be the same C variable as the generated one. Both compiled and returned
+  wrong numbers until they were refused.
+- `&^=`, though `&^` itself lowers — Go's only operator with no C spelling
+  becomes `a & ~b`, and the compound form has no such rewriting.
+- Parallel assignment in a `for` clause. It works as a statement; in an
+  init or post clause it does not, because the temporaries the semantics
+  require are declarations and C's comma operator carries only expressions.
+- A negative constant lane offset to a shuffle: CUDA reads those as unsigned,
+  so `-1` is lane 4294967295 rather than the neighbour the minus sign implies.
+
+`simt/errors_test.go` pins
 that boundary.
 
 ### Errors before `main()`
@@ -254,13 +375,14 @@ gocuda vet ./kernels                   # or: go vet -vettool=$(which gocuda) ./.
 kernels/bad.go:4:2: kernels may not import math (only github.com/CWBudde/gocuda/gpu is available on the device)
 kernels/bad.go:10:23: float64 needs //gocuda:float64 on kernel Bad, or on its file's package comment: the device runs double at a fraction of the float32 rate, so it is opt-in
 kernels/bad.go:10:38: []int cannot cross to the device: Go's int is 8 bytes and CUDA's int is 4, so the elements would not line up; use int32 or int64
-kernels/bad.go:11:2: multiple assignment is not supported in kernels
+kernels/bad.go:11:2: a, b := f() is not supported in kernels: a device function lowers to one C return type
 ```
 
 The analyzer runs the **same lowering** the transpiler does, rather than a
 second opinion about it, so what it accepts and what `simt.Build` accepts
 cannot drift apart. A function whose first parameter is a `gpu.Ctx` is a
-kernel; `//gocuda:ignore` in its doc comment opts one out.
+kernel; `//gocuda:device` in its doc comment says it is a helper instead, and
+`//gocuda:ignore` opts it out entirely.
 
 `go generate` writes `kernels/prebuilt/`: the generated CUDA C, its PTX, and one
 constant per kernel that lowered. A hand-written `gate.go` lists the constants
@@ -381,9 +503,10 @@ Honest limits, not papered over:
 - **No recursion.** A kernel may call another Go function, but not one that
   reaches itself. That is a deliberate refusal rather than a gap: device
   stack depth is a launch-configuration problem, not a language one.
-- **No multiple assignment**, so no tuple-returning intrinsic: the axes are
-  read one accessor at a time. It is a limit of the emitter, not of the
-  device.
+- **No tuple assignment from a call**, so no tuple-returning intrinsic: the
+  axes are read one accessor at a time. Parallel assignment works; what is
+  missing is the C ABI for a function with two results, which would be
+  out-parameters. It is a limit of the emitter, not of the device.
 - **No chained windowed operations** in the tile track: the halo of the outer
   window would need values the inner one does not have at those indices.
 - **Source-level, not IR-level.** Without a real backend there is no
@@ -415,6 +538,7 @@ cmd/gocuda/    vet and generate; calls NVRTC in process, no driver needed
 kernels/       the example kernels, embedded as source
 kernels/prebuilt/  generated: CUDA C, PTX, and the build gate
 internal/jit/  compile, cache and load, shared by both tracks
+internal/tolerance/ what "close enough" means, shared by every parity test
 examples/      vecadd, fir, magnitude, tilefir
 ```
 

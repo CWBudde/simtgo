@@ -17,6 +17,12 @@ const Classify Lowered = "Classify"
 // FIR reports that the kernel of that name lowered to CUDA C.
 const FIR Lowered = "FIR"
 
+// Gray reports that the kernel of that name lowered to CUDA C.
+const Gray Lowered = "Gray"
+
+// Histogram reports that the kernel of that name lowered to CUDA C.
+const Histogram Lowered = "Histogram"
+
 // VecAdd reports that the kernel of that name lowered to CUDA C.
 const VecAdd Lowered = "VecAdd"
 
@@ -35,6 +41,9 @@ const Softclip Lowered = "Softclip"
 // Transpose reports that the kernel of that name lowered to CUDA C.
 const Transpose Lowered = "Transpose"
 
+// WarpReduceSum reports that the kernel of that name lowered to CUDA C.
+const WarpReduceSum Lowered = "WarpReduceSum"
+
 //go:embed BandGain.compute_75.ptx
 var ptxBandGain []byte
 
@@ -43,6 +52,12 @@ var ptxClassify []byte
 
 //go:embed FIR.compute_75.ptx
 var ptxFIR []byte
+
+//go:embed Gray.compute_75.ptx
+var ptxGray []byte
+
+//go:embed Histogram.compute_75.ptx
+var ptxHistogram []byte
 
 //go:embed VecAdd.compute_75.ptx
 var ptxVecAdd []byte
@@ -62,63 +77,86 @@ var ptxSoftclip []byte
 //go:embed Transpose.compute_75.ptx
 var ptxTranspose []byte
 
+//go:embed WarpReduceSum.compute_75.ptx
+var ptxWarpReduceSum []byte
+
 func init() {
 	simt.RegisterPrebuilt(simt.Prebuilt{
 		Name:         "BandGain",
-		SourceSHA256: "90af0d5375f0ae737706a1ee7eb53690b2613e2b3ea2940639ef82197f0ca985",
+		SourceSHA256: "9eafec934c408834e8889058820fad34fece8ccfaaa28196e523562b45e69b72",
 		Arch:         "compute_75",
 		PTX:          ptxBandGain,
 	})
 	simt.RegisterPrebuilt(simt.Prebuilt{
 		Name:         "Classify",
-		SourceSHA256: "e3028060d7d017aa7a9ac12aa82b3ea795e7fcc9106e5b64af960d86f8d4fab3",
+		SourceSHA256: "cd62392c21837f683670edc4587938ee3d5dea0ea9fbde21d9ba0f77ce58e7a5",
 		Arch:         "compute_75",
 		PTX:          ptxClassify,
 	})
 	simt.RegisterPrebuilt(simt.Prebuilt{
 		Name:          "FIR",
-		SourceSHA256:  "2f63dc9c83677287b49d35709334d694d26082261948e92c3f4183325466c4b3",
+		SourceSHA256:  "1985b2a4ba486d79a94459a5ae56248ac6d0fb08a1958169eb5bca2029baac49",
 		Arch:          "compute_75",
 		PTX:           ptxFIR,
 		RequiredBlock: 256,
 		SharedBytes:   1280,
 	})
 	simt.RegisterPrebuilt(simt.Prebuilt{
+		Name:         "Gray",
+		SourceSHA256: "32e62e5b9731fccce2ef7455b3fedccf74acb85d2f625a870e3a92a9bd3ccabc",
+		Arch:         "compute_75",
+		PTX:          ptxGray,
+	})
+	simt.RegisterPrebuilt(simt.Prebuilt{
+		Name:         "Histogram",
+		SourceSHA256: "cbd70f35b2409de6f95a6c76ff8742b61474b392f0ef32c5f1ad5f02337f0e1f",
+		Arch:         "compute_75",
+		PTX:          ptxHistogram,
+		SharedBytes:  1024,
+	})
+	simt.RegisterPrebuilt(simt.Prebuilt{
 		Name:         "VecAdd",
-		SourceSHA256: "683f2a741de7218bc7982b927b905a8faf58c2aaf4dda842502848ae90e405bb",
+		SourceSHA256: "c5b07a0b8b58c6acccda08829896f1db27f36aa997c746cc77f072c338fb2de9",
 		Arch:         "compute_75",
 		PTX:          ptxVecAdd,
 	})
 	simt.RegisterPrebuilt(simt.Prebuilt{
 		Name:         "Magnitude",
-		SourceSHA256: "0208c6b9cb59e380875cf5dc98a219aed0011a716bf1c51774562d5832d092a8",
+		SourceSHA256: "60d47c4028feec42e543b07199bd4071064286a9b83cbb31e2e4fb291ab72401",
 		Arch:         "compute_75",
 		PTX:          ptxMagnitude,
 	})
 	simt.RegisterPrebuilt(simt.Prebuilt{
 		Name:         "Scale",
-		SourceSHA256: "d1d7367069cb2aa540f2ec71543d5a06e9c750d56ba32d3a925e4a5b80c29911",
+		SourceSHA256: "7384053016639e4f63b1d2c022147b9d8597c5251f113b94f5318d184609d0a9",
 		Arch:         "compute_75",
 		PTX:          ptxScale,
 	})
 	simt.RegisterPrebuilt(simt.Prebuilt{
 		Name:         "Quantize",
-		SourceSHA256: "0e1ed9f2def451a1bfb27a35c059b00c560597065ace9da2fc3195f50e70ce3d",
+		SourceSHA256: "c1ec7e665682ccd4ad48c36d94e51da53ab8065954b628748780a96dcd6b9bde",
 		Arch:         "compute_75",
 		PTX:          ptxQuantize,
 	})
 	simt.RegisterPrebuilt(simt.Prebuilt{
 		Name:         "Softclip",
-		SourceSHA256: "e301c0219effdb34fc61c4157818a70bd4542be3d3f429538ed88b7a91b1713b",
+		SourceSHA256: "aa7e4d086d80093c152f91b48ef244f5af0da8d9086e31df77ed658893b5f843",
 		Arch:         "compute_75",
 		PTX:          ptxSoftclip,
 	})
 	simt.RegisterPrebuilt(simt.Prebuilt{
 		Name:          "Transpose",
-		SourceSHA256:  "12cb95ae7abf5fc85843bc6970e7f5c19caf741f90335190dae3a5b77b4b013e",
+		SourceSHA256:  "7af1809319b9e33c947c21b93f77c3f2d173008597752a692fbf8fc4d6191069",
 		Arch:          "compute_75",
 		PTX:           ptxTranspose,
 		RequiredBlock: 256,
 		SharedBytes:   1024,
+	})
+	simt.RegisterPrebuilt(simt.Prebuilt{
+		Name:          "WarpReduceSum",
+		SourceSHA256:  "6dddba13701488caaba9816d81a949bae99e1647d75209fa2afb483e2f4765d2",
+		Arch:          "compute_75",
+		PTX:           ptxWarpReduceSum,
+		RequiredBlock: 128,
 	})
 }

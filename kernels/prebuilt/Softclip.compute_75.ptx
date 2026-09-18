@@ -41,7 +41,7 @@
 	cvt.s64.s32 	%rd1, %r1;
 	mul.wide.s32 	%rd5, %r1, 4;
 	add.s64 	%rd6, %rd4, %rd5;
-	ld.global.f32 	%f10, [%rd6];
+	ld.global.nc.f32 	%f10, [%rd6];
 	abs.f32 	%f2, %f10;
 	setp.le.f32 	%p2, %f2, %f6;
 	@%p2 bra 	$L__BB0_4;

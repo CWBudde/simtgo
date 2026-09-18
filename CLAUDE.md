@@ -9,7 +9,10 @@ Rust_ post with two Go analogues: a **SIMT track** (`simt`) that lowers a Go
 subset to CUDA C at the source level, and a **tile track** (`tile`) that
 records a graph of ops and fuses it into one generated kernel. `README.md` is
 the full design rationale; `PLAN.md` is the roadmap from PoC to 1.0 and tracks
-which phases are done.
+which phases are done. `SPEC.md` is the contract — what the subset accepts and
+refuses, checked against `simt/errors_test.go` by `simt/spec_test.go` — and
+`NUMERICS.md` says what the device does to a `float32` and what a test may
+therefore assert.
 
 ## Commands
 
@@ -24,7 +27,7 @@ GOCUDA_UPDATE=1 go test -run TestGolden ./simt/   # refresh simt/testdata/*.cu g
 
 go run ./cmd/gocuda vet ./kernels    # refuse kernels that cannot be lowered
 go vet -vettool=$(which gocuda) ./...
-go run ./cmd/gocuda generate -check  # are the committed artifacts current? (CI check)
+go run ./cmd/gocuda generate -check  # is the committed CUDA C current? (CI check)
 go generate ./...                    # regenerate kernels/prebuilt (needs NVRTC)
 go run ./cmd/gocuda generate -pkg ./kernels -out ./kernels/prebuilt -no-ptx   # no toolkit
 
@@ -83,16 +86,21 @@ package by go/analysis). Never re-implement a subset rule in `simt` or in the
 analyzer — put it in `lower` and both get it.
 
 - `lower.LoadPackage` parses and type-checks a kernel package; `Package.Kernel(name)`
-  lowers one function to a `*Unit` (`Source`, `RequiredBlock`, `SharedBytes`,
-  `SourceHash`). A kernel that produces any `Diagnostic` yields `(nil, diags)` —
-  half-lowered CUDA must never escape.
+  lowers one function to a `*Unit` (`Source`, `Name`, `RequiredBlock`,
+  `SharedBytes`, `DynSharedWidth`, `Params`, `SourceHash`). Everything after
+  `Source` is a **launch contract** discovered while lowering: what the source
+  demands of the launch that will run it, which is why it travels with the unit
+  rather than being restated at every launch site. A kernel that produces any
+  `Diagnostic` yields `(nil, diags)` — half-lowered CUDA must never escape.
 - `lower.GPUPackage()` builds `types.Package` for `gpu` **by hand**, because
   run-time type-checking has no module graph. `internal/lower/gpupkg_drift_test.go`
   compares it against the real package: **adding anything to `gpu` means
   adding it to `gpupkg.go` too**, or kernels can call it in Go and fail to
   transpile.
-- A kernel is any function whose first parameter is `gpu.Ctx`. `//gocuda:ignore`
-  in a doc comment (or a file's package comment) opts out.
+- A kernel is any function whose first parameter is `gpu.Ctx`. `//gocuda:device`
+  in a doc comment says it is a helper rather than a kernel, and is refused on a
+  function taking no `gpu.Ctx`; `//gocuda:ignore`, in a doc comment or a file's
+  package comment, opts out entirely.
 - `Unit.SourceHash` hashes the _generated CUDA C_, not the Go source. That is
   the whole staleness story: a prebuilt is filed under it, so an artifact built
   from anything else is simply not found and `Build` falls back to NVRTC.
@@ -109,8 +117,9 @@ kernel package itself (it is type-checked as one unit and may import only `gpu`)
 `generate` refuses `-out == -pkg`.
 
 **Build/launch path.** `simt.Build` transpiles _even when a prebuilt exists_ —
-lowering is what produces the hash, and it keeps `RequiredBlock`/`SharedBytes`
-derived from the source in hand. `internal/jit` then either loads registered
+lowering is what produces the hash, and it keeps the launch contracts
+(`RequiredBlock`, `SharedBytes`, `DynSharedWidth`, `Params`) derived from the
+source in hand rather than trusted from an artifact. `internal/jit` then either loads registered
 PTX or calls NVRTC, caching modules per `cuda.Context` (never package-global —
 a module dies with its context). `.gocuda-cache/` receives the `.cu`/`.ptx`
 that were actually used, for inspection; it is gitignored, and per-`Build`
@@ -132,7 +141,21 @@ reference, so a shared misunderstanding cannot pass as agreement.
 
 - **Refuse, never mistranslate.** Anything outside the subset gets a
   `Diagnostic` with a position. `simt/errors_test.go` pins that boundary —
-  extend it when the subset moves.
+  extend it when the subset moves, and `SPEC.md` with it, or `simt/spec_test.go`
+  fails. It checks both ways: a refusal the code enforces and the contract
+  omits, and a rule the contract claims that nothing pins.
+- **A barrier is on the block's common path.** `ctx.SyncThreads()` and the
+  `_sync` warp built-ins are refused under a thread-varying condition, inside a
+  loop whose trip count varies between threads, or after a thread-varying
+  `return` (`internal/lower/diverge.go`, interprocedural, following
+  `readonly.go`'s shape). Block-uniform — and so fine to branch on — are
+  `BlockIdx*`, `BlockDim*`, `GridDim*`, scalar parameters, `len()` and the
+  constants. The rules do not see inside a condition, so a short-circuited
+  `&&` can still break the warp participation promise; that is stated at the
+  site.
+- **One comparison rule.** `internal/tolerance` is the single definition of
+  what "close enough" means, and `NUMERICS.md` says when a test may demand
+  exact equality instead.
 - **Go `int` narrows to C `int`** (32-bit). This is the one deliberate
   infidelity; indices are bounded by the grid.
 - `ctx.AssumeBlockDim(n)` emits no code; it records a launch requirement that
@@ -143,9 +166,26 @@ reference, so a shared misunderstanding cannot pass as agreement.
   emitted into the same translation unit as a `__device__` function. That is
   why `lower.Kernel` takes the package's files and not just the entry point.
   Recursion is refused, and so is calling a kernel — a function taking a
-  `gpu.Ctx` is one, unless it carries `//gocuda:ignore`.
-- Kernel packages may import **only** `github.com/CWBudde/gocuda/gpu`, and only
-  `float32`/`int32`-shaped types exist on the device.
+  `gpu.Ctx` is one, unless it carries `//gocuda:device` or `//gocuda:ignore`.
+- Kernel packages may import **only** `github.com/CWBudde/gocuda/gpu`. The
+  device types are `float32`, `float64` (opt-in), `int32`, `int64`, `uint32`,
+  `uint64` and `bool`, plus named structs and fixed-size arrays of those.
+  `int8`/`int16`/`uint8`/`uint16` are **storage only** — legal as a slice
+  element, an array element or a struct field, and accepted by no operator,
+  because Go's 8- and 16-bit arithmetic wraps where C's promotes to `int`. Go's
+  `int` is refused anywhere a layout is involved: as a value it narrows, as an
+  element it is a different stride.
+- A struct's holes are emitted as `gocuda_padN` members, the trailing one
+  included. That is what makes the `sizeof` assertion imply the field offsets
+  rather than merely agree with them — NVRTC has no `offsetof` to assert them
+  directly.
+- Shared memory is one constructor per element type, plus a dynamic tile
+  (`ctx.SharedDynF32()`) whose length is a generated kernel parameter the
+  launch fills. A kernel gets **at most one** dynamic tile: CUDA has a single
+  dynamic `__shared__` block, and NVRTC accepts a second `extern __shared__`
+  declaration silently, aliasing the same bytes. A device function may declare
+  a static tile; it may not declare a dynamic one, and it may not call
+  `AssumeBlockDim`.
 - `cuda.Result` sentinels and `errors.Is` work in `!cuda` builds too — error
   handling code compiles without a toolkit.
 
@@ -159,8 +199,12 @@ reference, so a shared misunderstanding cannot pass as agreement.
 4. `go generate ./...` (or `gocuda generate -no-ptx` without a toolkit).
 5. Add it to the list in `simt/transpile_test.go`'s `TestGolden` and run with
    `GOCUDA_UPDATE=1` to create `simt/testdata/<Name>.cu`.
-6. Add a CPU/GPU parity test in `simt/parity_test.go` with an independent Go
+6. Add it to the list in `simt/nvrtc_cuda_test.go`'s `TestGeneratedCCompiles`.
+7. Add a CPU/GPU parity test in `simt/parity_test.go` with an independent Go
    reference.
+
+The kernel's name is spelled in **four** places (the gate plus steps 3, 5 and 6) and they are the usual thing to get wrong — and the usual conflict when two
+branches each add a kernel.
 
 Changing the emitter changes every `SourceHash`, so goldens _and_
 `kernels/prebuilt/` both need regenerating.

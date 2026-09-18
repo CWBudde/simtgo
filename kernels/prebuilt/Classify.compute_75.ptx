@@ -44,7 +44,7 @@
 	cvt.s64.s32 	%rd2, %r1;
 	mul.wide.s32 	%rd13, %r1, 4;
 	add.s64 	%rd14, %rd12, %rd13;
-	ld.global.f32 	%f12, [%rd14];
+	ld.global.nc.f32 	%f12, [%rd14];
 	abs.f32 	%f1, %f12;
 	setp.lt.s32 	%p2, %r17, 1;
 	mov.u32 	%r28, %r17;
@@ -60,7 +60,7 @@ $L__BB0_3:
 
 	mul.wide.s32 	%rd15, %r27, 4;
 	add.s64 	%rd3, %rd1, %rd15;
-	ld.global.f32 	%f13, [%rd3];
+	ld.global.nc.f32 	%f13, [%rd3];
 	setp.le.f32 	%p4, %f1, %f13;
 	mov.u32 	%r28, %r27;
 	@%p4 bra 	$L__BB0_12;
@@ -70,7 +70,7 @@ $L__BB0_3:
 	mov.u32 	%r28, %r17;
 	@%p5 bra 	$L__BB0_12;
 
-	ld.global.f32 	%f14, [%rd3+4];
+	ld.global.nc.f32 	%f14, [%rd3+4];
 	setp.le.f32 	%p6, %f1, %f14;
 	mov.u32 	%r28, %r4;
 	@%p6 bra 	$L__BB0_12;
@@ -80,7 +80,7 @@ $L__BB0_3:
 	mov.u32 	%r28, %r17;
 	@%p7 bra 	$L__BB0_12;
 
-	ld.global.f32 	%f15, [%rd3+8];
+	ld.global.nc.f32 	%f15, [%rd3+8];
 	setp.le.f32 	%p8, %f1, %f15;
 	mov.u32 	%r28, %r5;
 	@%p8 bra 	$L__BB0_12;
@@ -90,7 +90,7 @@ $L__BB0_3:
 	mov.u32 	%r28, %r17;
 	@%p9 bra 	$L__BB0_12;
 
-	ld.global.f32 	%f16, [%rd3+12];
+	ld.global.nc.f32 	%f16, [%rd3+12];
 	setp.le.f32 	%p10, %f1, %f16;
 	mov.u32 	%r28, %r6;
 	@%p10 bra 	$L__BB0_12;
@@ -139,13 +139,13 @@ $L__BB0_18:
 	mov.u64 	%rd20, %rd1;
 
 $L__BB0_21:
-	ld.global.f32 	%f25, [%rd20];
+	ld.global.nc.f32 	%f25, [%rd20];
 	add.f32 	%f26, %f39, %f25;
-	ld.global.f32 	%f27, [%rd20+4];
+	ld.global.nc.f32 	%f27, [%rd20+4];
 	add.f32 	%f28, %f26, %f27;
-	ld.global.f32 	%f29, [%rd20+8];
+	ld.global.nc.f32 	%f29, [%rd20+8];
 	add.f32 	%f30, %f28, %f29;
-	ld.global.f32 	%f31, [%rd20+12];
+	ld.global.nc.f32 	%f31, [%rd20+12];
 	add.f32 	%f39, %f30, %f31;
 	add.s32 	%r31, %r31, 4;
 	add.s64 	%rd20, %rd20, 16;
@@ -162,7 +162,7 @@ $L__BB0_22:
 
 $L__BB0_24:
 	.pragma "nounroll";
-	ld.global.f32 	%f32, [%rd21];
+	ld.global.nc.f32 	%f32, [%rd21];
 	add.f32 	%f39, %f39, %f32;
 	add.s64 	%rd21, %rd21, 4;
 	add.s32 	%r32, %r32, -1;

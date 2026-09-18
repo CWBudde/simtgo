@@ -68,8 +68,21 @@ func (t *transpiler) stmt(s ast.Stmt) {
 }
 
 func (t *transpiler) assign(s *ast.AssignStmt) {
-	if len(s.Lhs) != 1 || len(s.Rhs) != 1 {
-		t.fail(s.Pos(), "multiple assignment is not supported in kernels")
+	if len(s.Lhs) > 1 {
+		if len(s.Rhs) != len(s.Lhs) {
+			// Go allows exactly two shapes, and only one of them is a
+			// question about the emitter: `a, b = c, d` pairs off, while
+			// `a, b := f()` needs something to return a pair.
+			t.failTupleAssign(s)
+			return
+		}
+		t.parallelAssign(s)
+		return
+	}
+	if len(s.Rhs) != 1 {
+		// go/types has already refused this; the guard keeps the indexing
+		// below honest rather than describing anything.
+		t.fail(s.Pos(), "unsupported assignment")
 		return
 	}
 	lhs, rhs := s.Lhs[0], s.Rhs[0]
@@ -80,9 +93,9 @@ func (t *transpiler) assign(s *ast.AssignStmt) {
 			t.fail(s.Pos(), "unsupported declaration target %T", lhs)
 			return
 		}
-		if n, isShared, ok := t.sharedSize(rhs); isShared {
+		if req, isShared, ok := t.sharedCall(rhs); isShared {
 			if ok {
-				t.shared(id, n, s.Pos())
+				t.shared(id, req, s.Pos())
 			} else {
 				t.poison(t.info.Defs[id])
 			}
@@ -114,14 +127,223 @@ func (t *transpiler) define(id *ast.Ident, rhs ast.Expr) string {
 		t.poison(obj)
 		return ""
 	}
+	decl, ok := t.declare(id)
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("%s = %s", decl, t.expr(rhs).s)
+}
+
+// declare renders `T name` for the variable id introduces, and reports whether
+// that variable has a device type at all.
+//
+// It is define's first half, split out because a parallel assignment declares
+// its variables in the second phase and initialises each from a temporary
+// rather than from the expression it was written with.
+func (t *transpiler) declare(id *ast.Ident) (string, bool) {
+	obj := t.info.Defs[id]
+	if obj == nil {
+		t.fail(id.Pos(), "%s has no resolved type", id.Name)
+		return "", false
+	}
 	before := len(t.diags)
 	decl := t.cdecl(obj.Type(), cname(id.Name), id.Pos())
 	if len(t.diags) > before {
 		// The variable exists but has no device type. Every later use of it
 		// would be a fresh complaint about the same declaration.
 		t.poison(obj)
+		return "", false
 	}
-	return fmt.Sprintf("%s = %s", decl, t.expr(rhs).s)
+	return decl, true
+}
+
+// failTupleAssign refuses `a, b := f()`.
+//
+// This is the half of multiple assignment that is not a statement problem but
+// an ABI one. A device function lowers to a C function with one return type,
+// and a pair would have to come back through out-parameters -- which the
+// subset cannot even spell, having no address-of: `&x` is something only the
+// emitter writes. Nothing else in Go produces two values here either: maps,
+// channels and type assertions are all outside the subset already.
+func (t *transpiler) failTupleAssign(s *ast.AssignStmt) {
+	t.fail(s.Pos(), "assigning %d values from one expression is not supported in kernels: "+
+		"a device function lowers to one C return value, and returning a pair would need out-parameters, "+
+		"which the subset has no address-of to spell", len(s.Lhs))
+}
+
+// parallelAssign lowers `a, b = c, d` and `a, b := c, d`.
+//
+// Go assigns in two phases: the operands of the index expressions on the left
+// and all of the expressions on the right are evaluated first, and only then
+// is anything assigned. C has no statement that does this, so the phases are
+// written out -- one temporary per value, then the assignments. That is what
+// makes `a, b = b, a` a swap instead of two copies of b.
+//
+// The temporaries are unconditional rather than emitted only where the two
+// orders would differ. Proving that they coincide means proving that no
+// right-hand side reads anything an earlier target writes, through calls that
+// may write slices of their own, and being wrong about it is a kernel that
+// compiles and computes something else. A C++ compiler deletes a temporary
+// nobody needed; nothing recovers a swap that turned into a copy.
+func (t *transpiler) parallelAssign(s *ast.AssignStmt) {
+	if s.Tok != token.ASSIGN && s.Tok != token.DEFINE {
+		// Go has no `a, b += c, d`, so this only guards a malformed AST.
+		t.fail(s.Pos(), "unsupported assignment %s", s.Tok)
+		return
+	}
+
+	// Which objects this statement writes, which is what decides whether an
+	// index expression on the left can still be read in the second phase.
+	assigned := map[types.Object]bool{}
+	for _, lhs := range s.Lhs {
+		if id, ok := unparen(lhs).(*ast.Ident); ok {
+			if obj := t.objectOf(id); obj != nil {
+				assigned[obj] = true
+			}
+		}
+	}
+
+	// targets holds the rendered left-hand sides. An entry stays empty where
+	// the statement declares the variable instead, since the declaration is
+	// written in the second phase and there is nothing to evaluate first.
+	targets := make([]string, len(s.Lhs))
+	declares := make([]bool, len(s.Lhs))
+	for i, lhs := range s.Lhs {
+		id, isIdent := unparen(lhs).(*ast.Ident)
+		if isIdent && id.Name == "_" {
+			// The same refusal the single-assignment path gives, stated here
+			// because nothing would go on to render the identifier.
+			t.fail(id.Pos(), "the blank identifier is not supported in kernels")
+			continue
+		}
+		if s.Tok == token.DEFINE && isIdent && t.info.Defs[id] != nil {
+			declares[i] = true
+			continue
+		}
+		// A whole-array assignment is refused below, against the target's
+		// type, rather than here: refuseArrayValue reads the expression's
+		// recorded type, and the left-hand side of an assignment has none.
+		targets[i] = t.assignTarget(lhs, assigned)
+	}
+
+	// The values, in source order. Every one is evaluated before any of them
+	// is stored, which is the whole of what this statement means.
+	temps := make([]string, len(s.Rhs))
+	for i, rhs := range s.Rhs {
+		typ := t.assignedType(s, i)
+		if typ == nil {
+			continue
+		}
+		if isArray(typ) {
+			t.refuseArrayValue(rhs, s.Pos())
+			if declares[i] {
+				t.poison(t.info.Defs[unparen(s.Lhs[i]).(*ast.Ident)])
+			}
+			continue
+		}
+		// The generated name is deliberately never given back: two parallel
+		// assignments in one C scope would otherwise declare the same
+		// temporary twice, which C++ refuses.
+		temps[i] = t.reserve(baseName(s.Lhs[i]) + "_tmp")
+		t.line("%s = %s;", t.cdecl(typ, temps[i], rhs.Pos()), t.expr(rhs).s)
+	}
+
+	for i := range s.Lhs {
+		if temps[i] == "" {
+			continue
+		}
+		if declares[i] {
+			decl, ok := t.declare(unparen(s.Lhs[i]).(*ast.Ident))
+			if !ok {
+				continue
+			}
+			t.line("%s = %s;", decl, temps[i])
+			continue
+		}
+		if targets[i] == "" {
+			continue
+		}
+		t.line("%s = %s;", targets[i], temps[i])
+	}
+}
+
+// assignTarget renders one left-hand side of a parallel assignment, lifting an
+// index out into a temporary where the second phase could no longer read it.
+//
+// `i, a[i] = 1, 2` is the case: Go evaluates the subscript against the old i
+// and C would assign i first and then index with the new one. The temporary is
+// only taken where the subscript could actually change, so the ordinary
+// `a[i], a[j] = a[j], a[i]` stays legible.
+func (t *transpiler) assignTarget(lhs ast.Expr, assigned map[types.Object]bool) string {
+	idx, ok := unparen(lhs).(*ast.IndexExpr)
+	if !ok || t.stableIndex(idx.Index, assigned) {
+		return t.expr(lhs).s
+	}
+	typ := t.typeOf(idx.Index)
+	if typ == nil {
+		return ""
+	}
+	name := t.reserve(baseName(lhs) + "_idx")
+	t.line("%s = %s;", t.cdecl(typ, name, idx.Index.Pos()), t.expr(idx.Index).s)
+	return fmt.Sprintf("%s[%s]", t.expr(idx.X).at(precPostfix), name)
+}
+
+// stableIndex reports whether an index expression reads the same thing in both
+// phases of an assignment: a constant, or a variable this statement leaves
+// alone. Anything else -- arithmetic, another subscript, a call -- is treated
+// as unstable, because a right-hand side may write through a slice and the
+// cost of being wrong is silent.
+func (t *transpiler) stableIndex(e ast.Expr, assigned map[types.Object]bool) bool {
+	e = unparen(e)
+	if tv, ok := t.info.Types[e]; ok && tv.Value != nil {
+		return true
+	}
+	id, ok := e.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	obj := t.objectOf(id)
+	return obj != nil && !assigned[obj]
+}
+
+// assignedType is the type the i-th value of an assignment is stored as: the
+// target's, not the expression's, because that is what the temporary holds. An
+// untyped constant on the right has already been converted to it by go/types,
+// and a typed value is assignable to it.
+//
+// A target that is an identifier is resolved through its object rather than
+// through Types, which records expressions: the left-hand side of an
+// assignment is a use or a definition, and `a, b := x, a` -- a mixed `:=`,
+// where a already exists and b does not -- has no entry there at all.
+func (t *transpiler) assignedType(s *ast.AssignStmt, i int) types.Type {
+	if id, ok := unparen(s.Lhs[i]).(*ast.Ident); ok {
+		if obj := t.objectOf(id); obj != nil {
+			return obj.Type()
+		}
+	}
+	return t.typeOf(s.Lhs[i])
+}
+
+// baseName is the identifier a generated name for this target is derived from,
+// so that the temporaries read as belonging to what they hold.
+func baseName(e ast.Expr) string {
+	switch e := unparen(e).(type) {
+	case *ast.Ident:
+		return cname(e.Name)
+	case *ast.IndexExpr:
+		return baseName(e.X)
+	case *ast.SelectorExpr:
+		return cname(e.Sel.Name)
+	}
+	return "tmp"
+}
+
+// objectOf resolves an identifier to the object it uses or defines.
+func (t *transpiler) objectOf(id *ast.Ident) types.Object {
+	if obj := t.info.Uses[id]; obj != nil {
+		return obj
+	}
+	return t.info.Defs[id]
 }
 
 // returnStmt lowers a return. A kernel writes through its parameters and has
@@ -146,18 +368,59 @@ func (t *transpiler) returnStmt(s *ast.ReturnStmt) {
 	t.line("return %s;", t.expr(s.Results[0]).s)
 }
 
-// shared declares a block's __shared__ tile of n float32 values.
-func (t *transpiler) shared(id *ast.Ident, n int, pos token.Pos) {
-	if t.inDevice {
-		// A tile belongs to the block, and both its size and the block size it
-		// implies are accounted on the kernel -- which is what Build and
-		// Launch enforce. A device function has no launch to make promises
-		// about.
-		t.fail(pos, "shared memory may only be declared in a kernel, not in a device function")
-		return
-	}
+// sharedElems is package gpu's shared-tile vocabulary: the constructor's name,
+// and the Go element type of the tile it hands back.
+//
+// Everything else about a tile is derived from that one entry -- the C element
+// type through ctypeElem, the width through the same types.Sizes the rest of
+// the emitter measures with -- so a new element type is a row here and nothing
+// else. That is also what makes SharedF64 need //gocuda:float64 without a rule
+// of its own: ctypeElem refuses float64 on a kernel that did not opt in,
+// wherever the type came from, so membership of the double-precision
+// vocabulary is what demands the permission rather than a second list that a
+// later name could be left off.
+var sharedElems = map[string]types.BasicKind{
+	"SharedF32": types.Float32,
+	"SharedF64": types.Float64,
+	"SharedI32": types.Int32,
+	"SharedI64": types.Int64,
+	"SharedU32": types.Uint32,
+	"SharedU64": types.Uint64,
+}
+
+// sharedDynElems is the same vocabulary for the tile CUDA sizes at the launch.
+var sharedDynElems = map[string]types.BasicKind{
+	"SharedDynF32": types.Float32,
+	"SharedDynF64": types.Float64,
+	"SharedDynI32": types.Int32,
+	"SharedDynI64": types.Int64,
+	"SharedDynU32": types.Uint32,
+	"SharedDynU64": types.Uint64,
+}
+
+// sharedReq is one recognised shared-tile call: which constructor, what the
+// tile holds, how long it is, and whether the launch is what says so.
+type sharedReq struct {
+	name    string
+	elem    types.BasicKind
+	n       int // the element count, and meaningless when dynamic
+	dynamic bool
+}
+
+// shared declares a block's __shared__ tile.
+//
+// It is allowed in a device function as well as in a kernel. __shared__ inside
+// a __device__ function is block-scoped storage that CUDA allocates once for
+// the function, not once per call, and the accounting below follows suit
+// because deviceFunc emits each function exactly once however many calls reach
+// it. AssumeBlockDim stays refused there, because that one is a promise about
+// a launch rather than a piece of storage.
+func (t *transpiler) shared(id *ast.Ident, req sharedReq, pos token.Pos) {
 	if t.ind != 1 {
-		t.fail(pos, "shared memory must be declared at the top level of the kernel")
+		// The top level of the enclosing function, which is the kernel's body
+		// or a device function's: a tile declared inside a conditional is one
+		// the threads of a block could disagree about.
+		t.fail(pos, "shared memory must be declared at the top level of the function")
 		return
 	}
 	obj := t.info.Defs[id]
@@ -165,47 +428,119 @@ func (t *transpiler) shared(id *ast.Ident, n int, pos token.Pos) {
 		t.fail(id.Pos(), "%s has no resolved type", id.Name)
 		return
 	}
-	t.line("__shared__ float %s[%d];", cname(id.Name), n)
-	t.lens[obj] = strconv.Itoa(n)
+	elem := types.Typ[req.elem]
+	// ctypeElem rather than ctype: a tile is memory with a stride, so it goes
+	// through the same gate a slice element does -- which is also where
+	// float64 without the directive is refused.
+	ctype := t.ctypeElem(elem, pos)
+	if t.failed() {
+		t.poison(obj)
+		return
+	}
+	name := cname(id.Name)
+	width := int(t.sizes.Sizeof(elem))
+
+	if req.dynamic {
+		t.dynamicShared(obj, name, ctype, width, pos)
+		return
+	}
+	t.line("__shared__ %s %s[%d];", ctype, name, req.n)
+	t.lens[obj] = strconv.Itoa(req.n)
 	// Every block gets its own copy of the tile, so the running total is what
-	// each block will ask the device for. SharedF32 is float32-only, hence the
-	// fixed element size.
-	t.sharedBytes += 4 * n
+	// each block will ask the device for.
+	t.sharedBytes += width * req.n
 }
 
-// sharedSize reports whether e is a ctx.SharedF32(n) call, and if so whether n
-// folded to a constant.
+// dynamicShared declares the tile CUDA sizes at the launch, and records what
+// the host has to be told in order to size it.
+//
+// The length cannot be a constant the way a static tile's is, so it becomes an
+// `int name_len` parameter of the kernel -- the convention a slice parameter
+// already uses -- which Kernel.LaunchShared fills from the element count it
+// was given. Everything downstream, len() included, then reads a tile exactly
+// as it reads a slice.
+func (t *transpiler) dynamicShared(obj types.Object, name, ctype string, width int, pos token.Pos) {
+	if t.inDevice {
+		// A static tile is fine in a device function; this one is not, and the
+		// difference is worth stating rather than leaving as a C identifier
+		// that was never declared. The length is a parameter of the kernel,
+		// and a device function cannot see it.
+		t.fail(pos, "a dynamically sized shared tile may only be declared in a kernel: its length is a launch parameter, which a device function cannot see")
+		return
+	}
+	if t.dynShared != "" {
+		// NVRTC accepts a second `extern __shared__` declaration without a
+		// word -- of a different element type as readily as of the same one --
+		// and every one of them names the same block of memory. Two names that
+		// silently alias is exactly the mistranslation this emitter exists to
+		// refuse, so it is refused here, where there is still a position to
+		// report it against.
+		t.fail(pos, "a kernel may declare at most one dynamically sized shared tile, and %s is already one: CUDA has a single dynamic __shared__ block per launch, so a second name would be another view of the same bytes", t.dynShared)
+		return
+	}
+	lenName := name + "_len"
+	if who, taken := t.sigNames[lenName]; taken {
+		t.fail(pos, "the length generated for dynamic shared tile %s collides with %s; rename one of them", name, who)
+		return
+	}
+	t.line("extern __shared__ %s %s[];", ctype, name)
+	t.lens[obj] = lenName
+	t.dynShared, t.dynSharedLen, t.dynSharedWidth = name, lenName, width
+}
+
+// sharedCall reports whether e is one of package gpu's shared-tile
+// constructors, and if so whether the call was well formed.
 //
 // The two answers have to be separate. "Not a shared buffer" sends the caller
-// down the ordinary declaration path; "a shared buffer whose size I have
-// already complained about" must not, because that path would go on to reject
-// the []float32 it declares as a type the device has no answer for -- a second
+// down the ordinary declaration path; "a shared buffer I have already
+// complained about" must not, because that path would go on to reject the
+// []float32 it declares as a type the device has no answer for -- a second
 // diagnostic, about a different thing, for one mistake.
-func (t *transpiler) sharedSize(e ast.Expr) (n int, isShared, ok bool) {
+func (t *transpiler) sharedCall(e ast.Expr) (req sharedReq, isShared, ok bool) {
 	call, callOK := unparen(e).(*ast.CallExpr)
 	if !callOK {
-		return 0, false, false
+		return req, false, false
 	}
 	sel, selOK := unparen(call.Fun).(*ast.SelectorExpr)
 	if !selOK {
-		return 0, false, false
+		return req, false, false
 	}
 	s := t.info.Selections[sel]
-	if s == nil || s.Kind() != types.MethodVal || !IsCtx(s.Recv()) || s.Obj().Name() != "SharedF32" {
-		return 0, false, false
+	if s == nil || s.Kind() != types.MethodVal || !IsCtx(s.Recv()) {
+		return req, false, false
+	}
+	name := s.Obj().Name()
+	if elem, isDyn := sharedDynElems[name]; isDyn {
+		if len(call.Args) != 0 {
+			t.fail(call.Pos(), "%s takes no arguments; the launch is what gives its length", name)
+			return req, true, false
+		}
+		return sharedReq{name: name, elem: elem, dynamic: true}, true, true
+	}
+	elem, isStatic := sharedElems[name]
+	if !isStatic {
+		return req, false, false
 	}
 	if len(call.Args) != 1 {
-		t.fail(call.Pos(), "SharedF32 takes one argument")
-		return 0, true, false
+		t.fail(call.Pos(), "%s takes one argument", name)
+		return req, true, false
 	}
 	n, constOK := t.constInt(call.Args[0])
 	if !constOK {
 		// A __shared__ array needs a compile-time extent, so this has to be
-		// reported rather than silently mistranslated.
-		t.fail(call.Pos(), "SharedF32 needs a constant size (got a runtime value)")
-		return 0, true, false
+		// reported rather than silently mistranslated. A length only the host
+		// knows is what the SharedDyn constructors are for, and saying so is
+		// more use than naming the rule alone.
+		t.fail(call.Pos(), "%s needs a constant size (got a runtime value); use %s, whose length the launch gives", name, dynSpelling(name))
+		return req, true, false
 	}
-	return n, true, true
+	return sharedReq{name: name, elem: elem, n: n}, true, true
+}
+
+// dynSpelling names the launch-sized constructor of the same element type, so
+// that refusing a runtime size can also say what to write instead.
+func dynSpelling(static string) string {
+	return "SharedDyn" + strings.TrimPrefix(static, "Shared")
 }
 
 // refuseArrayValue reports, and refuses, an expression whose type is an array
@@ -230,14 +565,43 @@ func (t *transpiler) refuseArrayValue(e ast.Expr, pos token.Pos) bool {
 // simple renders an assignment or increment inline, without a terminator, so
 // it can also serve as a for-loop clause.
 func (t *transpiler) simple(s ast.Stmt) string {
+	if t.failed() {
+		// A for statement renders three clauses in one call, so without this
+		// a loop whose init and post are both refused for the same reason
+		// says so twice. One statement, one diagnostic, as everywhere else.
+		return ""
+	}
 	switch s := s.(type) {
 	case nil:
 		return ""
 	case *ast.IncDecStmt:
+		if typ := t.narrowOperand(s.X); typ != "" {
+			t.fail(s.Pos(), "%s; `%s` %s read it into an int32, step that, and write it back with %s(...)",
+				narrowWhy(typ), s.Tok, narrowAnyway, typ)
+			return ""
+		}
 		return fmt.Sprintf("%s%s", t.expr(s.X).s, s.Tok)
 	case *ast.AssignStmt:
-		if len(s.Lhs) != 1 || len(s.Rhs) != 1 {
-			t.fail(s.Pos(), "multiple assignment is not supported in kernels")
+		if len(s.Lhs) > 1 {
+			if len(s.Rhs) != len(s.Lhs) {
+				t.failTupleAssign(s)
+				return ""
+			}
+			// A parallel assignment is a sequence of statements: Go evaluates
+			// every value before storing any of them, and the temporaries that
+			// takes are declarations. A for clause is one expression, and C's
+			// comma operator carries assignments but not declarations --
+			// `i = j, j = i` is not the swap it looks like. So it is refused
+			// here and supported everywhere else, rather than lowered to
+			// something that means a different thing in the one place it would
+			// be most tempting to write.
+			t.fail(s.Pos(), "multiple assignment is not supported in a for clause: "+
+				"Go evaluates every value before assigning any, which needs temporaries a clause has nowhere to put; "+
+				"write it in the loop body")
+			return ""
+		}
+		if len(s.Rhs) != 1 {
+			t.fail(s.Pos(), "unsupported assignment")
 			return ""
 		}
 		if s.Tok == token.DEFINE {
@@ -254,6 +618,21 @@ func (t *transpiler) simple(s ast.Stmt) string {
 			token.XOR_ASSIGN, token.SHL_ASSIGN, token.SHR_ASSIGN:
 			if t.refuseArrayValue(s.Lhs[0], s.Pos()) {
 				return ""
+			}
+			// A plain `=` is not an operator: `out[i] = uint8(v)` is how a
+			// computed value gets into a byte, and refusing it would leave the
+			// narrow types with nowhere to be written. Everything else here
+			// combines an operator with the store, so it goes.
+			if s.Tok != token.ASSIGN {
+				typ := t.narrowOperand(s.Lhs[0])
+				if typ == "" {
+					typ = t.narrowOperand(s.Rhs[0])
+				}
+				if typ != "" {
+					t.fail(s.Pos(), "%s; `%s` %s read it into an int32, do the arithmetic there, and write the result back with %s(...)",
+						narrowWhy(typ), s.Tok, narrowAnyway, typ)
+					return ""
+				}
 			}
 			// Both sides stand in positions that accept a whole expression, so
 			// neither needs parentheses of its own.

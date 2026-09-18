@@ -12,6 +12,7 @@ import (
 	"github.com/CWBudde/gocuda"
 	"github.com/CWBudde/gocuda/cuda"
 	"github.com/CWBudde/gocuda/gpu"
+	"github.com/CWBudde/gocuda/internal/tolerance"
 	"github.com/CWBudde/gocuda/kernels"
 	"github.com/CWBudde/gocuda/simt"
 )
@@ -42,19 +43,11 @@ func randomSignal(n int) []float32 {
 	return xs
 }
 
-func assertClose(t *testing.T, got, want []float32, tol float32) {
-	t.Helper()
-	if len(got) != len(want) {
-		t.Fatalf("length %d, want %d", len(got), len(want))
-	}
-	for i := range got {
-		d := float32(math.Abs(float64(got[i] - want[i])))
-		scale := max(float32(math.Abs(float64(want[i]))), 1)
-		if d/scale > tol {
-			t.Fatalf("element %d: gpu %v, cpu %v (delta %v)", i, got[i], want[i], d)
-		}
-	}
-}
+// The comparisons below are tolerance.AssertClose and tolerance.AssertEqual
+// rather than helpers of this file's own. The rule they apply is stated in
+// NUMERICS.md and implemented once, because two of the three places in this
+// repository that compare a float32 result are in other packages and had
+// drifted into other rules.
 
 func TestVecAddParity(t *testing.T) {
 	ctx := device(t)
@@ -82,7 +75,7 @@ func TestVecAddParity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Download: %v", err)
 	}
-	assertClose(t, got, want, 1e-6)
+	tolerance.AssertClose(t, "gpu vs cpu", got, want, 1e-6)
 }
 
 func TestScaleParity(t *testing.T) {
@@ -107,7 +100,7 @@ func TestScaleParity(t *testing.T) {
 		t.Fatalf("Launch: %v", err)
 	}
 	got, _ := dy.Download()
-	assertClose(t, got, want, 1e-6)
+	tolerance.AssertClose(t, "gpu vs cpu", got, want, 1e-6)
 }
 
 func TestMagnitudeParity(t *testing.T) {
@@ -133,7 +126,7 @@ func TestMagnitudeParity(t *testing.T) {
 		t.Fatalf("Launch: %v", err)
 	}
 	got, _ := dm.Download()
-	assertClose(t, got, want, 1e-6)
+	tolerance.AssertClose(t, "gpu vs cpu", got, want, 1e-6)
 }
 
 // TestFIRParity is the interesting one: shared memory, a halo, a barrier and
@@ -163,7 +156,7 @@ func TestFIRParity(t *testing.T) {
 		}
 		ref[i] = acc
 	}
-	assertClose(t, want, ref, 1e-5)
+	tolerance.AssertClose(t, "cpu vs reference", want, ref, 1e-5)
 
 	k, err := simt.Build(ctx, gocuda.Kernels(), "FIR")
 	if err != nil {
@@ -180,7 +173,7 @@ func TestFIRParity(t *testing.T) {
 		t.Fatalf("Launch: %v", err)
 	}
 	got, _ := dy.Download()
-	assertClose(t, got, want, 1e-5)
+	tolerance.AssertClose(t, "gpu vs cpu", got, want, 1e-5)
 }
 
 // TestClassifyParity covers the statement forms the transpiler gained
@@ -223,7 +216,7 @@ func TestClassifyParity(t *testing.T) {
 		}
 		ref[i] = gain*v + bias*0.001
 	}
-	assertClose(t, want, ref, 1e-6)
+	tolerance.AssertClose(t, "cpu vs reference", want, ref, 1e-6)
 
 	k, err := simt.Build(ctx, gocuda.Kernels(), "Classify")
 	if err != nil {
@@ -243,7 +236,7 @@ func TestClassifyParity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Download: %v", err)
 	}
-	assertClose(t, got, want, 1e-6)
+	tolerance.AssertClose(t, "gpu vs cpu", got, want, 1e-6)
 }
 
 // TestSoftclipParity covers a kernel that calls another Go function. The CPU
@@ -270,7 +263,7 @@ func TestSoftclipParity(t *testing.T) {
 		}
 		ref[i] = float32(math.Copysign(s, float64(v)))
 	}
-	assertClose(t, want, ref, 1e-6)
+	tolerance.AssertClose(t, "cpu vs reference", want, ref, 1e-6)
 
 	k, err := simt.Build(ctx, gocuda.Kernels(), "Softclip")
 	if err != nil {
@@ -288,12 +281,18 @@ func TestSoftclipParity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Download: %v", err)
 	}
-	assertClose(t, got, want, 1e-6)
+	tolerance.AssertClose(t, "gpu vs cpu", got, want, 1e-6)
 }
 
 // TestTransposeParity is the two-dimensional launch end to end: a 2-D grid of
 // 2-D blocks, staged through shared memory, emulated by RunCPUDim and
 // launched by LaunchDim.
+//
+// The comparisons are exact, and the rule in NUMERICS.md is why: a transpose
+// moves values and does arithmetic on none of them, so every float32 that
+// comes back is one that went in. It used to be spelled as a tolerance of
+// zero, which asserts the same thing while reading as though there were
+// something here to round.
 func TestTransposeParity(t *testing.T) {
 	ctx := device(t)
 	// Deliberately not multiples of the tile, so the ragged edges of the grid
@@ -315,7 +314,7 @@ func TestTransposeParity(t *testing.T) {
 			ref[x*h+y] = in[y*w+x]
 		}
 	}
-	assertClose(t, want, ref, 0)
+	tolerance.AssertEqual(t, "cpu vs reference", want, ref)
 
 	k, err := simt.Build(ctx, gocuda.Kernels(), "Transpose")
 	if err != nil {
@@ -333,7 +332,7 @@ func TestTransposeParity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Download: %v", err)
 	}
-	assertClose(t, got, want, 0)
+	tolerance.AssertEqual(t, "gpu vs cpu", got, want)
 }
 
 // TestLaunchDimCountsTheWholeBlock pins the launch contract against a 2-D
@@ -357,20 +356,6 @@ func TestLaunchDimCountsTheWholeBlock(t *testing.T) {
 	}
 	if bad.Want != 256 || bad.Got != 128 {
 		t.Errorf("BlockSizeError says want %d got %d, expected 256 and 128", bad.Want, bad.Got)
-	}
-}
-
-// assertEqual is assertClose's counterpart for types that have no tolerance to
-// speak of. An integer or a bool that disagrees is a bug, not a rounding.
-func assertEqual[T comparable](t *testing.T, name string, got, want []T) {
-	t.Helper()
-	if len(got) != len(want) {
-		t.Fatalf("%s: length %d, want %d", name, len(got), len(want))
-	}
-	for i := range got {
-		if got[i] != want[i] {
-			t.Fatalf("%s element %d: gpu %v, cpu %v", name, i, got[i], want[i])
-		}
 	}
 }
 
@@ -432,9 +417,9 @@ func TestQuantizeParity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Download clipped: %v", err)
 	}
-	assertEqual(t, "code", gotCode, code)
-	assertEqual(t, "energy", gotEnergy, energy)
-	assertEqual(t, "clipped", gotClipped, clipped)
+	tolerance.AssertEqual(t, "code", gotCode, code)
+	tolerance.AssertEqual(t, "energy", gotEnergy, energy)
+	tolerance.AssertEqual(t, "clipped", gotClipped, clipped)
 }
 
 // TestBandGainParity covers the struct half: a []Band read as a slice of
@@ -482,7 +467,7 @@ func TestBandGainParity(t *testing.T) {
 		acc := sum / float64(kernels.BandGainTaps) * float64(gain)
 		ref[i] = float32(acc+cfg.Bias) * float32(cfg.Count)
 	}
-	assertClose(t, want, ref, 1e-6)
+	tolerance.AssertClose(t, "cpu vs reference", want, ref, 1e-6)
 
 	k, err := simt.Build(ctx, gocuda.Kernels(), "BandGain")
 	if err != nil {
@@ -502,7 +487,7 @@ func TestBandGainParity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Download: %v", err)
 	}
-	assertClose(t, got, want, 1e-6)
+	tolerance.AssertClose(t, "gpu vs cpu", got, want, 1e-6)
 }
 
 // TestStructLayoutRoundTrip pins the field offsets that the generated
@@ -575,7 +560,7 @@ func StructProbe(ctx gpu.Ctx, out []float32, bands []Band, cfg Shape) {
 	if err != nil {
 		t.Fatalf("Download: %v", err)
 	}
-	assertEqual(t, "fields", got, []float32{1, 1000, 2, 2000, 7, 11, 13})
+	tolerance.AssertEqual(t, "fields", got, []float32{1, 1000, 2, 2000, 7, 11, 13})
 }
 
 // TestAtomicHistogramParity is the device half of the atomics vocabulary.
@@ -639,7 +624,7 @@ func AtomicProbe(ctx gpu.Ctx, bins []int32, x []int32) {
 	if err != nil {
 		t.Fatalf("Download: %v", err)
 	}
-	assertEqual(t, "bins", got, want)
+	tolerance.AssertEqual(t, "bins", got, want)
 }
 
 // TestAtomicCASParity pins the primitive the others cannot stand in for: every
@@ -737,5 +722,572 @@ func TileProbe(ctx gpu.Ctx, out []float32) {
 	if err != nil {
 		t.Fatalf("Download: %v", err)
 	}
-	assertEqual(t, "total", got, []float32{blocks * block})
+	tolerance.AssertEqual(t, "total", got, []float32{blocks * block})
+}
+
+// TestGrayParity is the narrow storage types end to end: []uint8 in, []uint8
+// out, every arithmetic step at int32.
+//
+// The reference is written out here rather than taken from the emulator run,
+// and it is exact. Integer weights are what make that possible: a float32
+// pipeline would need a tolerance, and a tolerance is where a one-bit
+// disagreement in how the two languages truncated a byte would hide. The whole
+// point of this kernel is that no byte is ever an operand, so nothing here may
+// be approximately right.
+func TestGrayParity(t *testing.T) {
+	ctx := device(t)
+	const n, block = 1 << 14, 256
+
+	rgb := make([]uint8, 3*n)
+	for i := range rgb {
+		// 37 is coprime with 256, so every channel takes every value; the
+		// second term keeps the three channels of a pixel from moving in step.
+		rgb[i] = uint8((i*37 + i/251) % 256)
+	}
+	// The two pixels the weights have to land on exactly. White is where a sum
+	// that did not round, or weights that did not add up to 1<<GrayShift, comes
+	// back as 254; black is where anything that carried a stray term shows.
+	for c := 0; c < 3; c++ {
+		rgb[c], rgb[3+c] = 255, 0
+	}
+
+	want := make([]uint8, n)
+	gpu.RunCPU((n+block-1)/block, block, func(c gpu.Ctx) { kernels.Gray(c, want, rgb) })
+
+	ref := make([]uint8, n)
+	for i := range ref {
+		r, g, b := int(rgb[3*i]), int(rgb[3*i+1]), int(rgb[3*i+2])
+		v := (kernels.GrayWeightR*r + kernels.GrayWeightG*g + kernels.GrayWeightB*b + 1<<(kernels.GrayShift-1)) >> kernels.GrayShift
+		ref[i] = uint8(v)
+	}
+	tolerance.AssertEqual(t, "cpu luma", want, ref)
+
+	k, err := simt.Build(ctx, gocuda.Kernels(), "Gray")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	dout, _ := cuda.NewSlice[uint8](ctx, n)
+	drgb, _ := cuda.Upload(ctx, rgb)
+	defer dout.Free()
+	defer drgb.Free()
+
+	if err := k.LaunchN(n, block, dout, drgb); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	got, err := dout.Download()
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	tolerance.AssertEqual(t, "luma", got, want)
+}
+
+// TestNarrowStorageRoundTrip pins the stride rather than the arithmetic.
+//
+// Gray covers a []uint8 computing something. What it cannot cover is the
+// other three widths, and the question they raise is the one []int leaves
+// behind: cuda.Upload copies Go's bytes, so if the device read an element at a
+// different width every value after the first would be wrong. Each buffer here
+// holds a pattern whose elements differ in every byte, and the kernel copies
+// element i of each into its own output slot, so a stride that disagreed comes
+// back as another element's value rather than as something merely close.
+//
+// The probe kernel is inline rather than committed to kernels/, for the reason
+// TestStructLayoutRoundTrip gives: it tests a rule, not a kernel anyone would
+// launch.
+func TestNarrowStorageRoundTrip(t *testing.T) {
+	ctx := device(t)
+
+	const probe = `package kernels
+
+import "github.com/CWBudde/gocuda/gpu"
+
+func NarrowProbe(ctx gpu.Ctx, out []int32, a []int8, b []uint8, c []int16, d []uint16) {
+	i := ctx.GlobalID()
+	if i >= len(a) {
+		return
+	}
+	out[4*i+0] = int32(a[i])
+	out[4*i+1] = int32(b[i])
+	out[4*i+2] = int32(c[i])
+	out[4*i+3] = int32(d[i])
+}
+`
+	src := fstest.MapFS{"probe.go": &fstest.MapFile{Data: []byte(probe)}}
+	k, err := simt.Build(ctx, src, "NarrowProbe")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	const n = 64
+	a := make([]int8, n)
+	b := make([]uint8, n)
+	c := make([]int16, n)
+	d := make([]uint16, n)
+	want := make([]int32, 4*n)
+	for i := range a {
+		// Both signs and both rails, so a signed element read as unsigned --
+		// or a "char" whose signedness the compiler chose for itself -- is a
+		// wrong number and not a coincidence.
+		a[i] = int8(i - 100)
+		b[i] = uint8(200 - i)
+		c[i] = int16(i*517 - 20000)
+		d[i] = uint16(60000 - i*601)
+		want[4*i+0] = int32(a[i])
+		want[4*i+1] = int32(b[i])
+		want[4*i+2] = int32(c[i])
+		want[4*i+3] = int32(d[i])
+	}
+
+	dout, _ := cuda.NewSlice[int32](ctx, 4*n)
+	da, _ := cuda.Upload(ctx, a)
+	db, _ := cuda.Upload(ctx, b)
+	dc, _ := cuda.Upload(ctx, c)
+	dd, _ := cuda.Upload(ctx, d)
+	defer dout.Free()
+	defer da.Free()
+	defer db.Free()
+	defer dc.Free()
+	defer dd.Free()
+
+	if err := k.LaunchN(n, 32, dout, da, db, dc, dd); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	got, err := dout.Download()
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	tolerance.AssertEqual(t, "elements", got, want)
+}
+
+// arrayFieldTaps mirrors the struct the probe below declares, so that
+// cuda.Upload copies Go's layout of exactly that type.
+//
+// The field order is chosen to leave a hole in both places one can be. N is one
+// byte and W wants four, so Go pads three; W ends at 16 and Gain wants eight,
+// which lands with nothing between them; Tag is one byte at 24 and the struct
+// is eight-aligned, so seven bytes of slack close it at 32. The emitter has to
+// declare both of those holes, and the trailing one is the interesting half --
+// a field placed wrongly earlier could otherwise hide inside it and leave
+// sizeof unchanged.
+type arrayFieldTaps struct {
+	N    uint8
+	W    [3]float32
+	Gain float64
+	Tag  uint8
+}
+
+// TestArrayFieldLayoutRoundTrip extends the struct round trip to the field
+// shape that was refused until the offsets could be pinned.
+//
+// An array member is where a size assertion says least: sizeof counts the whole
+// array, so a struct that put W one slot earlier or later would come out
+// exactly the same size. Reading each element back through the device is what
+// says where it actually is. The values differ by orders of magnitude, and the
+// second element is read from a second struct, so a slipped offset or a wrong
+// stride returns another field's number rather than a nearby one.
+func TestArrayFieldLayoutRoundTrip(t *testing.T) {
+	ctx := device(t)
+
+	const probe = `package kernels
+
+import "github.com/CWBudde/gocuda/gpu"
+
+type Taps struct {
+	N    uint8
+	W    [3]float32
+	Gain float64
+	Tag  uint8
+}
+
+//gocuda:float64
+func ArrayFieldProbe(ctx gpu.Ctx, out []float32, ts []Taps) {
+	if ctx.GlobalID() != 0 {
+		return
+	}
+	out[0] = float32(int32(ts[0].N))
+	out[1] = ts[0].W[0]
+	out[2] = ts[0].W[1]
+	out[3] = ts[0].W[2]
+	out[4] = float32(ts[0].Gain)
+	out[5] = float32(int32(ts[0].Tag))
+	out[6] = float32(int32(ts[1].N))
+	out[7] = ts[1].W[2]
+	out[8] = float32(ts[1].Gain)
+	out[9] = float32(int32(ts[1].Tag))
+}
+`
+	src := fstest.MapFS{"probe.go": &fstest.MapFile{Data: []byte(probe)}}
+	k, err := simt.Build(ctx, src, "ArrayFieldProbe")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	ts := []arrayFieldTaps{
+		{N: 3, W: [3]float32{1, 10, 100}, Gain: 1000, Tag: 5},
+		{N: 7, W: [3]float32{2, 20, 200}, Gain: 2000, Tag: 9},
+	}
+
+	dout, _ := cuda.NewSlice[float32](ctx, 10)
+	dts, _ := cuda.Upload(ctx, ts)
+	defer dout.Free()
+	defer dts.Free()
+
+	if err := k.LaunchN(1, 32, dout, dts); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	got, err := dout.Download()
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	tolerance.AssertEqual(t, "fields", got, []float32{3, 1, 10, 100, 1000, 5, 7, 200, 2000, 9})
+}
+
+// TestAliasedLaunchIsRefused is the other half of __restrict__.
+//
+// The generated C promises that a kernel's pointer parameters do not overlap,
+// and the Go source cannot make that promise: VecAdd(ctx, c, a, b) is three
+// parameters and one buffer may fill all three. So the promise is checked
+// where the buffers are known, and a launch that breaks it is refused with an
+// error instead of producing whatever that architecture's scheduler made of
+// the reordering it was told it could do.
+//
+// The accepted half is here too, and it is the half that keeps the check
+// honest: two parameters the kernel only reads may share memory, because
+// __restrict__ only forbids reaching a *modified* object through another
+// pointer. A check that refused every repeat would forbid `dot(x, x)`.
+func TestAliasedLaunchIsRefused(t *testing.T) {
+	ctx := device(t)
+	k, err := simt.Build(ctx, gocuda.Kernels(), "VecAdd")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	const n, block = 1024, 256
+	d1, _ := cuda.Upload(ctx, randomSignal(n))
+	d2, _ := cuda.Upload(ctx, randomSignal(n))
+	defer d1.Free()
+	defer d2.Free()
+
+	// c and a are the same buffer, and VecAdd writes c.
+	err = k.LaunchN(n, block, d1, d1, d2)
+	var bad *simt.AliasError
+	if !errors.As(err, &bad) {
+		t.Fatalf("launching with c and a aliased gave %v, want an AliasError", err)
+	}
+	if bad.Write != "c" || bad.Other != "a" {
+		t.Errorf("AliasError names %s and %s, want c and a", bad.Write, bad.Other)
+	}
+
+	// The two read-only parameters may be the same buffer: nothing is
+	// modified through either, so there is nothing for restrict to forbid.
+	if err := k.LaunchN(n, block, d1, d2, d2); err != nil {
+		t.Errorf("two read-only parameters sharing a buffer were refused: %v", err)
+	}
+}
+
+// TestParallelAssignmentParity runs the two-phase assignment on the device.
+//
+// It is a probe rather than a committed kernel for the reason the struct
+// round-trip is: it tests a lowering rule, not a kernel anyone would launch.
+// The expectations are written out rather than taken from RunCPU, because both
+// cases exist to catch a device doing something Go does not -- and the second
+// one would still be wrong if the emulator and the emitter made the same
+// mistake.
+//
+// The reversal is the readable half. The lifted index is the half that would
+// fail: Go evaluates the subscript in `i, y[i] = 2, 7` against the old i, so
+// the 7 lands in y[0], while a C lowering that assigned in order would put it
+// in y[2] -- code that compiles and computes something else.
+func TestParallelAssignmentParity(t *testing.T) {
+	ctx := device(t)
+
+	const probe = "package kernels\n\n" +
+		"import \"github.com/CWBudde/gocuda/gpu\"\n\n" +
+		"func ReverseProbe(ctx gpu.Ctx, y []float32) {\n" +
+		"\tif ctx.GlobalID() != 0 {\n\t\treturn\n\t}\n" +
+		"\ti := 0\n\tj := len(y) - 1\n" +
+		"\tfor i < j {\n\t\ty[i], y[j] = y[j], y[i]\n\t\ti, j = i+1, j-1\n\t}\n}\n\n" +
+		"func IndexProbe(ctx gpu.Ctx, y []float32) {\n" +
+		"\tif ctx.GlobalID() != 0 {\n\t\treturn\n\t}\n" +
+		"\ti := 0\n\ti, y[i] = 2, 7\n\ty[1] = float32(i)\n}\n"
+
+	src := fstest.MapFS{"probe.go": &fstest.MapFile{Data: []byte(probe)}}
+
+	rev, err := simt.Build(ctx, src, "ReverseProbe")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	dy, _ := cuda.Upload(ctx, []float32{1, 2, 3, 4, 5, 6, 7})
+	defer dy.Free()
+	if err := rev.Launch(1, 32, dy); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	got, err := dy.Download()
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	tolerance.AssertEqual(t, "reversed", got, []float32{7, 6, 5, 4, 3, 2, 1})
+
+	idx, err := simt.Build(ctx, src, "IndexProbe")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	dz, _ := cuda.Upload(ctx, []float32{0, 0, 0})
+	defer dz.Free()
+	if err := idx.Launch(1, 32, dz); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	got, err = dz.Download()
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	tolerance.AssertEqual(t, "lifted index", got, []float32{7, 2, 0})
+}
+
+// TestMathHelperParity runs five of the seven float32 helpers that no kernel
+// in kernels/ reaches, so that the name table in internal/lower is checked by
+// something that runs rather than only by a golden file. Fmin and Fmax are the
+// other two and have a test of their own below.
+//
+// The reference is binary64 and is not independent of the emulator: gpu.Sqrt
+// and the rest are float32(math.F(float64(x))) already, so the emulator half
+// of this comparison is a tautology. It is asserted anyway, and exactly,
+// because that identity is the contract -- a helper quietly reimplemented as a
+// float32 approximation would still pass a tolerance against itself. What the
+// binary64 reference is genuinely for is the device half: rounded once to
+// float32 it is within half an ulp of the exact value, so the distance
+// measured below is very nearly the device library's own error.
+//
+// That is also why this cannot be tightened from here. NVIDIA documents sqrtf
+// as correctly rounded under --prec-sqrt=true, logf within 1 ulp and sinf,
+// cosf and expf within 2 (CUDA C++ Programming Guide, "Mathematical
+// Functions"), which with the reference's own half ulp bounds the difference
+// at about 1.5e-7 relative. The bound used here is nearly two orders looser,
+// because nobody has run it: the figures are NVIDIA's for the library and this
+// repository has measured PTX and not SASS. NUMERICS.md records that, and
+// tightening it is work for the first person with a device.
+//
+// The probe kernel is inline rather than committed to kernels/, for the reason
+// TestStructLayoutRoundTrip gives: it tests a rule, not a kernel anyone would
+// launch.
+func TestMathHelperParity(t *testing.T) {
+	ctx := device(t)
+
+	const probe = `package kernels
+
+import "github.com/CWBudde/gocuda/gpu"
+
+func MathProbe(ctx gpu.Ctx, out, a, b []float32) {
+	i := ctx.GlobalID()
+	n := len(a)
+	if i >= n {
+		return
+	}
+	x := a[i]
+	y := b[i]
+	out[i] = gpu.Sqrt(x)
+	out[n+i] = gpu.Log(x)
+	out[2*n+i] = gpu.Exp(y)
+	out[3*n+i] = gpu.Sin(y)
+	out[4*n+i] = gpu.Cos(y)
+}
+`
+	src := fstest.MapFS{"probe.go": &fstest.MapFile{Data: []byte(probe)}}
+	k, err := simt.Build(ctx, src, "MathProbe")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	// a is strictly positive and spans e**-8 to e**8, because Sqrt and Log
+	// have nothing to say below zero; b is the linear span, which is where Sin
+	// and Cos change sign repeatedly and where Exp reaches four digits.
+	const n, block, parts = 1 << 12, 256, 5
+	a := make([]float32, n)
+	b := make([]float32, n)
+	for i := range a {
+		u := float64(i)/float64(n)*16 - 8
+		a[i] = float32(math.Exp(u))
+		b[i] = float32(u)
+	}
+
+	ref := make([]float32, parts*n)
+	for i := range a {
+		x, y := float64(a[i]), float64(b[i])
+		ref[i] = float32(math.Sqrt(x))
+		ref[n+i] = float32(math.Log(x))
+		ref[2*n+i] = float32(math.Exp(y))
+		ref[3*n+i] = float32(math.Sin(y))
+		ref[4*n+i] = float32(math.Cos(y))
+	}
+
+	want := make([]float32, parts*n)
+	gpu.RunCPU((n+block-1)/block, block, func(c gpu.Ctx) { mathProbe(c, want, a, b) })
+	tolerance.AssertEqual(t, "cpu vs binary64", want, ref)
+
+	dout, _ := cuda.NewSlice[float32](ctx, parts*n)
+	da, _ := cuda.Upload(ctx, a)
+	db, _ := cuda.Upload(ctx, b)
+	defer dout.Free()
+	defer da.Free()
+	defer db.Free()
+
+	if err := k.LaunchN(n, block, dout, da, db); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	got, err := dout.Download()
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	for at, name := range []string{"Sqrt", "Log", "Exp", "Sin", "Cos"} {
+		lo, hi := at*n, (at+1)*n
+		tolerance.AssertClose(t, "gpu "+name+" vs binary64", got[lo:hi], ref[lo:hi], 1e-5)
+	}
+}
+
+// mathProbe is the Go the probe above transpiles from, so that the emulator
+// runs the same function the device does. It cannot be the probe source
+// itself: that source exists to be parsed, and Go has no way to run a string.
+//
+// The copy cannot drift silently, which is why it is tolerable. Both halves
+// are compared against the same binary64 reference rather than against each
+// other, so a change to either one alone fails rather than agreeing with
+// itself.
+func mathProbe(ctx gpu.Ctx, out, a, b []float32) {
+	i := ctx.GlobalID()
+	n := len(a)
+	if i >= n {
+		return
+	}
+	x := a[i]
+	y := b[i]
+	out[i] = gpu.Sqrt(x)
+	out[n+i] = gpu.Log(x)
+	out[2*n+i] = gpu.Exp(y)
+	out[3*n+i] = gpu.Sin(y)
+	out[4*n+i] = gpu.Cos(y)
+}
+
+// TestFminFmaxParity is the device half of the pair that was wrong until
+// recently, and the cases that made it wrong are the cases it runs.
+//
+// The emulator side is pinned by TestFminFmaxFollowTheBuiltinTheyClaimToBe in
+// package gpu, so this asks the other question: does fminf on the device do
+// what gpu.Fmin was corrected to do? Every expectation here is written out
+// from the rule rather than taken from gpu.Fmin, which would be the function
+// under test standing in for its own reference.
+//
+// Every case is compared exactly, and NUMERICS.md says why it may be: fminf
+// returns one of its operands, so there is nothing here that could have been
+// rounded. NaN is the exception the tolerance rule cannot express at all --
+// no bound relates a NaN to anything -- so the two NaN cases ask IsNaN, and
+// the signed zeros ask for the sign bit, since == cannot tell them apart.
+//
+// The signed zeros are also the one case that could legitimately fail. NVIDIA
+// documents the NaN behaviour of fminf and fmaxf and says nothing about which
+// zero comes back, so the expectation below is gpu.Fmin's rule held against
+// the device rather than the device's documented behaviour. If it fails, it is
+// gpu.Fmin that should be revisited and NUMERICS.md that should record what
+// the device actually did.
+func TestFminFmaxParity(t *testing.T) {
+	ctx := device(t)
+
+	const probe = `package kernels
+
+import "github.com/CWBudde/gocuda/gpu"
+
+func MinMaxProbe(ctx gpu.Ctx, out, a, b []float32) {
+	i := ctx.GlobalID()
+	n := len(a)
+	if i >= n {
+		return
+	}
+	out[i] = gpu.Fmin(a[i], b[i])
+	out[n+i] = gpu.Fmax(a[i], b[i])
+}
+`
+	src := fstest.MapFS{"probe.go": &fstest.MapFile{Data: []byte(probe)}}
+	k, err := simt.Build(ctx, src, "MinMaxProbe")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	nan := float32(math.NaN())
+	inf := float32(math.Inf(1))
+	negZero := float32(math.Copysign(0, -1))
+
+	// The cases whose answer is an ordinary number, so == decides them.
+	numeric := []struct {
+		name           string
+		x, y, min, max float32
+	}{
+		{"two positives", 2, 3, 2, 3},
+		{"two positives, reversed", 3, 2, 2, 3},
+		{"across zero", -1, 1, -1, 1},
+		{"a NaN on the right", 1, nan, 1, 1},
+		{"a NaN on the left", nan, 1, 1, 1},
+		{"an infinity", inf, 1, 1, inf},
+		{"a negative infinity", -inf, 1, -inf, 1},
+	}
+	// The cases == cannot decide, in the order they are indexed below.
+	special := []struct{ x, y float32 }{
+		{nan, nan},
+		{negZero, 0},
+		{0, negZero},
+	}
+
+	n := len(numeric) + len(special)
+	a := make([]float32, n)
+	b := make([]float32, n)
+	for i, c := range numeric {
+		a[i], b[i] = c.x, c.y
+	}
+	for i, c := range special {
+		a[len(numeric)+i], b[len(numeric)+i] = c.x, c.y
+	}
+
+	dout, _ := cuda.NewSlice[float32](ctx, 2*n)
+	da, _ := cuda.Upload(ctx, a)
+	db, _ := cuda.Upload(ctx, b)
+	defer dout.Free()
+	defer da.Free()
+	defer db.Free()
+
+	if err := k.LaunchN(n, 32, dout, da, db); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	got, err := dout.Download()
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	mins, maxs := got[:n], got[n:]
+
+	for i, c := range numeric {
+		if mins[i] != c.min {
+			t.Errorf("fminf(%v, %v) = %v, want %v (%s)", c.x, c.y, mins[i], c.min, c.name)
+		}
+		if maxs[i] != c.max {
+			t.Errorf("fmaxf(%v, %v) = %v, want %v (%s)", c.x, c.y, maxs[i], c.max, c.name)
+		}
+	}
+
+	// Both operands NaN is the one case with nothing to return but a NaN, and
+	// which NaN is not something this repository has an opinion about.
+	bothNaN := len(numeric)
+	if !math.IsNaN(float64(mins[bothNaN])) {
+		t.Errorf("fminf(NaN, NaN) = %v, want a NaN", mins[bothNaN])
+	}
+	if !math.IsNaN(float64(maxs[bothNaN])) {
+		t.Errorf("fmaxf(NaN, NaN) = %v, want a NaN", maxs[bothNaN])
+	}
+
+	// -0 and +0 in both orders. fminf is expected to prefer the negative zero
+	// and fmaxf the positive one, whichever way round they arrived.
+	for i, c := range special[1:] {
+		at := len(numeric) + 1 + i
+		if !math.Signbit(float64(mins[at])) {
+			t.Errorf("fminf(%v, %v) returned +0, want -0", c.x, c.y)
+		}
+		if math.Signbit(float64(maxs[at])) {
+			t.Errorf("fmaxf(%v, %v) returned -0, want +0", c.x, c.y)
+		}
+	}
 }
