@@ -63,6 +63,13 @@ func TestUnsupported(t *testing.T) {
 		body: "func K(ctx gpu.Ctx, y []float32) { var a, b [2]float32; a = b; y[0] = a[0] }",
 		want: "cannot be assigned",
 	}, {
+		// The same move spelled as a declaration. `:=` and `=` both refused it;
+		// an explicit `var` with an initialiser went straight through and
+		// emitted `float a[2] = b;`, which C++ will not initialise either.
+		name: "whole-array var initialiser",
+		body: "func K(ctx gpu.Ctx, y []float32) { var b [2]float32; var a [2]float32 = b; y[0] = a[0] }",
+		want: "cannot be assigned",
+	}, {
 		name: "struct equality",
 		body: "type P struct{ X, Y float32 }\n\nfunc K(ctx gpu.Ctx, y []float32, a, b []P) { if a[0] == b[0] { y[0] = 1 } }",
 		want: "field by field in Go, which C cannot do",
@@ -78,6 +85,12 @@ func TestUnsupported(t *testing.T) {
 		name: "an embedded field",
 		body: "type Inner struct{ X float32 }\ntype Outer struct{ Inner }\n\nfunc K(ctx gpu.Ctx, y []float32, os []Outer) { y[0] = os[0].X }",
 		want: "embedded field",
+	}, {
+		// Two blank fields are one Go name and two C++ ones: both were emitted
+		// as `int _;` and NVRTC refused the redeclaration.
+		name: "a blank struct field",
+		body: "type P struct {\n\t_, _ int32\n\tX float32\n}\n\nfunc K(ctx gpu.Ctx, y []float32, ps []P) { y[0] = ps[0].X }",
+		want: "has a blank field",
 	}, {
 		name: "an anonymous struct type",
 		body: "func K(ctx gpu.Ctx, y []float32) { p := struct{ X float32 }{1}; y[0] = p.X }",

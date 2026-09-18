@@ -296,6 +296,16 @@ func (t *transpiler) decl(s *ast.DeclStmt) {
 					t.fail(n.Pos(), "%s has no resolved type", n.Name)
 					continue
 				}
+				if _, isArr := obj.Type().Underlying().(*types.Array); isArr && len(vs.Values) != 0 {
+					// `var a [N]T = b` moves the array as a whole, which is the
+					// same thing `a := b` and `a = b` do and which C++ refuses
+					// for all three. Without this the initialiser reached NVRTC
+					// as `float a[2] = b;`. An uninitialised `var` is fine: it
+					// gets zeroValue's `{}`, which is how C++ spells it.
+					t.refuseArrayValue(vs.Values[i], n.Pos())
+					t.poison(obj)
+					continue
+				}
 				before := len(t.diags)
 				decl := t.cdecl(obj.Type(), cname(n.Name), n.Pos())
 				if len(t.diags) > before {

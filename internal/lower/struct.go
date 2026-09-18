@@ -54,6 +54,15 @@ func (t *transpiler) structType(named *types.Named, pos token.Pos) string {
 			t.fail(f.Pos(), "%s has an embedded field %s; a device struct needs plain named fields", named.Obj().Name(), f.Name())
 			continue
 		}
+		if f.Name() == "_" {
+			// Go's blank field is padding: it takes up layout and nothing can
+			// read it. C++ has no such name, and `_` is an ordinary identifier
+			// there, so two of them in one struct emitted two `int _;` members
+			// and NVRTC rejected the redeclaration. Naming it costs the author
+			// one word and keeps the layout the assertions below pin.
+			t.fail(f.Pos(), "%s has a blank field; the device struct would need a name for it, so call it Pad or similar", named.Obj().Name())
+			continue
+		}
 		fmt.Fprintf(&b, "\t%s;\n", t.cfield(named, f))
 	}
 	b.WriteString("};\n")
