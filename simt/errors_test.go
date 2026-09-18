@@ -226,9 +226,31 @@ func TestUnsupported(t *testing.T) {
 		body: "var g []int32\n\nfunc K(ctx gpu.Ctx, y []float32) { gpu.AtomicAddI32(g, 0, 1); y[0] = 1 }",
 		want: "declared outside the kernel",
 	}, {
-		name: "multiple assignment",
-		body: "func K(ctx gpu.Ctx, a []float32) { i, j := 0, 1; a[i] = a[j] }",
-		want: "multiple assignment",
+		// The half of multiple assignment that is an ABI question rather than
+		// a statement one: C returns one value, and a pair would have to come
+		// back through out-parameters the subset cannot spell.
+		name: "assigning from a two-valued call",
+		body: "func two(x float32) (float32, float32) { return x, x }\n\n" +
+			"func K(ctx gpu.Ctx, a []float32) { p, q := two(a[0]); a[0] = p + q }",
+		want: "assigning 2 values from one expression is not supported",
+	}, {
+		// A for clause is one C expression and the temporaries the two phases
+		// need are declarations, so the parallel form is refused there and
+		// supported everywhere else.
+		name: "a parallel assignment in a for clause",
+		body: "func K(ctx gpu.Ctx, a []float32, n int32) { for i, j := 0, int(n); i < j; i, j = i+1, j-1 { a[i] = a[j] } }",
+		want: "multiple assignment is not supported in a for clause",
+	}, {
+		name: "the blank identifier in a parallel assignment",
+		body: "func K(ctx gpu.Ctx, a []float32) { v, _ := a[0], a[1]; a[0] = v }",
+		want: "the blank identifier is not supported in kernels",
+	}, {
+		// The whole-array refusal has to survive the new path: it is stated
+		// against the target's type there, because the left-hand side of an
+		// assignment has no recorded expression type to read.
+		name: "two whole arrays swapped",
+		body: "func K(ctx gpu.Ctx, y []float32) { var p, q [2]float32; p, q = q, p; y[0] = p[0] }",
+		want: "cannot be assigned",
 	}, {
 		name: "map",
 		body: "func K(ctx gpu.Ctx, a []float32) { m := map[int]int{}; a[0] = float32(m[1]) }",

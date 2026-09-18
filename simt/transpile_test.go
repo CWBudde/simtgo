@@ -399,6 +399,90 @@ func TestDeviceFunctions(t *testing.T) {
 	}
 }
 
+// TestParallelAssignment pins the two-phase lowering that `a, b = c, d` needs.
+//
+// Go evaluates every value before it stores any of them, so a swap is a swap.
+// C has no such statement, and the emitter writes the phases out: a temporary
+// per value, then the assignments. Emitting the assignments directly would
+// compile and turn `a, b = b, a` into two copies of b, which is the failure
+// this whole package is arranged to rule out.
+func TestParallelAssignment(t *testing.T) {
+	cases := []struct {
+		name, body string
+		want       []string
+		absent     []string
+	}{{
+		name: "a swap goes through temporaries",
+		body: "func K(ctx gpu.Ctx, y []float32) { a, b := y[0], y[1]; a, b = b, a; y[0] = a + b }",
+		want: []string{"float a_tmp2 = b;", "float b_tmp2 = a;", "a = a_tmp2;", "b = b_tmp2;"},
+	}, {
+		name: "a declaration declares both, after both values are evaluated",
+		body: "func K(ctx gpu.Ctx, y []float32) { a, b := y[0], y[1]; y[0] = a - b }",
+		want: []string{"float a_tmp = y[0];", "float b_tmp = y[1];", "float a = a_tmp;", "float b = b_tmp;"},
+	}, {
+		// A mixed `:=`, where a exists and b does not: a is assigned and b is
+		// declared, and the value bound to b is the *old* a.
+		name: "a mixed short declaration",
+		body: "func K(ctx gpu.Ctx, y []float32) { a := float32(1); a, b := y[0], a; y[0] = a + b }",
+		want: []string{"float b_tmp = a;", "a = a_tmp;", "float b = b_tmp;"},
+	}, {
+		// The idiom this exists for. Neither subscript is written by the
+		// statement, so neither needs a temporary of its own and the generated
+		// C still reads like the Go.
+		name:   "swapping two elements needs no index temporaries",
+		body:   "func K(ctx gpu.Ctx, y []float32, n int32) { i, j := 0, int(n); y[i], y[j] = y[j], y[i]; y[0] = float32(i + j) }",
+		want:   []string{"float y_tmp = y[j];", "float y_tmp2 = y[i];", "y[i] = y_tmp;", "y[j] = y_tmp2;"},
+		absent: []string{"_idx"},
+	}, {
+		// And the case that forces one: Go evaluates the subscript against the
+		// old i, C would index with the new one. The emitted temporary is what
+		// keeps the two the same statement.
+		name: "an index that the statement itself writes is lifted out",
+		body: "func K(ctx gpu.Ctx, y []float32) { i := 0; i, y[i] = 1, 2; y[0] = float32(i) }",
+		want: []string{"int y_idx = i;", "i = i_tmp;", "y[y_idx] = y_tmp;"},
+	}, {
+		name: "two structs swap as values",
+		body: "type P struct{ X, Y float32 }\n\n" +
+			"func K(ctx gpu.Ctx, y []float32) { p, q := P{X: 1}, P{Y: 2}; p, q = q, p; y[0] = p.X + q.Y }",
+		want: []string{"P p_tmp2 = q;", "P q_tmp2 = p;"},
+	}, {
+		// Two swaps in one C scope must not declare the same temporary twice,
+		// which is why the generated names are never handed back.
+		name: "a second parallel assignment gets its own names",
+		body: "func K(ctx gpu.Ctx, y []float32) { a, b := y[0], y[1]; a, b = b, a; a, b = b, a; y[0] = a + b }",
+		want: []string{"float a_tmp2 = b;", "float a_tmp3 = b;"},
+	}, {
+		name: "struct fields swap",
+		body: "type P struct{ X, Y float32 }\n\n" +
+			"func K(ctx gpu.Ctx, y []float32, ps []P) { ps[0].X, ps[0].Y = ps[0].Y, ps[0].X; y[0] = 1 }",
+		want: []string{"float X_tmp = ps[0].Y;", "ps[0].X = X_tmp;", "ps[0].Y = Y_tmp;"},
+	}, {
+		// The loop step the for-clause refusal sends here, so that what the
+		// refusal advises is known to work.
+		name: "a two-variable loop step in the body",
+		body: "func K(ctx gpu.Ctx, y []float32, n int32) {\n" +
+			"\ti := 0\n\tj := int(n) - 1\n" +
+			"\tfor i < j {\n\t\ty[i], y[j] = y[j], y[i]\n\t\ti, j = i+1, j-1\n\t}\n}",
+		want: []string{"int i_tmp = i + 1;", "int j_tmp = j - 1;", "i = i_tmp;", "j = j_tmp;"},
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := transpile(t, tc.body).Source
+			for _, w := range tc.want {
+				if !strings.Contains(got, w) {
+					t.Errorf("generated CUDA does not contain %q:\n%s", w, got)
+				}
+			}
+			for _, w := range tc.absent {
+				if strings.Contains(got, w) {
+					t.Errorf("generated CUDA contains %q, which it should not:\n%s", w, got)
+				}
+			}
+		})
+	}
+}
+
 // TestDeviceFunctionEmittedOnce keeps a helper reached by two paths from being
 // defined twice, which C would refuse.
 func TestDeviceFunctionEmittedOnce(t *testing.T) {

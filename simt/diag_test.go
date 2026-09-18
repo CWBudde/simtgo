@@ -29,8 +29,10 @@ func refuse(t *testing.T, body string) []simt.Diagnostic {
 // TestSeveralDiagnostics is the point of collecting rather than latching: a
 // kernel with three unrelated problems must report three, not the first.
 func TestSeveralDiagnostics(t *testing.T) {
-	diags := refuse(t, `func K(ctx gpu.Ctx, a []float32) {
-	i, j := 0, 1
+	diags := refuse(t, `func pair() (int, int) { return 0, 1 }
+
+func K(ctx gpu.Ctx, a []float32) {
+	i, j := pair()
 	go func() {}()
 	var m map[int]int
 	a[i] = float32(j) + float32(len(m))
@@ -38,7 +40,7 @@ func TestSeveralDiagnostics(t *testing.T) {
 	if len(diags) != 3 {
 		t.Fatalf("got %d diagnostics, want 3:\n%s", len(diags), render(diags))
 	}
-	for _, want := range []string{"multiple assignment", "unsupported statement", "map[int]int"} {
+	for _, want := range []string{"assigning 2 values", "unsupported statement", "map[int]int"} {
 		if !strings.Contains(render(diags), want) {
 			t.Errorf("diagnostics do not mention %q:\n%s", want, render(diags))
 		}
@@ -50,8 +52,10 @@ func TestSeveralDiagnostics(t *testing.T) {
 // not silence the rest of the kernel, not even across a statement that lowers
 // perfectly well.
 func TestDiagnosticsResumeAfterAGoodStatement(t *testing.T) {
-	diags := refuse(t, `func K(ctx gpu.Ctx, a []float32) {
-	i, j := 0, 1
+	diags := refuse(t, `func pair() (int, int) { return 0, 1 }
+
+func K(ctx gpu.Ctx, a []float32) {
+	i, j := pair()
 	a[i] = 1
 	go func() {}()
 	a[j] = 2
