@@ -14,7 +14,7 @@ import (
 // TestGolden pins the generated CUDA for every example kernel. Run with
 // GOCUDA_UPDATE=1 to refresh the golden files after an intentional change.
 func TestGolden(t *testing.T) {
-	for _, name := range []string{"VecAdd", "Magnitude", "Scale", "FIR", "Classify", "Softclip", "Transpose", "Quantize", "BandGain"} {
+	for _, name := range []string{"VecAdd", "Magnitude", "Scale", "FIR", "Classify", "Softclip", "Transpose", "Quantize", "BandGain", "Histogram"} {
 		t.Run(name, func(t *testing.T) {
 			u, err := simt.Transpile(gocuda.Kernels(), name)
 			if err != nil {

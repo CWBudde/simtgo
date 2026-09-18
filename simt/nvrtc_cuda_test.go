@@ -279,7 +279,7 @@ func TestGeneratedCCompiles(t *testing.T) {
 
 	// The committed kernels go through the same gate, so a kernel that stops
 	// compiling is caught here and not at some later launch.
-	for _, name := range []string{"VecAdd", "Magnitude", "Scale", "FIR", "Classify", "Softclip", "Transpose", "Quantize", "BandGain"} {
+	for _, name := range []string{"VecAdd", "Magnitude", "Scale", "FIR", "Classify", "Softclip", "Transpose", "Quantize", "BandGain", "Histogram"} {
 		t.Run(name, func(t *testing.T) {
 			u, err := simt.Transpile(gocuda.Kernels(), name)
 			if err != nil {

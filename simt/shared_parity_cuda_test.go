@@ -21,7 +21,8 @@ import (
 //
 // The probe kernels are inline rather than committed, for the reason
 // TestStructLayoutRoundTrip gives: they test a rule, not a kernel anyone would
-// launch.
+// launch. Histogram is the exception, and is committed, because privatising a
+// histogram in shared memory is the thing itself rather than a rule about it.
 
 // TestSharedProbesCompile puts the probe kernels above through NVRTC.
 //
@@ -60,6 +61,50 @@ func histogram(x []int32, bins int) []int32 {
 		}
 	}
 	return out
+}
+
+// TestHistogramParity is the committed kernel: an int32 tile, atomics into it,
+// a barrier, and one fold into global memory per block.
+//
+// It proves the two halves together. A tile that was not really per block would
+// double-count across the grid, and an add that was not really atomic would
+// lose updates inside a block; either shows up as a bin the loop above does not
+// agree with.
+func TestHistogramParity(t *testing.T) {
+	ctx := device(t)
+	k, err := simt.Build(ctx, gocuda.Kernels(), "Histogram")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if want := 4 * 256; k.SharedBytes != want {
+		t.Errorf("SharedBytes = %d, want %d for a 256-element int32 tile", k.SharedBytes, want)
+	}
+
+	const n, bins = 1 << 15, 256
+	x := make([]int32, n)
+	for i := range x {
+		// Deliberately uneven, and with values outside the range as well, so
+		// that a bin nobody writes stays visibly zero and the kernel's choice
+		// to drop out-of-range samples is exercised rather than assumed.
+		x[i] = int32(i*i%311) - 8
+	}
+
+	// Uploaded zeros rather than NewSlice: the kernel only ever adds to these
+	// bins, so an uninitialised allocation would be counted as part of the
+	// histogram.
+	dbins, _ := cuda.Upload(ctx, make([]int32, bins))
+	dx, _ := cuda.Upload(ctx, x)
+	defer dbins.Free()
+	defer dx.Free()
+
+	if err := k.LaunchN(n, 256, dbins, dx); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	got, err := dbins.Download()
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	assertEqual(t, "bins", got, histogram(x, bins))
 }
 
 // dynProbe privatises a histogram in shared memory, with the tile sized at
