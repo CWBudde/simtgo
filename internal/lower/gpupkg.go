@@ -201,6 +201,9 @@ func sortedKeys[V any](m map[string]V) []string {
 // which keeps the supported kernel vocabulary explicit.
 type SynthImporter struct{ GPU *types.Package }
 
+// Import serves package gpu and refuses every other path, so that a kernel
+// importing anything else is reported as the subset rule it broke rather than
+// as a package the type checker could not find.
 func (im SynthImporter) Import(path string) (*types.Package, error) {
 	if path == GPUPkgPath {
 		return im.GPU, nil

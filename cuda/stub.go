@@ -68,7 +68,7 @@ func (m *Module) Unload() error { return ErrNoCUDA }
 // Function is a placeholder for a kernel entry point.
 type Function struct{}
 
-// Launch runs the kernel.
+// LaunchSync runs the kernel and waits for it.
 func (f *Function) LaunchSync(grid, block Dim3, sharedBytes int, args ...Arg) error {
 	return ErrNoCUDA
 }

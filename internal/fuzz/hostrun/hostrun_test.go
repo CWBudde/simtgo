@@ -563,7 +563,7 @@ func TestFminFmaxAgreeOnTheZeros(t *testing.T) {
 	t.Run("float32", func(t *testing.T) {
 		zerosStayPinned(t, single, func(x float32) uint64 { return uint64(math.Float32bits(x)) }, 1<<31,
 			func(a, b float32) (out [4]float32) {
-				gpu.RunCPU(1, 1, func(c gpu.Ctx) {
+				gpu.RunCPU(1, 1, func(_ gpu.Ctx) {
 					out[0], out[1] = gpu.Fmin(a, b), gpu.Fmax(a, b)
 					out[2], out[3] = gpu.Fmin(b, a), gpu.Fmax(b, a)
 				})
@@ -573,7 +573,7 @@ func TestFminFmaxAgreeOnTheZeros(t *testing.T) {
 	t.Run("float64", func(t *testing.T) {
 		zerosStayPinned(t, double, math.Float64bits, 1<<63,
 			func(a, b float64) (out [4]float64) {
-				gpu.RunCPU(1, 1, func(c gpu.Ctx) {
+				gpu.RunCPU(1, 1, func(_ gpu.Ctx) {
 					out[0], out[1] = gpu.Fmin64(a, b), gpu.Fmax64(a, b)
 					out[2], out[3] = gpu.Fmin64(b, a), gpu.Fmax64(b, a)
 				})

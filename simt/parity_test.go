@@ -754,7 +754,7 @@ func TestGrayParity(t *testing.T) {
 	// The two pixels the weights have to land on exactly. White is where a sum
 	// that did not round, or weights that did not add up to 1<<GrayShift, comes
 	// back as 254; black is where anything that carried a stray term shows.
-	for c := 0; c < 3; c++ {
+	for c := range 3 {
 		rgb[c], rgb[3+c] = 255, 0
 	}
 

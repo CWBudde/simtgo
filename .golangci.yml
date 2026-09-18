@@ -56,6 +56,11 @@ linters:
     # a leftover or a missing branch, and the two are indistinguishable from
     # the outside -- which is the reason to have neither.
     - wastedassign
+    # The godot/misspell argument extended to the comments that are not there:
+    # revive's `exported` rule is what keeps a new exported name from shipping
+    # undocumented. Its `unused-parameter` and `redefines-builtin-id` rules
+    # come with it and both earned their place above.
+    - revive
 
   settings:
     errcheck:
@@ -85,6 +90,17 @@ linters:
         linters:
           - gocritic
         text: ifElseChain
+      # Every parameter in stub.go is unused by construction: the file is the
+      # API a machine with no CUDA sees, and each function returns ErrNoCUDA
+      # without looking at anything. The names are not decoration, they are the
+      # whole of that build's godoc -- `Alloc(n int)` documents itself, and
+      # `Alloc(_ int)` documents nothing. surface_test.go compares exported
+      # *names* against the tagged driver and would pass either way, which is
+      # exactly why the choice has to be made here and argued.
+      - path: ^cuda/stub\.go$
+        linters:
+          - revive
+        text: unused-parameter
       # A deferred Close on a CUDA context in an example or a test has nowhere
       # to report to: the process is on its way out and the device teardown is
       # not what the example or the test is demonstrating.

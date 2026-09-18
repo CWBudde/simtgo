@@ -45,10 +45,14 @@ import (
 // the driver bindings; the two meet at the launch boundary instead.
 type Dim struct{ X, Y, Z int }
 
-// D1, D2 and D3 build an extent of the given rank, leaving the axes above it
-// at one, which is what CUDA treats an unused axis as.
-func D1(x int) Dim       { return Dim{X: x, Y: 1, Z: 1} }
-func D2(x, y int) Dim    { return Dim{X: x, Y: y, Z: 1} }
+// D1 builds a one-dimensional extent. It, D2 and D3 leave the axes above
+// their own rank at one, which is what CUDA treats an unused axis as.
+func D1(x int) Dim { return Dim{X: x, Y: 1, Z: 1} }
+
+// D2 builds a two-dimensional extent.
+func D2(x, y int) Dim { return Dim{X: x, Y: y, Z: 1} }
+
+// D3 builds an extent of full rank.
 func D3(x, y, z int) Dim { return Dim{X: x, Y: y, Z: z} }
 
 // count is how many threads (or blocks) the extent holds.

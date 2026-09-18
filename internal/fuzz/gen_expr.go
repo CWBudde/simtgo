@@ -375,7 +375,10 @@ func (g *gen) grounded(k Kind, d int) Expr {
 // parentheses from C's table, and a wrong table is invisible to NVRTC -- the
 // generated code compiles and computes something else -- so a deep chain of
 // operators from different levels is the pressure test.
-func (g *gen) mixed(k Kind, d int) Expr {
+// The depth is accepted and ignored: mixed builds its own chain rather than
+// recursing through the dispatch above, so it takes the same shape as its
+// siblings without having anything to spend a depth budget on.
+func (g *gen) mixed(k Kind, _ int) Expr {
 	// Both shifts, except a left shift on a Go int; see intBinary for why. The
 	// chain keeps its shift level either way, so the precedence this function
 	// exists to press on -- a shift against the additive operators, which Go

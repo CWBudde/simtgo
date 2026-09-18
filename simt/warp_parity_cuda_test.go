@@ -148,7 +148,7 @@ func WarpProbe(ctx gpu.Ctx, bcast, up []float32, mask, vote []int32, x []float32
 			mask[i] = int32(m)
 			vote[i] = 4 // every lane of a full warp is active
 			if hot {
-				vote[i] += 1
+				vote[i]++
 			}
 			if bounded {
 				vote[i] += 2

@@ -98,8 +98,8 @@ type DevPtr uint64
 // Dim3 is a CUDA grid or block dimension.
 type Dim3 struct{ X, Y, Z uint32 }
 
-// D1, D2 and D3 return a Dim3 of the given rank, leaving the axes above it at
-// one -- which is what CUDA treats an unused axis as, not zero.
+// D1 returns a one-dimensional Dim3. It, D2 and D3 leave the axes above their
+// own rank at one -- which is what CUDA treats an unused axis as, not zero.
 func D1(x int) Dim3 { return Dim3{X: uint32(x), Y: 1, Z: 1} }
 
 // D2 returns a two-dimensional Dim3.

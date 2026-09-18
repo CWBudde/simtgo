@@ -103,6 +103,8 @@ func (e *Error) Unwrap() error { return e.Code }
 // sentinel, and its names are spelled out here for the same reason.
 type NVRTCResult int32
 
+// The nvrtcResult enumeration, transcribed. NVRTCSuccess is the zero value
+// because the C enumeration makes it one, not by Go convention.
 const (
 	NVRTCSuccess                              NVRTCResult = 0
 	ErrNVRTCOutOfMemory                       NVRTCResult = 1

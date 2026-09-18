@@ -54,6 +54,9 @@ import (
 // where it would be a different stride.
 type Kind uint8
 
+// The kinds, in the order Kind.narrow and the layout rules depend on: the
+// value kinds first, then KStruct, then the four that exist only as storage.
+// KInvalid is the zero value so that an unset Kind is never a real one.
 const (
 	KInvalid Kind = iota
 	KF32
