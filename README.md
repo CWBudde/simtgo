@@ -126,6 +126,26 @@ emitted, because in C it would leave the enclosing loop. A labelled `break` or
 body; before that was implemented the label was dropped, which is the kind of
 silent mistranslation the rest of this section exists to rule out.
 
+Shared memory comes in one tile per element type — `ctx.SharedF32(n)`,
+`SharedF64`, `SharedI32`, `SharedI64`, `SharedU32`, `SharedU64` — each becoming
+a `__shared__` array of that type. `SharedF64` needs `//gocuda:float64` like
+any other double. There is no `SharedBool`: nothing wanted one, and a
+vocabulary is easier to widen than to narrow.
+
+A tile whose size is only known at launch is spelled without one:
+`ctx.SharedDynF32()` lowers to `extern __shared__ float s[];`, and its length
+travels as a generated parameter the launch fills, exactly as a slice's does.
+CUDA has a single dynamic `__shared__` block per launch, so a second such tile
+is refused — NVRTC accepts a second `extern __shared__` declaration without a
+word, of a different element type as readily as of the same one, and every one
+of them names the same bytes. Two names that silently alias is the
+mistranslation this emitter exists to refuse, and it is refused here rather
+than left to a compiler that will not object. The host side is
+`Kernel.LaunchShared`, which takes an element count; the emulator's is
+`gpu.RunCPUShared`. A dynamic tile is also what lets a kernel stop needing
+`AssumeBlockDim`, since the tile can be sized to the block instead of the block
+to the tile.
+
 A kernel that sizes shared memory against a fixed block size says so with
 `ctx.AssumeBlockDim(n)`. It emits no code; it records the requirement, so that
 `Kernel.Launch` and the CPU emulator both refuse a mismatched launch instead of
@@ -161,24 +181,30 @@ which would be a local the body assigns to and a bare return that carries it.
 A function taking a `gpu.Ctx` **is** a kernel by the rule above, so calling
 one is refused unless it carries `//gocuda:ignore`, which already means
 "not a kernel"; the `Ctx` then vanishes from the C signature as the kernel's
-own does, and shared memory and `AssumeBlockDim` stay refused inside it,
-because both are promises about a launch. The CPU side needs nothing at all
+own does. A device function may declare a shared tile of its own — that is
+block-scoped storage, which CUDA allocates once per function, and the bytes are
+accounted onto the kernel that reaches it. `AssumeBlockDim` stays refused
+there, and so does the dynamic tile: the first is a promise about a launch, and
+the second reads a length that arrives as a kernel parameter a helper cannot
+see. The CPU side needs nothing at all
 for any of this: a device function is ordinary Go, so `RunCPU` runs the very
 code the device compiles.
 
 #### Types
 
-| Go                          | CUDA                 |
-| --------------------------- | -------------------- |
-| `float32`                   | `float`              |
-| `float64`                   | `double`, opt-in     |
-| `int`, `int32`              | `int`                |
-| `int64`                     | `long long`          |
-| `uint32`                    | `unsigned int`       |
-| `uint64`                    | `unsigned long long` |
-| `bool`                      | `bool`               |
-| a named struct of the above | a CUDA `struct`      |
-| `[N]T` of the above         | `T name[N]`          |
+| Go                          | CUDA                                            |
+| --------------------------- | ----------------------------------------------- |
+| `float32`                   | `float`                                         |
+| `float64`                   | `double`, opt-in                                |
+| `int`, `int32`              | `int`                                           |
+| `int64`                     | `long long`                                     |
+| `uint32`                    | `unsigned int`                                  |
+| `uint64`                    | `unsigned long long`                            |
+| `bool`                      | `bool`                                          |
+| `int8`, `int16`             | `signed char`, `short`, storage only            |
+| `uint8`, `uint16`           | `unsigned char`, `unsigned short`, storage only |
+| a named struct of the above | a CUDA `struct`                                 |
+| `[N]T` of the above         | `T name[N]`                                     |
 
 The 64-bit types are `long long` and never `long`, which is 8 bytes on Linux
 and 4 on Windows.
@@ -188,8 +214,8 @@ comment. The cost is invisible in the source — the device runs a double at a
 fraction of the float32 rate, so a kernel that acquired one by accident would
 be correct and far slower — and the opt-in makes that something somebody wrote
 down. It covers the kernel's whole translation unit, device functions included;
-a helper may not carry its own, for the reason `SharedF32` and `AssumeBlockDim`
-may not either. `gpu.Sqrt` and friends stay `float32`; the double-precision
+a helper may not carry its own, for the reason `AssumeBlockDim` may not
+either. `gpu.Sqrt` and friends stay `float32`; the double-precision
 half is spelled `gpu.Sqrt64`, `gpu.Hypot64`, `gpu.Fmax64` and the rest, which
 become CUDA's unsuffixed `sqrt`, `hypot`, `fmax`. Reaching one of those without
 the directive is refused by name, and the refusal has to sit on the _call_
@@ -203,10 +229,24 @@ a struct field it is not a lost high word but a different stride, and
 `cuda.Upload` copies Go's layout regardless — so `[]int` is refused, along with
 `int` as a struct field. It used to lower cleanly and return the wrong numbers.
 
-`int8`, `int16`, `uint8` and `uint16` are refused too, and not for their width,
-which matches: Go computes `int8 * int8` in 8 bits and wraps, while C promotes
-both to `int` and truncates only at the assignment, so
-`a, b := int8(100), int8(3); a*b/2` is 22 in Go and −106 in C.
+`int8`, `int16`, `uint8` and `uint16` are **storage, not arithmetic**. They may
+be a slice element, an array element or a struct field — `[]uint8` is what an
+image buffer is — but never a variable, a parameter or a result, and no
+operator accepts one. The widths match; the arithmetic does not. Go computes
+`int8 * int8` in 8 bits and wraps, while C promotes both to `int` and truncates
+only at the assignment, so `a, b := int8(100), int8(3); a*b/2` is 22 in Go and
+−106 in C. Convert to `int32`, compute there, and convert back:
+
+```go
+v := int32(rgb[3*i])*77 + int32(rgb[3*i+1])*150 + int32(rgb[3*i+2])*29
+out[i] = uint8(v / 256)
+```
+
+Some of those operators would in fact agree — a compound assignment and `++`
+truncate at the store in both languages, and so do comparisons, `/` and `%`.
+They are refused anyway, because a rule that holds for every operator is one a
+reader can keep in their head, and because relaxing a refusal later costs
+nothing while retracting an acceptance costs a release.
 
 **A struct is laid out by Go and checked by CUDA.** The generated C carries
 what `go/types` says about the type:
@@ -219,15 +259,30 @@ static_assert(alignof(Shape) == 8, "gocuda: Shape is differently aligned in CUDA
 
 The emitter never models the C ABI. It states Go's numbers and lets the C++
 compiler refuse them, so the guarantee holds wherever the kernel is built
-rather than where it was written. Offsets are missing because NVRTC compiles a
-string with no include path and so has no `offsetof`; `TestStructLayoutRoundTrip`
-pins those by reading each field back through the device instead, which
-exercises the `cuda.Upload` copy path a `static_assert` could only have had an
-opinion about. Struct literals lower positionally, because designated
-initialisers are C++20 and NVRTC defaults to C++17.
+rather than where it was written.
+
+**Every hole Go leaves is declared**, as an `unsigned char gocuda_padN[k]`
+member, the trailing one included. That is what makes the size assertion
+enough to pin the offsets, and the argument is short: with every hole spelled
+out the members already account for exactly Go's size, and C++ lays each member
+at or after the end of the one before it, so `sizeof` can only match if nothing
+further was inserted — and then every field sits where Go put it. The trailing
+member is load-bearing rather than tidy: without it, a byte inserted earlier
+could hide in the end slack and the size would still agree.
+
+This is a belt on top of braces rather than a fix for a disagreement anybody
+observed. NVRTC inserts exactly the holes Go does, so the assertions passed
+before the padding existed too; what changed is that they now _imply_ the
+offsets rather than merely being consistent with them. Offsets could not be
+asserted directly because NVRTC compiles a bare string with no include path:
+`offsetof`, `__builtin_offsetof` and `#include <cstddef>` are all unavailable,
+re-measured against 12.9 rather than taken on trust.
+
+Struct literals lower positionally and step over the padding, because
+designated initialisers are C++20 and NVRTC defaults to C++17.
 
 **An array is storage, not a value.** It can be declared, indexed, measured
-with `len` and ranged over. It cannot be a parameter — Go passes a copy and C
+with `len`, ranged over, and held as a struct field. It cannot be a parameter — Go passes a copy and C
 decays the parameter to a pointer, so a write inside the function would reach
 the caller's array — nor a result, which C cannot return at all, nor assigned
 whole, which C++ will not do. Wrap it in a struct if it has to travel; both
