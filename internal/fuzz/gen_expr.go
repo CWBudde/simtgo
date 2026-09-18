@@ -270,7 +270,21 @@ func (g *gen) intExpr(k Kind, d int) Expr {
 // it defined on both backends.
 func (g *gen) intBinary(k Kind, d int) Expr {
 	ops := []token.Token{token.ADD, token.SUB, token.MUL, token.QUO, token.REM,
-		token.AND, token.OR, token.XOR, token.AND_NOT, token.SHL, token.SHR}
+		token.AND, token.OR, token.XOR, token.AND_NOT, token.SHR}
+	// A Go int is never shifted left, and the subset refuses it for the reason
+	// this generator found: int is 64 bits in Go and 32 on the device, so
+	// 29 << 29 is 15569256448 on one and -1610612736 on the other. Masking the
+	// count keeps the shift defined on both but does not make the answers
+	// equal, and the narrowing's excuse -- that an int is an index, and an
+	// index is bounded by the grid -- is exactly what a left shift breaks.
+	//
+	// `>>` stays, because it cannot grow a value: given an int that fits 32
+	// bits the two agree, which is the premise holding rather than failing.
+	// Every other integer kind keeps both, being the same width in both
+	// languages.
+	if k != KInt {
+		ops = append(ops, token.SHL)
+	}
 	op := pick(g.r, ops)
 	switch op {
 	case token.QUO, token.REM:
@@ -312,10 +326,18 @@ func (g *gen) grounded(k Kind, d int) Expr {
 // generated code compiles and computes something else -- so a deep chain of
 // operators from different levels is the pressure test.
 func (g *gen) mixed(k Kind, d int) Expr {
+	// Both shifts, except a left shift on a Go int; see intBinary for why. The
+	// chain keeps its shift level either way, so the precedence this function
+	// exists to press on -- a shift against the additive operators, which Go
+	// and C order differently -- is still generated.
+	shifts := []token.Token{token.SHR}
+	if k != KInt {
+		shifts = append(shifts, token.SHL)
+	}
 	levels := [][]token.Token{
 		{token.MUL, token.AND},
 		{token.ADD, token.SUB, token.OR, token.XOR},
-		{token.SHL, token.SHR},
+		shifts,
 	}
 	// The chain starts from a value rather than a literal, which is what keeps
 	// every subtree of it a run-time expression: a folded one would have to

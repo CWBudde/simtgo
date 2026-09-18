@@ -153,6 +153,47 @@ func TestUnaryOperatorsDoNotFuse(t *testing.T) {
 	}
 }
 
+// TestShiftsThatStayAccepted is the other half of the wide-shift rule, and the
+// half that decides whether it is worth having: a check that refuses too much
+// is easy and useless.
+//
+// Every kernel here writes a shift the rule has to leave alone. A constant
+// shift of an int is the case the narrowing was always about -- its result is
+// as bounded as the value is -- and it is what kernels/gray.go writes. A right
+// shift cannot grow a value, so the narrowing's premise holds however the
+// count is computed. And int32 and int64 are the same width in both languages,
+// so a computed count on one of those is outside what this rule claims; that
+// it is also outside what anything checks is stated in SPEC.md rather than
+// left to be discovered here.
+func TestShiftsThatStayAccepted(t *testing.T) {
+	const prelude = "package kernels\n\nimport \"github.com/CWBudde/gocuda/gpu\"\n\n"
+	cases := []struct{ name, body string }{{
+		name: "an int shifted left by a constant",
+		body: "func K(ctx gpu.Ctx, y []int32) { o := ctx.GlobalID(); y[0] = int32(o << 3) }",
+	}, {
+		name: "an int shifted right by a computed amount",
+		body: "func K(ctx gpu.Ctx, y []int32, k int) { o := ctx.GlobalID(); y[0] = int32(o >> (k & 31)) }",
+	}, {
+		name: "an int32 shifted left by a computed amount",
+		body: "func K(ctx gpu.Ctx, y []int32, a, k int32) { y[0] = a << (k & 31) }",
+	}, {
+		name: "an int32 shifted by the widest constant it can take",
+		body: "func K(ctx gpu.Ctx, y []int32, a int32) { y[0] = a << 31 }",
+	}, {
+		name: "an int64 shifted by a constant an int could not take",
+		body: "func K(ctx gpu.Ctx, y []int64, a int64) { y[0] = a << 40 }",
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fsys := fstest.MapFS{"k.go": &fstest.MapFile{Data: []byte(prelude + tc.body)}}
+			if _, err := simt.Transpile(fsys, "K"); err != nil {
+				t.Fatalf("refused a shift the rule has no business refusing: %v", err)
+			}
+		})
+	}
+}
+
 // TestShadowingInitialiserReadsTheOuterVariable is the second thing the fuzzer
 // found, and the worse of the two.
 //

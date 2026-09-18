@@ -219,6 +219,9 @@ func (t *transpiler) binary(e *ast.BinaryExpr) cexpr {
 	if t.refuseNarrowBinary(e.X, e.Y, e.Op, e.Pos()) {
 		return atom("")
 	}
+	if t.refuseWideShift(e.X, e.Y, e.Op, e.Pos()) {
+		return atom("")
+	}
 	if e.Op == token.EQL || e.Op == token.NEQ {
 		// Go compares a struct or an array field by field. C++ gives a plain
 		// aggregate no operator== at all, so emitting the same spelling would
@@ -301,6 +304,71 @@ func (t *transpiler) refuseNarrowBinary(x, y ast.Expr, op token.Token, pos token
 	t.fail(pos, "%s, so `%s` on one can give a different answer; write int32(a) %s int32(b) and convert back with %s(...) when you store the result",
 		narrowWhy(typ), op, op, typ)
 	return true
+}
+
+// refuseWideShift refuses the two shifts whose answer depends on a width the
+// two languages do not share.
+//
+// The first is the narrowing itself, caught where it escapes. Go's int is 64
+// bits and the device's is 32, which SPEC.md calls the one deliberate
+// infidelity and excuses on the grounds that an index is bounded by the grid
+// anyway. A shift is where that stops being true: `o << (o & 31)` is computed
+// in 64 bits by Go and in 32 by the device, and for o = 29 that is
+// 15569256448 against -1610612736. The fuzzer wrote exactly that, fed it to an
+// array index, and the two backends read different elements -- so the excuse
+// had a hole in it and this is the hole closed. A *constant* shift is left
+// alone: `x << 3` is what a real kernel writes, and its result is as bounded
+// as x is, which is the case the excuse was actually about.
+//
+// The second is a constant shift the C type cannot take at all. Go defines
+// x << 40 for a 32-bit x -- it is zero -- and C makes it undefined behaviour,
+// so this is a wrong answer with nothing to report it. That one applies to
+// every width, int32 and int64 alike, and to >> as much as to <<.
+//
+// What is deliberately not refused: int32 or int64 shifted by a non-constant.
+// Both are the same width in both languages, so the only disagreement left is
+// an amount that reaches the width at run time, and telling `x << (k & 31)` --
+// which is how one writes it safely -- from `x << k` needs a range analysis
+// this does not have. SPEC.md says so rather than leaving it to be found.
+func (t *transpiler) refuseWideShift(x, y ast.Expr, op token.Token, pos token.Pos) bool {
+	if op != token.SHL && op != token.SHR {
+		return false
+	}
+	tv, ok := t.info.Types[x]
+	if !ok || tv.Type == nil {
+		return false
+	}
+	basic, ok := tv.Type.Underlying().(*types.Basic)
+	if !ok {
+		return false
+	}
+	// The width of the *C* type, which for Go's int is the whole point: 32,
+	// not the 64 Go computes in. A kind not listed here is either refused
+	// elsewhere -- the narrow integers, which no operator takes -- or not an
+	// integer at all.
+	var width int
+	switch basic.Kind() {
+	case types.Int, types.Uint, types.Int32, types.Uint32:
+		width = 32
+	case types.Int64, types.Uint64:
+		width = 64
+	default:
+		return false
+	}
+
+	n, isConst := t.constInt(y)
+	if !isConst {
+		if op == token.SHL && (basic.Kind() == types.Int || basic.Kind() == types.Uint) {
+			t.fail(pos, "%s is 64 bits in Go and 32 on the device, so `<<` by an amount this code computes can give a different answer on each; hold the value in an int32, which is 32 bits in both, or in an int64 when the high word is wanted", tv.Type)
+			return true
+		}
+		return false
+	}
+	if n >= width {
+		t.fail(pos, "shifting %s by %d is undefined on the device: it is %d bits there, and C leaves a shift that wide undefined where Go defines it", tv.Type, n, width)
+		return true
+	}
+	return false
 }
 
 func (t *transpiler) call(c *ast.CallExpr) cexpr {

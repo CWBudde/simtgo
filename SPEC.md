@@ -142,8 +142,12 @@ The 64-bit types are `long long` and never `long`, which is 8 bytes on Linux
 and 4 on Windows.
 
 **Go's `int` is 64-bit and CUDA's is 32-bit.** That narrowing is the one
-deliberate infidelity, and it holds only by value, where an index is bounded by
-the grid anyway. As a slice element, an array element or a struct field it is
+deliberate infidelity, and it holds by value, where an index is bounded by the
+grid. Where a value can leave those bounds it is refused rather than excused: a
+left shift by a computed amount is the shape that does, and the differential
+fuzzer found it by writing `o << (o & 31)` and reading the two answers, which
+differ by more than the high word — see "Shifts, where the two widths
+disagree". As a slice element, an array element or a struct field it is
 not a lost high word but a different _stride_, and the host copies Go's layout
 regardless — so `[]int` is refused. It used to lower cleanly and return the
 wrong numbers.
@@ -338,6 +342,22 @@ is what the diagnostic contains. `simt/spec_test.go` checks both directions.
 - incrementing a narrow slot — diagnostic: `` `++` is refused anyway ``
 - min on narrow elements — diagnostic: `min has no overload for it`
 - a shift by a narrow count — diagnostic: ``so `<<` on one can give a different answer``
+
+### Shifts, where the two widths disagree
+
+- a Go `int` shifted left by a computed amount — diagnostic:
+  `is 64 bits in Go and 32 on the device`
+- a shift by a constant the C type cannot take — diagnostic:
+  `undefined on the device`
+
+A _constant_ left shift of an `int` is accepted: its result is as bounded as
+the value is, which is the case the narrowing above was always about. What is
+**not** checked, and is stated here rather than left to be found: `int32` or
+`int64` shifted by a computed amount. Both are the same width in both
+languages, so the only disagreement left is a count that reaches the width at
+run time — Go defines that as zero and C leaves it undefined — and telling
+`x << (k & 31)`, which is how one writes it safely, from `x << k` needs a
+range analysis the lowering does not have.
 
 ### Types that cannot cross
 
