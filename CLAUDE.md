@@ -144,8 +144,25 @@ reference, so a shared misunderstanding cannot pass as agreement.
   why `lower.Kernel` takes the package's files and not just the entry point.
   Recursion is refused, and so is calling a kernel — a function taking a
   `gpu.Ctx` is one, unless it carries `//gocuda:ignore`.
-- Kernel packages may import **only** `github.com/CWBudde/gocuda/gpu`, and only
-  `float32`/`int32`-shaped types exist on the device.
+- Kernel packages may import **only** `github.com/CWBudde/gocuda/gpu`. The
+  device types are `float32`, `float64` (opt-in), `int32`, `int64`, `uint32`,
+  `uint64` and `bool`, plus named structs and fixed-size arrays of those.
+  `int8`/`int16`/`uint8`/`uint16` are **storage only** — legal as a slice
+  element, an array element or a struct field, and accepted by no operator,
+  because Go's 8- and 16-bit arithmetic wraps where C's promotes to `int`. Go's
+  `int` is refused anywhere a layout is involved: as a value it narrows, as an
+  element it is a different stride.
+- A struct's holes are emitted as `gocuda_padN` members, the trailing one
+  included. That is what makes the `sizeof` assertion imply the field offsets
+  rather than merely agree with them — NVRTC has no `offsetof` to assert them
+  directly.
+- Shared memory is one constructor per element type, plus a dynamic tile
+  (`ctx.SharedDynF32()`) whose length is a generated kernel parameter the
+  launch fills. A kernel gets **at most one** dynamic tile: CUDA has a single
+  dynamic `__shared__` block, and NVRTC accepts a second `extern __shared__`
+  declaration silently, aliasing the same bytes. A device function may declare
+  a static tile; it may not declare a dynamic one, and it may not call
+  `AssumeBlockDim`.
 - `cuda.Result` sentinels and `errors.Is` work in `!cuda` builds too — error
   handling code compiles without a toolkit.
 
