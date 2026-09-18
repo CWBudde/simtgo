@@ -87,6 +87,8 @@ func (g *gen) tryStmt() Stmt {
 		return g.returnStmt()
 	case 20:
 		return g.arrayDeclStmt()
+	case 21:
+		return g.warpStmt()
 	}
 	return g.assignStmt()
 }
@@ -683,6 +685,38 @@ func (g *gen) barrierStmt() Stmt {
 		return &SyncWarp{}
 	}
 	return &Barrier{}
+}
+
+// warpStmt declares a local initialised from a warp primitive.
+//
+// It exists for the reason barrierStmt does, and the two figures say why. A
+// barrier owns a statement slot of its own and sits at 43% of programs; warp
+// primitives could be drawn only inside the expression switches, one slot in
+// twelve, and sat at 10.7% -- the least-exercised corner of the subset. A slot
+// here is the same fix, applied to the same shape of problem.
+//
+// Nothing about it relaxes a gate. The three conditions warpExpr states are
+// still its to enforce, and it is called rather than second-guessed, so a
+// position that cannot carry a warp primitive yields nil and stmt() retries --
+// exactly what happens to a barrier that cannot go where it landed. g.uni is
+// left alone for the same reason: an expression asked to be block-uniform must
+// keep refusing, and deciding that here would be deciding it twice.
+func (g *gen) warpStmt() Stmt {
+	if !g.sync || !g.warpOK || !g.uniform || !g.fn.Ctx {
+		return nil
+	}
+	// The kinds warpExpr answers to. A warp primitive shuffles 32 bits, so
+	// there is no 64-bit member of this list to leave out by accident.
+	k := pick(g.r, []Kind{KF32, KI32, KU32, KBool, KInt})
+	init := g.warpExpr(k, 2)
+	if init == nil {
+		return nil
+	}
+	// After the expression, not before: local allocates a frame slot, and a
+	// statement this returns nil from must not leave one behind.
+	v := g.local(k, false)
+	g.declare(v)
+	return &Decl{V: v, Init: init, Form: DeclVarTyped}
 }
 
 // callStmt calls a helper for its effect. A ctx-taking helper may hold a

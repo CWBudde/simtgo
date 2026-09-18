@@ -167,7 +167,14 @@ func (g *gen) geometry() {
 	// 0xffffffff into every _sync built-in, and in a short warp that mask
 	// names lanes which do not exist. The odd sizes are still here, and are
 	// what a kernel's tail guard is exercised by.
-	widths := []int{1, 2, 3, 7, 31, 32, 32, 33, 64, 64, 96, 128, 128}
+	//
+	// Ten of sixteen rather than seven of thirteen: this is the one lever on
+	// warp coverage that costs nothing elsewhere. The alternative -- raising
+	// g.sync above its coin flip -- would have moved more, and was rejected
+	// because a program with a barrier or a warp primitive is out of the host
+	// oracle's scope, so buying warp coverage that way is paid for directly
+	// out of the differential's reach.
+	widths := []int{1, 2, 3, 7, 31, 32, 32, 32, 33, 64, 64, 64, 96, 96, 128, 128}
 	g.p.Block = gpu.D1(widths[g.r.IntN(len(widths))])
 }
 
