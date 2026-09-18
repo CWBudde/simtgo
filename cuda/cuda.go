@@ -1,11 +1,13 @@
 // Package cuda is a small, hand-rolled binding for the CUDA driver API and
-// NVRTC, covering exactly the surface this proof of concept needs: allocate
-// device memory, JIT-compile CUDA C at runtime, and launch a kernel.
+// NVRTC, covering exactly the surface this module needs: allocate device
+// memory, JIT-compile CUDA C at runtime, and launch a kernel.
 //
-// All cgo code sits behind the "cuda" build tag so that the rest of the module
-// (notably the Go-to-CUDA transpiler in package simt) builds and tests on
-// machines without a CUDA toolchain. Without the tag, every entry point here
-// fails with ErrNoCUDA.
+// There is no cgo. libcuda and libnvrtc are dlopen'd at run time through
+// purego, so this package builds with CGO_ENABLED=0 and with no toolkit
+// installed. The "cuda" build tag still selects the implementation: the driver
+// lives behind it, and without the tag every entry point here fails with
+// ErrNoCUDA, so the rest of the module -- notably the Go-to-CUDA transpiler in
+// package simt -- builds and tests on machines with no CUDA at all.
 //
 // # On context.Context
 //

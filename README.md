@@ -1,12 +1,17 @@
 # gocuda — writing CUDA kernels in Go
 
-A proof of concept prompted by NVIDIA's [_Introducing CUDA Rust: Two Tracks for
-Writing GPU Kernels_](https://developer.nvidia.com/blog/introducing-cuda-rust-two-tracks-for-writing-gpu-kernels/).
-The question it answers: **can Go do this too?**
+A Go answer to NVIDIA's [_Introducing CUDA Rust: Two Tracks for Writing GPU
+Kernels_](https://developer.nvidia.com/blog/introducing-cuda-rust-two-tracks-for-writing-gpu-kernels/).
+Not by the same means — Go has no pluggable codegen backend and no macros — but
+both of NVIDIA's tracks have a working analogue here, and both run real kernels
+on real hardware.
 
-Short answer: not by the same means, but the result is closer than expected.
-Both of NVIDIA's tracks have a working Go analogue here, and they run real
-kernels on real hardware.
+A kernel is an ordinary Go function. It runs unchanged on a CPU emulator and on
+the device, and what the subset accepts is [a written contract](SPEC.md) checked
+against the implementation rather than whatever the emitter happens to do.
+
+The project is under active development and the API is not frozen. What is
+verified, and on what, is stated below.
 
 ## The two tracks
 
@@ -32,6 +37,30 @@ kernels on real hardware.
 What Go does have, and Rust does not, is **a parser and a type checker in its
 standard library**. Translating a well-defined subset at the source level gets
 most of the way there — and it keeps kernels runnable as plain Go.
+
+## Status
+
+**In place.** Both tracks, verified against independent Go references on real
+hardware. The supported subset is written down in [`SPEC.md`](SPEC.md) and
+checked against the implementation in both directions — a refusal the code
+enforces and the document omits fails the build, and so does a rule the document
+claims that nothing pins. Twelve kernels, each with a golden file, an NVRTC
+compile test and a CPU/GPU parity test. A differential fuzzer with three oracles,
+two of them running in CI daily. A kernel that cannot be lowered fails
+`go build` rather than `main()`. No cgo anywhere, so the module builds and ships
+on a machine that has never had a CUDA toolkit. `compute-sanitizer` clean on
+`memcheck`, `racecheck`, `initcheck` and `synccheck`.
+
+**Not yet.** Linux only; Windows is planned and macOS is not possible, since
+NVIDIA ships no CUDA for it. The driver API is synchronous — no streams, no
+events, no async copies — and `cuda.Context` is not safe to share between
+goroutines, which is a known and reproduced bug rather than an untested claim.
+The tile track is 1-D `float32` with seven operations and no reductions. One
+architecture has been measured, `sm_75`, and CI has no GPU, so the parity tests
+are unverified anywhere but the machine they were written on.
+
+The roadmap is [`PLAN.md`](PLAN.md); the engineering record — what was measured,
+what broke, and why things are the way they are — is [`docs/`](docs/).
 
 ## Track 1 — SIMT
 
@@ -536,6 +565,19 @@ Honest limits, not papered over:
 This repository's distinguishing bet is the **single source**: the kernel is a
 Go function that both backends run, so correctness is testable without a GPU.
 
+## Documentation
+
+| Document                                             | What it answers                                                       |
+| ---------------------------------------------------- | --------------------------------------------------------------------- |
+| [`SPEC.md`](SPEC.md)                                 | what the subset accepts and refuses — the contract, checked by a test |
+| [`NUMERICS.md`](NUMERICS.md)                         | what the device does to a `float32`, and what a test may assert       |
+| [`PLAN.md`](PLAN.md)                                 | what is still to be done, and in what order                           |
+| [`docs/decisions.md`](docs/decisions.md)             | settled questions and the reasoning that settled them                 |
+| [`docs/emitter-defects.md`](docs/emitter-defects.md) | every mistranslation found, and what catches it now                   |
+| [`docs/verification.md`](docs/verification.md)       | the layers of checking, and what each one cannot see                  |
+| [`docs/toolchain.md`](docs/toolchain.md)             | measured behaviour of the driver, NVRTC and PTX                       |
+| [`docs/tile.md`](docs/tile.md)                       | the tile track's code generator, and where it stops                   |
+
 ## Layout
 
 ```text
@@ -550,7 +592,10 @@ kernels/       the example kernels, embedded as source
 kernels/prebuilt/  generated: CUDA C, PTX, and the build gate
 internal/jit/  compile, cache and load, shared by both tracks
 internal/tolerance/ what "close enough" means, shared by every parity test
+internal/fuzz/ the differential fuzzer: one IR rendered as Go and as a closure
+internal/fuzz/hostrun/  the generated CUDA C through a host C++ compiler
 examples/      vecadd, fir, magnitude, tilefir
+docs/          the engineering record: decisions, defects, measurements
 ```
 
 There is no cgo. `libcuda` and `libnvrtc` are opened with `dlopen` at run

@@ -22,8 +22,8 @@ import (
 // company: an expression whose grouping Go and C read differently, a statement
 // that evaluates everything before storing anything, a switch that falls
 // through, a branch that leaves two loops, a counter that keeps the ranged
-// type, and a builtin whose answer to a NaN is the thing PLAN.md records as
-// untested.
+// type, and a builtin whose answer to a NaN is the disagreement NUMERICS.md
+// records.
 func TestRenderersAgree(t *testing.T) {
 	cases := []struct {
 		name string

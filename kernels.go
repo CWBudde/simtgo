@@ -1,4 +1,4 @@
-// Package gocuda is a proof of concept for writing CUDA kernels in Go.
+// Package gocuda is a library for writing CUDA kernels in Go.
 //
 // It follows the two tracks NVIDIA describes for CUDA Rust:
 //

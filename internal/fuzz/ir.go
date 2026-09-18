@@ -318,7 +318,7 @@ func (m *MathCall) varies() bool { return anyVaries(m.Args) }
 
 // MinMax is Go's builtin min or max.
 //
-// It is generated on purpose even though PLAN.md records that the two backends
+// It is generated on purpose even though NUMERICS.md records that the two backends
 // disagree about it -- Go's builtin propagates a NaN operand and CUDA's
 // min/max return the other one. A generator that avoided the shape would be
 // hiding a known defect from the fuzzer it feeds.
