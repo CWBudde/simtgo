@@ -787,8 +787,18 @@ A transpiler is trusted through evidence, not review.
       conversion rule, because it is a trap for a kernel author and not only
       for a generator.
 
-      **Five defects in all, in roughly twenty-five minutes of searching**,
-      three of them in the emitter and two in the oracle. That ratio is worth
+      And the one this round was most pointed at. Go's builtin `min` and `max`
+      propagate a NaN operand where CUDA's `fminf` and `fmaxf` ignore one, so
+      `min(0.0/0.0, x)` is a NaN in Go and `x` on the device. That had been
+      recorded since the numerics round in the same sentence that said nothing
+      tested it and no committed kernel reached it; the fuzzer reached it in
+      **six seconds**, which is the whole argument for having one. It is
+      refused now, pointing at `gpu.Fmin`/`gpu.Fmax`, which already mean the
+      device's answer on both backends — the same resolution the `int`
+      narrowing got, for the same reason. The integer overloads are untouched.
+
+      **Six defects in all, in roughly twenty-five minutes of searching**,
+      four of them in the emitter and two in the oracle. That ratio is worth
       recording: an oracle this young has its own bugs, and a differential
       that reports a mismatch as "a finding about one of them and not a
       verdict about which" is what makes those cheap to tell apart.
@@ -868,7 +878,9 @@ A transpiler is trusted through evidence, not review.
       `fma` survives `--fmad=false`, so it is inside `hypotf` and is not
       evidence of source contraction — FIR and Quantize are. And Go's builtin
       `min`/`max` disagree with CUDA's on NaN exactly as `math.Min` did, which
-      nothing tests and no committed kernel reaches.
+      at the time nothing tested and no committed kernel reached. (The
+      differential fuzzer reached it later the same day, in six seconds; it is
+      refused now — see the fuzzing entry in Phase 3.)
 
       The tolerance rule is now one rule in `internal/tolerance`, where there
       were three conventions in three packages, and the exactness rule — when a
