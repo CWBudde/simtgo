@@ -291,6 +291,7 @@ func (t *transpiler) kernel(fd *ast.FuncDecl) {
 			decls = append(decls, fmt.Sprintf("%s* %s", elem, name), fmt.Sprintf("int %s_len", name))
 			t.lens[p.obj] = name + "_len"
 		default:
+			t.checkParamType(p.typ, p.pos)
 			decls = append(decls, t.cdecl(p.typ, name, p.pos))
 		}
 	}
@@ -385,6 +386,15 @@ func (t *transpiler) deviceFunc(pos token.Pos, obj *types.Func) (string, bool) {
 		// identifier that was never declared -- refused rather than written.
 		t.fail(pos, "%s must not name its result", obj.Name())
 		return "", false
+	}
+	if sig.Results().Len() == 1 {
+		if res := sig.Results().At(0).Type(); isArray(res) {
+			// C cannot return an array at all. Caught here rather than left to
+			// whatever the caller does with the value, so the message names the
+			// function that cannot be written this way.
+			t.fail(fd.Pos(), "%s returns %s, and C cannot return an array; return a struct wrapping it, or write through a slice parameter", obj.Name(), res)
+			return "", false
+		}
 	}
 
 	name := cname(obj.Name())
@@ -490,6 +500,7 @@ func (t *transpiler) signature(fd *ast.FuncDecl) string {
 			decls = append(decls, fmt.Sprintf("%s* %s", elem, name), fmt.Sprintf("int %s_len", name))
 			t.lens[p.obj] = name + "_len"
 		default:
+			t.checkParamType(p.typ, p.pos)
 			decls = append(decls, t.cdecl(p.typ, name, p.pos))
 		}
 	}
@@ -581,7 +592,45 @@ func IsCtx(typ types.Type) bool {
 // locals, struct fields -- goes through here; ctype is what remains for the two
 // places that genuinely want a bare type, a cast and a return type.
 func (t *transpiler) cdecl(typ types.Type, name string, pos token.Pos) string {
+	if arr, ok := typ.Underlying().(*types.Array); ok {
+		return fmt.Sprintf("%s %s[%d]", t.ctypeElem(arr.Elem(), pos), name, arr.Len())
+	}
 	return t.ctype(typ, pos) + " " + name
+}
+
+// checkParamType refuses an array parameter.
+//
+// Go passes an array by value; C decays an array parameter to a pointer, so the
+// callee writes through the caller's storage. A helper that modifies its
+// parameter would be a local change in Go and a caller-visible one in C -- the
+// same code, two answers, with nothing to see at the call site. Wrapping it in
+// a struct is one line and both languages then agree to copy.
+func (t *transpiler) checkParamType(typ types.Type, pos token.Pos) {
+	if _, ok := typ.Underlying().(*types.Array); ok {
+		t.fail(pos, "%s cannot be a parameter: Go passes an array by value and C would pass a pointer to it, so a write inside the function would reach the caller's array; pass a slice, or wrap it in a struct", typ)
+	}
+}
+
+// isArray reports whether typ is a fixed-size array, which is storage on the
+// device and never a value that moves.
+func isArray(typ types.Type) bool {
+	_, ok := typ.Underlying().(*types.Array)
+	return ok
+}
+
+// zeroValue is the C initialiser for a declaration Go wrote without one.
+//
+// Go's `var x T` is always the zero value; C's is whatever was in the storage.
+// A scalar keeps the bare 0 the existing kernels are already generated with --
+// changing it to 0.0f would rewrite a golden for no gain and bury the real
+// diff -- while an array or a struct takes the empty braces C++ value-
+// initialises from, because `float taps[4] = 0;` is not a thing.
+func (t *transpiler) zeroValue(typ types.Type) string {
+	switch typ.Underlying().(type) {
+	case *types.Array, *types.Struct:
+		return "{}"
+	}
+	return "0"
 }
 
 // ctype maps a Go type to its device counterpart.

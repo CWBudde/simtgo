@@ -51,6 +51,22 @@ func TestUnsupported(t *testing.T) {
 		body: "func K(ctx gpu.Ctx, a []int) { a[0] = 1 }",
 		want: "cannot cross to the device",
 	}, {
+		name: "an array parameter",
+		body: "func K(ctx gpu.Ctx, y []float32, taps [4]float32) { y[0] = taps[0] }",
+		want: "Go passes an array by value and C would pass a pointer to it",
+	}, {
+		name: "an array result",
+		body: "//gocuda:ignore\nfunc pair() [2]float32 { var a [2]float32; return a }\n\nfunc K(ctx gpu.Ctx, y []float32) { y[0] = pair()[0] }",
+		want: "C cannot return an array",
+	}, {
+		name: "whole-array assignment",
+		body: "func K(ctx gpu.Ctx, y []float32) { var a, b [2]float32; a = b; y[0] = a[0] }",
+		want: "cannot be assigned",
+	}, {
+		name: "struct equality",
+		body: "type P struct{ X, Y float32 }\n\nfunc K(ctx gpu.Ctx, y []float32, a, b []P) { if a[0] == b[0] { y[0] = 1 } }",
+		want: "field by field in Go, which C cannot do",
+	}, {
 		name: "int(x) from int64",
 		body: "func K(ctx gpu.Ctx, a []float32, n int64) { a[int(n)] = 1 }",
 		want: "truncates on the device",

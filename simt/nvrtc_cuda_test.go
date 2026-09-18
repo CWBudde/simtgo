@@ -54,6 +54,14 @@ func TestGeneratedCCompiles(t *testing.T) {
 			"\t\tout[i] = v*v + int64(h%16)\n" +
 			"\t}\n}",
 	}, {
+		name: "a fixed-size array declared, indexed and ranged over",
+		body: "func K(ctx gpu.Ctx, y []float32) {\n" +
+			"\tvar taps [4]float32\n" +
+			"\ttaps[1] = 2\n" +
+			"\tsum := float32(0)\n" +
+			"\tfor _, v := range taps {\n\t\tsum += v\n\t}\n" +
+			"\ty[0] = sum\n}",
+	}, {
 		name: "a labelled continue past a later declaration",
 		body: "func K(ctx gpu.Ctx, y []float32, n int32) {\n" +
 			"outer:\n" +

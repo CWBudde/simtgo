@@ -480,3 +480,86 @@ func TestGeneratedCScopes(t *testing.T) {
 		}
 	})
 }
+
+// TestFixedSizeArrays covers the three things an array is allowed to be:
+// declared, indexed, and walked. Its extent lands after the name, which is the
+// whole reason declarations go through cdecl rather than a type string.
+func TestFixedSizeArrays(t *testing.T) {
+	u := transpile(t, "func K(ctx gpu.Ctx, y []float32) {\n"+
+		"\tvar taps [4]float32\n"+
+		"\ttaps[0] = 1\n"+
+		"\tsum := float32(0)\n"+
+		"\tfor _, v := range taps {\n\t\tsum += v\n\t}\n"+
+		"\ty[0] = sum / float32(len(taps))\n}")
+	for _, want := range []string{
+		"float taps[4] = {};",
+		"taps[0] = 1.0f;",
+		"for (int v_i = 0; v_i < 4; v_i++)",
+		"float v = taps[v_i];",
+		// len() on an array is a Go constant, so float32(len(taps)) folds to a
+		// float32 constant before the emitter is asked. There is no length
+		// parameter to consult and no conversion left to render.
+		"y[0] = sum / 4.0f;",
+	} {
+		if !strings.Contains(u.Source, want) {
+			t.Errorf("missing %q in:\n%s", want, u.Source)
+		}
+	}
+}
+
+// TestZeroValueOfAnAggregate pins the one place `var` could not keep emitting
+// `= 0`: C++ has no such initialiser for an array, and a bool deserved better
+// than an int anyway.
+func TestZeroValueOfAnAggregate(t *testing.T) {
+	u := transpile(t, "func K(ctx gpu.Ctx, y []float32) {\n"+
+		"\tvar a [2]float32\n\tvar n int32\n"+
+		"\ta[0] = float32(n)\n\ty[0] = a[0]\n}")
+	if !strings.Contains(u.Source, "float a[2] = {};") {
+		t.Errorf("array not value-initialised:\n%s", u.Source)
+	}
+	if !strings.Contains(u.Source, "int n = 0;") {
+		t.Errorf("scalar zero value changed, which would rewrite every golden:\n%s", u.Source)
+	}
+}
+
+// TestWideScalars pins the widened type map, including the two kinds that
+// lowered all along with nothing to say they did.
+func TestWideScalars(t *testing.T) {
+	u := transpile(t, "func K(ctx gpu.Ctx, a []int64, b []uint32, c []uint64, d []bool, n int64, m uint32) {\n"+
+		"\ta[0] = n\n\tb[0] = m\n\tc[0] = 7\n\td[0] = n > 0\n}")
+	for _, want := range []string{
+		"long long* a", "unsigned int* b", "unsigned long long* c", "bool* d",
+		"long long n", "unsigned int m",
+		// The suffix is what keeps the literal's type the one Go gave it,
+		// rather than the first C++ type it happens to fit in.
+		"c[0] = 7ull;",
+	} {
+		if !strings.Contains(u.Source, want) {
+			t.Errorf("missing %q in:\n%s", want, u.Source)
+		}
+	}
+}
+
+// TestFloat64Directive covers both spellings of the opt-in, and that a double
+// constant keeps its precision rather than being rounded to a float.
+func TestFloat64Directive(t *testing.T) {
+	onFunc := transpile(t, "//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float64) { y[0] = 0.1 }")
+	if !strings.Contains(onFunc.Source, "double* y") {
+		t.Errorf("directive on the function had no effect:\n%s", onFunc.Source)
+	}
+	if !strings.Contains(onFunc.Source, "y[0] = 0.1;") {
+		t.Errorf("double constant not rendered at full width:\n%s", onFunc.Source)
+	}
+
+	// Directly above the package clause, with no blank line: that is what makes
+	// it the file's doc comment rather than a detached comment near the top.
+	src := "//gocuda:float64\npackage kernels\n\nimport \"github.com/CWBudde/gocuda/gpu\"\n\n" +
+		"func K(ctx gpu.Ctx, y []float64) { y[0] = 1 }\n"
+	u, err := simt.Transpile(fstest.MapFS{"k.go": &fstest.MapFile{Data: []byte(src)}}, "K")
+	if err != nil {
+		t.Fatalf("directive in the package comment was not honoured: %v", err)
+	}
+	if !strings.Contains(u.Source, "double* y") {
+		t.Errorf("file-wide directive had no effect:\n%s", u.Source)
+	}
+}

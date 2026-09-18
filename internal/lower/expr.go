@@ -150,8 +150,13 @@ func (t *transpiler) expr(e ast.Expr) cexpr {
 		if typ == nil {
 			return atom("")
 		}
-		if _, ok := typ.Underlying().(*types.Slice); !ok {
-			t.fail(e.Pos(), "only slices can be indexed in kernels")
+		switch typ.Underlying().(type) {
+		case *types.Slice, *types.Array:
+			// A Go array and a C one index identically; the difference between
+			// them is what happens when the whole thing is assigned or passed,
+			// which is refused elsewhere.
+		default:
+			t.fail(e.Pos(), "only slices and arrays can be indexed in kernels")
 			return atom("")
 		}
 		// The subscript itself is delimited by the brackets, so it needs no
@@ -165,6 +170,19 @@ func (t *transpiler) expr(e ast.Expr) cexpr {
 }
 
 func (t *transpiler) binary(e *ast.BinaryExpr) cexpr {
+	if e.Op == token.EQL || e.Op == token.NEQ {
+		// Go compares a struct or an array field by field. C++ gives a plain
+		// aggregate no operator== at all, so emitting the same spelling would
+		// produce an NVRTC error about generated code nobody wrote -- and, if
+		// one ever were defined, a comparison that included padding.
+		if typ := t.typeOf(e.X); typ != nil {
+			switch typ.Underlying().(type) {
+			case *types.Struct, *types.Array:
+				t.fail(e.Pos(), "%s compares %s field by field in Go, which C cannot do; compare the fields you mean", e.Op, typ)
+				return atom("")
+			}
+		}
+	}
 	if p, ok := cBinaryPrec[e.Op]; ok {
 		return cexpr{fmt.Sprintf("%s %s %s", t.expr(e.X).at(p), e.Op, t.expr(e.Y).at(p+1)), p}
 	}

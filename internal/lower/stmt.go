@@ -107,6 +107,13 @@ func (t *transpiler) define(id *ast.Ident, rhs ast.Expr) string {
 		t.fail(id.Pos(), "%s has no resolved type", id.Name)
 		return ""
 	}
+	if _, ok := obj.Type().Underlying().(*types.Array); ok {
+		// `a := b` copies in Go and will not compile in C++, exactly as `a = b`
+		// does not. A declaration with an initialiser is the same move.
+		t.refuseArrayValue(rhs, id.Pos())
+		t.poison(obj)
+		return ""
+	}
 	before := len(t.diags)
 	decl := t.cdecl(obj.Type(), cname(id.Name), id.Pos())
 	if len(t.diags) > before {
@@ -201,6 +208,25 @@ func (t *transpiler) sharedSize(e ast.Expr) (n int, isShared, ok bool) {
 	return n, true, true
 }
 
+// refuseArrayValue reports, and refuses, an expression whose type is an array
+// being moved as a whole.
+//
+// Go copies an array on assignment. C++ will not assign a raw array at all, so
+// the same spelling becomes an NVRTC error about generated code. An array here
+// is storage: declare it, index it, len it, range it, put it in a struct. Copy
+// it element by element, or wrap it in a struct, which both languages copy.
+func (t *transpiler) refuseArrayValue(e ast.Expr, pos token.Pos) bool {
+	typ := t.typeOf(e)
+	if typ == nil {
+		return false
+	}
+	if _, ok := typ.Underlying().(*types.Array); ok {
+		t.fail(pos, "a whole %s cannot be assigned: Go copies it and C++ will not assign an array at all; copy the elements, or wrap the array in a struct", typ)
+		return true
+	}
+	return false
+}
+
 // simple renders an assignment or increment inline, without a terminator, so
 // it can also serve as a for-loop clause.
 func (t *transpiler) simple(s ast.Stmt) string {
@@ -226,6 +252,9 @@ func (t *transpiler) simple(s ast.Stmt) string {
 		case token.ASSIGN, token.ADD_ASSIGN, token.SUB_ASSIGN, token.MUL_ASSIGN,
 			token.QUO_ASSIGN, token.REM_ASSIGN, token.AND_ASSIGN, token.OR_ASSIGN,
 			token.XOR_ASSIGN, token.SHL_ASSIGN, token.SHR_ASSIGN:
+			if t.refuseArrayValue(s.Lhs[0], s.Pos()) {
+				return ""
+			}
 			// Both sides stand in positions that accept a whole expression, so
 			// neither needs parentheses of its own.
 			return fmt.Sprintf("%s %s %s", t.expr(s.Lhs[0]).s, s.Tok, t.expr(s.Rhs[0]).s)
@@ -276,7 +305,7 @@ func (t *transpiler) decl(s *ast.DeclStmt) {
 					continue
 				}
 				if len(vs.Values) == 0 {
-					t.line("%s = 0;", decl)
+					t.line("%s = %s;", decl, t.zeroValue(obj.Type()))
 					continue
 				}
 				t.line("%s = %s;", decl, t.expr(vs.Values[i]).s)
@@ -517,14 +546,18 @@ func (t *transpiler) rangeStmt(s *ast.RangeStmt) {
 	}
 
 	var limit cexpr
-	isSlice := false
+	indexable := false
 	xt := t.typeOf(s.X)
 	if xt == nil {
 		return
 	}
 	switch typ := xt.Underlying().(type) {
 	case *types.Slice:
-		limit, isSlice = t.lengthOf(s.X), true
+		limit, indexable = t.lengthOf(s.X), true
+	case *types.Array:
+		// An array's length is part of its type, so the bound is a literal
+		// rather than a companion parameter.
+		limit, indexable = number(strconv.FormatInt(typ.Len(), 10)), true
 	case *types.Basic:
 		if typ.Info()&types.IsInteger == 0 {
 			t.fail(s.X.Pos(), "cannot range over %s", typ)
@@ -535,8 +568,8 @@ func (t *transpiler) rangeStmt(s *ast.RangeStmt) {
 		t.fail(s.X.Pos(), "cannot range over %s", typ)
 		return
 	}
-	if value != nil && !isSlice {
-		t.fail(s.Pos(), "only a slice can be ranged over with a value")
+	if value != nil && !indexable {
+		t.fail(s.Pos(), "only a slice or an array can be ranged over with a value")
 		return
 	}
 
