@@ -1009,7 +1009,7 @@ A transpiler is trusted through evidence, not review.
       The **emulator half was already closed, by the second half of the item's
       own "or"**: `RunCPU`'s doc comment states that the kernel's slices arrive
       through a closure and never pass through it, so there is nothing to
-      compare, and that this is deliberate rather than an oversight — there a
+      compare, and that this is deliberate rather than an oversight — there, a
       kernel is ordinary Go, where aliasing is defined. Detecting it would mean
       a new API taking the buffers, which is a cost for a backend that has no
       undefined behaviour to prevent.
