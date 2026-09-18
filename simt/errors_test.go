@@ -87,6 +87,14 @@ func TestUnsupported(t *testing.T) {
 		body: "type P struct{ X float32 }\n\nfunc (p P) Twice() float32 { return p.X * 2 }\n\nfunc K(ctx gpu.Ctx, y []float32, ps []P) { y[0] = ps[0].Twice() }",
 		want: "methods are not supported in kernels",
 	}, {
+		name: "a switch over a struct",
+		body: "type P struct{ X, Y float32 }\n\nfunc K(ctx gpu.Ctx, y []float32, ps []P) {\n\tswitch ps[0] {\n\tcase P{X: 1}:\n\t\ty[0] = 1\n\t}\n}",
+		want: "cannot switch on kernels.P",
+	}, {
+		name: "a zero-length array",
+		body: "func K(ctx gpu.Ctx, y []float32) { var a [0]float32; y[0] = float32(len(a)) }",
+		want: "has no elements",
+	}, {
 		name: "int(x) from int64",
 		body: "func K(ctx gpu.Ctx, a []float32, n int64) { a[int(n)] = 1 }",
 		want: "truncates on the device",

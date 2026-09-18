@@ -44,6 +44,17 @@ func TestGeneratedCCompiles(t *testing.T) {
 			"\t\tout[i] = lo*2.5 + hi + float64(n%7)\n" +
 			"\t}\n}",
 	}, {
+		// NVRTC accepted this happily while the counter was an int, which is
+		// why it needed a golden assertion rather than only a compile check --
+		// the wrong answer was in the arithmetic, not in the syntax.
+		name: "ranging over a 64-bit bound",
+		body: "func K(ctx gpu.Ctx, out []int64, n int64) {\n" +
+			"\tfor i := range n {\n\t\tout[0] = i * i\n\t}\n}",
+	}, {
+		name: "the minimum int64 constant",
+		body: "func K(ctx gpu.Ctx, out []int64) {\n" +
+			"\tvar n int64 = -9223372036854775808\n\tout[0] = n\n}",
+	}, {
 		name: "unsigned and 64-bit integer arithmetic",
 		body: "func K(ctx gpu.Ctx, out []int64, x []int32, seed uint32) {\n" +
 			"\ti := ctx.GlobalID()\n" +

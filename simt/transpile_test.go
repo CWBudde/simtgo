@@ -619,3 +619,39 @@ func TestStructDefinedOnce(t *testing.T) {
 		t.Errorf("struct P defined %d times:\n%s", n, u.Source)
 	}
 }
+
+// TestRangeOverAWideIntegerKeepsItsType is a regression test for a silent
+// mistranslation that arrived with int64.
+//
+// Go gives `i` in `for i := range n` the type of n, so an int64 bound makes the
+// index an int64. Emitting `for (int i = 0; ...)` computed every expression
+// using it in 32 bits instead: i*i at i = 50000 is 2500000000 in Go and
+// -1794967296 in C, and a bound above MaxInt32 would never terminate, since the
+// counter wraps before it reaches one. NVRTC compiled it without a murmur.
+func TestRangeOverAWideIntegerKeepsItsType(t *testing.T) {
+	u := transpile(t, "func K(ctx gpu.Ctx, out []int64, n int64) {\n"+
+		"\tfor i := range n {\n\t\tout[0] = i * i\n\t}\n}")
+	if !strings.Contains(u.Source, "for (long long i = 0; i < n; i++)") {
+		t.Errorf("range counter did not keep the bound's type:\n%s", u.Source)
+	}
+
+	// A slice still counts in int, because len() is an int and widening it
+	// would change every committed golden to say the same thing.
+	v := transpile(t, "func K(ctx gpu.Ctx, y []float32) {\n"+
+		"\tfor i := range y {\n\t\ty[i] = 1\n\t}\n}")
+	if !strings.Contains(v.Source, "for (int i = 0; i < y_len; i++)") {
+		t.Errorf("slice range counter changed:\n%s", v.Source)
+	}
+}
+
+// TestMinInt64Literal covers the one integer constant C++ cannot spell
+// directly: it tokenises the positive magnitude first and applies unary minus
+// afterwards, and 9223372036854775808 fits no signed type. NVRTC and nvcc both
+// accept the naive spelling, but the generated .cu is a committed artifact and
+// other compilers are entitled to refuse it.
+func TestMinInt64Literal(t *testing.T) {
+	u := transpile(t, "func K(ctx gpu.Ctx, out []int64) { var n int64 = -9223372036854775808; out[0] = n }")
+	if !strings.Contains(u.Source, "(-9223372036854775807ll - 1)") {
+		t.Errorf("minimum int64 not rendered representably:\n%s", u.Source)
+	}
+}

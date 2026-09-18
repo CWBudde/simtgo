@@ -602,6 +602,14 @@ func IsCtx(typ types.Type) bool {
 // places that genuinely want a bare type, a cast and a return type.
 func (t *transpiler) cdecl(typ types.Type, name string, pos token.Pos) string {
 	if arr, ok := typ.Underlying().(*types.Array); ok {
+		if arr.Len() == 0 {
+			// Go allows [0]T; C++ does not allow a zero-extent array, so
+			// `float a[0]` is an NVRTC error about generated code. There is
+			// nothing to lower it to that would still be an array, and nothing
+			// an author could do with one anyway.
+			t.fail(pos, "%s has no elements, and C++ has no zero-length array to lower it to", typ)
+			return "void " + name
+		}
 		return fmt.Sprintf("%s %s[%d]", t.ctypeElem(arr.Elem(), pos), name, arr.Len())
 	}
 	return t.ctype(typ, pos) + " " + name

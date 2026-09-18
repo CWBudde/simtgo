@@ -547,6 +547,12 @@ func (t *transpiler) rangeStmt(s *ast.RangeStmt) {
 
 	var limit cexpr
 	indexable := false
+	// The counter's C type. len() is an int, so a slice or an array counts in
+	// int; ranging over an integer gives the index that integer's own type,
+	// and emitting int for a wider one would be a mistranslation rather than a
+	// narrowing -- `i*i` at i = 50000 is 2500000000 in Go and -1794967296 in
+	// 32-bit C, and a bound above MaxInt32 would never terminate at all.
+	counter := "int"
 	xt := t.typeOf(s.X)
 	if xt == nil {
 		return
@@ -563,6 +569,7 @@ func (t *transpiler) rangeStmt(s *ast.RangeStmt) {
 			t.fail(s.X.Pos(), "cannot range over %s", typ)
 			return
 		}
+		counter = t.ctype(xt, s.X.Pos())
 		limit = t.expr(s.X)
 	default:
 		t.fail(s.X.Pos(), "cannot range over %s", typ)
@@ -608,7 +615,7 @@ func (t *transpiler) rangeStmt(s *ast.RangeStmt) {
 	// The limit becomes the right operand of a comparison, so anything binding
 	// looser than one has to be parenthesised: `i < a & b` would otherwise
 	// compare first and mask afterwards.
-	t.line("for (int %s = 0; %s < %s; %s++)", name, name, limit.at(precRel+1), name)
+	t.line("for (%s %s = 0; %s < %s; %s++)", counter, name, name, limit.at(precRel+1), name)
 	t.loopBody(s.Body, head, lbl)
 }
 
@@ -755,6 +762,16 @@ func (t *transpiler) chainSwitch(s *ast.SwitchStmt) {
 	if s.Tag != nil {
 		typ := t.typeOf(s.Tag)
 		if typ == nil {
+			return
+		}
+		// Each arm becomes `switch_tag == <case>`, which never passes through
+		// binary() and so would slip past the refusal there. Go compares a
+		// struct or an array field by field and C++ gives a plain aggregate no
+		// operator== at all, so this reached NVRTC as an error about generated
+		// code instead of being refused with a position.
+		switch typ.Underlying().(type) {
+		case *types.Struct, *types.Array:
+			t.fail(s.Tag.Pos(), "cannot switch on %s: each case would compare it field by field in Go, which C cannot do; switch on the field you mean", typ)
 			return
 		}
 		tag = t.reserve("switch_tag")

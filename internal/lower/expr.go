@@ -6,6 +6,7 @@ import (
 	"go/constant"
 	"go/token"
 	"go/types"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -475,6 +476,15 @@ func (t *transpiler) constant(tv types.TypeAndValue, pos token.Pos) cexpr {
 		if !ok {
 			t.fail(pos, "constant %s does not fit in an int64", tv.Value)
 			return atom("")
+		}
+		if v == math.MinInt64 {
+			// C++ has no literal for this value: it tokenises the positive
+			// magnitude first and applies unary minus afterwards, and
+			// 9223372036854775808 fits no signed type. NVRTC and nvcc both
+			// accept the straightforward spelling anyway, but the generated
+			// .cu is a committed artifact people compile with other tools, so
+			// it is written the way the standard allows.
+			return cexpr{"(-9223372036854775807ll - 1)", precAtom}
 		}
 		return number(strconv.FormatInt(v, 10) + intSuffix(basic.Kind()))
 	}
