@@ -168,7 +168,7 @@ func TestSharedTileOutsideALaunch(t *testing.T) {
 // wrong answer, so the assertion is that the second launch returns at all.
 func TestSharedTilePanicDoesNotStrandTheBlock(t *testing.T) {
 	msg := mustPanic(t, func() {
-		gpu.RunCPUShared(1, 8, 4, func(ctx gpu.Ctx) {
+		gpu.RunCPUShared(1, 8, 8, func(ctx gpu.Ctx) {
 			a := ctx.SharedI32(8)
 			a[ctx.ThreadIdx()] = 1
 			ctx.SyncThreads()
@@ -176,7 +176,12 @@ func TestSharedTilePanicDoesNotStrandTheBlock(t *testing.T) {
 				_ = a[999] // out of range, with two more shared calls to come
 			}
 			b := ctx.SharedDynI32()
-			b[0] = 1
+			// Each thread writes its own slot. Every thread writing b[0] would
+			// be a genuine race -- on the device as much as here -- and the
+			// emulator is built to keep reporting one under -race rather than
+			// to make a tile look atomic. The subject of this test is the
+			// barrier and the lock, so it must not smuggle in a race of its own.
+			b[ctx.ThreadIdx()] = 1
 			ctx.SyncThreads()
 		})
 	})
