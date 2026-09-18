@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/CWBudde/gocuda/cuda"
+	"github.com/CWBudde/gocuda/internal/tolerance"
 	"github.com/CWBudde/gocuda/kernels"
 )
 
@@ -75,6 +76,13 @@ func registerFIR(t testing.TB, u *Unit, ptx *cuda.PTX, arch string) {
 // runFIR launches the kernel and checks the result against a direct
 // convolution, so that a kernel loaded from a prebuilt image is held to the
 // same standard as one just compiled rather than merely to "it launched".
+//
+// The comparison is tolerance.AssertClose, which is the rule NUMERICS.md
+// states and the parity tests apply. It used to be a bare absolute 1e-5,
+// following neither of the two relative comparisons elsewhere. The bound is
+// unchanged in effect as well as in value: this signal is a 17-tap moving
+// average of sines, so every reference value has magnitude at most 1 and the
+// scale the rule divides by is its floor of 1 throughout.
 func runFIR(t *testing.T, ctx *cuda.Context, k *Kernel) {
 	t.Helper()
 	const n = 4096
@@ -110,17 +118,15 @@ func runFIR(t *testing.T, ctx *cuda.Context, k *Kernel) {
 	if err != nil {
 		t.Fatalf("Download: %v", err)
 	}
-	for i := range got {
-		var want float32
+	want := make([]float32, n)
+	for i := range want {
 		for j := range h {
 			if i-j >= 0 {
-				want += h[j] * x[i-j]
+				want[i] += h[j] * x[i-j]
 			}
 		}
-		if math.Abs(float64(got[i]-want)) > 1e-5 {
-			t.Fatalf("y[%d] = %v, want %v", i, got[i], want)
-		}
 	}
+	tolerance.AssertClose(t, "gpu vs reference", got, want, 1e-5)
 }
 
 // TestBuildPrebuilt is the whole point of the ahead-of-time path: the kernel

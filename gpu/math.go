@@ -117,7 +117,29 @@ func Exp64(x float64) float64 { return math.Exp(x) }
 func Log64(x float64) float64 { return math.Log(x) }
 
 // Fmin64 returns the smaller of x and y (fmin).
-func Fmin64(x, y float64) float64 { return math.Min(x, y) }
+//
+// The NaN cases are taken out before math.Min sees them, for the reason Fmin
+// gives: math.Min propagates a NaN and fmin returns the operand that is not
+// one. Everything else is math.Min's, which unlike the float32 case exists and
+// documents the remaining special values -- -Inf wins, and Min(-0, +0) is -0,
+// which is what fmin does with them too.
+func Fmin64(x, y float64) float64 {
+	switch {
+	case math.IsNaN(x):
+		return y
+	case math.IsNaN(y):
+		return x
+	}
+	return math.Min(x, y)
+}
 
-// Fmax64 returns the larger of x and y (fmax).
-func Fmax64(x, y float64) float64 { return math.Max(x, y) }
+// Fmax64 returns the larger of x and y (fmax). The mirror of Fmin64.
+func Fmax64(x, y float64) float64 {
+	switch {
+	case math.IsNaN(x):
+		return y
+	case math.IsNaN(y):
+		return x
+	}
+	return math.Max(x, y)
+}
