@@ -253,7 +253,7 @@ func (g *gen) intExpr(k Kind, d int) Expr {
 			return e
 		}
 	case 5:
-		return &MinMax{Fn: pick(g.r, []string{"min", "max"}), K: k, Args: []Expr{g.expr(k, d-1), g.expr(k, d-1)}}
+		return g.minMax(k, g.expr(k, d-1), g.expr(k, d-1))
 	case 6:
 		if e := g.callExpr(k, d); e != nil {
 			return e
@@ -373,9 +373,7 @@ func (g *gen) floatExpr(k Kind, d int) Expr {
 			return e
 		}
 	case 4:
-		// Go's builtin min and max, not gpu.Fmin: PLAN.md records that the two
-		// backends disagree about a NaN operand and that nothing tests it.
-		return &MinMax{Fn: pick(g.r, []string{"min", "max"}), K: k, Args: []Expr{g.grounded(k, d-1), g.expr(k, d-1)}}
+		return g.minMax(k, g.grounded(k, d-1), g.expr(k, d-1))
 	case 5:
 		return g.mathCall(k, d)
 	case 6:
@@ -517,6 +515,29 @@ func (g *gen) conv(k Kind, d int) Expr {
 		return &Conv{To: k, X: g.grounded(from, d-1)}
 	}
 	return &Conv{To: k, X: g.expr(from, d-1)}
+}
+
+// minMax picks the smaller or larger of two values, in whichever spelling the
+// subset accepts for the kind.
+//
+// For an integer that is Go's builtin min or max, which lowers to CUDA's. For
+// a float it is gpu.Fmin or gpu.Fmax, because the builtins are refused there:
+// Go's propagate a NaN and the device's fminf and fmaxf ignore one, so the
+// same expression computes two different things.
+//
+// The generator used to emit the builtins on floats deliberately, with a
+// comment saying PLAN.md recorded the disagreement as untested. It is tested
+// now -- the host differential found it in six seconds -- and the subset
+// refuses the shape, so generating it would only be generating a refusal.
+func (g *gen) minMax(k Kind, x, y Expr) Expr {
+	if !k.float() {
+		return &MinMax{Fn: pick(g.r, []string{"min", "max"}), K: k, Args: []Expr{x, y}}
+	}
+	fn := pick(g.r, []string{"Fmin", "Fmax"})
+	if k == KF64 {
+		fn += "64"
+	}
+	return &MathCall{Fn: fn, K: k, Args: []Expr{x, y}}
 }
 
 // clampToInt bounds a float so that converting it to the integer kind `to` is

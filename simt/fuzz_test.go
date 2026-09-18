@@ -17,6 +17,14 @@ import (
 // runs on every push, at the cost of one g++ invocation each, and a case the
 // fuzzer finds becomes one by being written to simt/testdata/fuzz/.
 //
+// A corpus entry is a *seed*, not a frozen program, so a change to the
+// generator changes what that entry tests: all five committed here went green
+// the moment the defects they found were fixed, and some would now generate
+// different source entirely. They are worth having as cheap coverage of the
+// whole pipeline, and they are not what pins any individual defect -- that is
+// the unit test each fix carries, in simt/transpile_test.go, in
+// internal/tolerance and in internal/fuzz/hostrun.
+//
 // The pairs are (program, inputs). They are separate numbers because what a
 // kernel computes and what it is handed are independent choices: the same
 // program against a different input distribution is a different test, and only

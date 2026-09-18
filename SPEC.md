@@ -343,6 +343,17 @@ is what the diagnostic contains. `simt/spec_test.go` checks both directions.
 - min on narrow elements — diagnostic: `min has no overload for it`
 - a shift by a narrow count — diagnostic: ``so `<<` on one can give a different answer``
 
+### min and max, where the two disagree about NaN
+
+- the builtin `min`/`max` on `float32` — diagnostic: `write gpu.Fmin(a, b)`
+- the builtin `min`/`max` on `float64` — diagnostic: `write gpu.Fmax64(a, b)`
+
+Go's `min` and `max` propagate a NaN operand; CUDA's `fminf` and `fmaxf` follow
+IEEE minNum and ignore one, returning the number. So `min(0.0/0.0, x)` is a NaN
+in Go and `x` on the device. `gpu.Fmin` and `gpu.Fmax` are the spelling that
+means the device's answer, and the emulator implements them to match. The
+**integer** overloads are untouched: no integer is a NaN.
+
 ### Shifts, where the two widths disagree
 
 - a Go `int` shifted left by a computed amount — diagnostic:

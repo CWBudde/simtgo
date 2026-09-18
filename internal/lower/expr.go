@@ -420,6 +420,43 @@ func (t *transpiler) call(c *ast.CallExpr) cexpr {
 					return atom("")
 				}
 			}
+			// A float operand is refused for a sharper reason: the two
+			// builtins disagree about NaN. Go's min and max propagate one --
+			// the specification says so -- and CUDA's fminf and fmaxf follow
+			// IEEE minNum, which ignores a NaN operand and returns the number.
+			// So min(0.0/0.0, x) is NaN in Go and x on the device, and the
+			// same expression computes two different things with nothing to
+			// report it.
+			//
+			// The differential fuzzer found this in six seconds of searching.
+			// It had been recorded as known and untested since the numerics
+			// round -- "nothing tests it and no committed kernel reaches it"
+			// -- which is exactly the kind of claim a fuzzer is for.
+			//
+			// gpu.Fmin and gpu.Fmax are the spelling that means the device's
+			// answer, and the emulator implements them to match, so the
+			// refusal has somewhere to point. The integer overloads are
+			// untouched: no integer is a NaN, so there is nothing to disagree
+			// about.
+			for _, a := range c.Args {
+				if tv, ok := t.info.Types[a]; ok && tv.Type != nil {
+					if b, ok := tv.Type.Underlying().(*types.Basic); ok && b.Info()&types.IsFloat != 0 {
+						// gpu.Fmin / gpu.Fmin64, and the C they lower to,
+						// which is fminf for a float and fmin for a double.
+						fn, cfn := "Fmin", "fmin"
+						if f.Name == "max" {
+							fn, cfn = "Fmax", "fmax"
+						}
+						suffix := "f"
+						if b.Kind() == types.Float64 {
+							fn, suffix = fn+"64", ""
+						}
+						t.fail(c.Pos(), "%s propagates a NaN in Go and the device's %s%s ignores one, so the same expression computes two different things; write gpu.%s(a, b), which means the device's answer on both",
+							f.Name, cfn, suffix, fn)
+						return atom("")
+					}
+				}
+			}
 			return atom("%s(%s)", f.Name, t.args(c))
 		}
 		if obj, ok := t.info.Uses[f].(*types.Func); ok {
