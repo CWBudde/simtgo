@@ -623,7 +623,11 @@ func AtomicProbe(ctx gpu.Ctx, bins []int32, x []int32) {
 		want[int(v)%bins]++
 	}
 
-	dbins, _ := cuda.NewSlice[int32](ctx, bins)
+	// Uploaded zeros rather than NewSlice: the kernel only ever adds to these
+	// bins, so an uninitialised allocation would be counted as part of the
+	// histogram. NewSlice does not clear what it hands back, and on a device
+	// that has been used the difference is not academic.
+	dbins, _ := cuda.Upload(ctx, make([]int32, bins))
 	dx, _ := cuda.Upload(ctx, x)
 	defer dbins.Free()
 	defer dx.Free()
@@ -666,7 +670,10 @@ func CASProbe(ctx gpu.Ctx, out []int32) {
 	}
 
 	const n = 1 << 12
-	dout, _ := cuda.NewSlice[int32](ctx, 2)
+	// Zeros for the same reason, and here it decides the test rather than
+	// skewing it: the flag has to start at 0 for any thread to win the CAS,
+	// and the winner count has to start at 0 to mean anything.
+	dout, _ := cuda.Upload(ctx, make([]int32, 2))
 	defer dout.Free()
 
 	if err := k.LaunchN(n, 256, dout); err != nil {
@@ -719,7 +726,8 @@ func TileProbe(ctx gpu.Ctx, out []float32) {
 	}
 
 	const blocks, block = 32, 128
-	dout, _ := cuda.NewSlice[float32](ctx, 1)
+	// Zeros again: every block adds its partial sum into out[0].
+	dout, _ := cuda.Upload(ctx, make([]float32, 1))
 	defer dout.Free()
 
 	if err := k.LaunchDim(cuda.Dim3{X: blocks, Y: 1, Z: 1}, cuda.Dim3{X: block, Y: 1, Z: 1}, dout); err != nil {

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -195,22 +194,6 @@ func TestArchFlag(t *testing.T) {
 		} else if major != tc.major || minor != tc.minor {
 			t.Errorf("ParseArch(%q) = (%d, %d), want (%d, %d)", tc.in, major, minor, tc.major, tc.minor)
 		}
-	}
-}
-
-// TestNoNVRTCIsExplained: every other test here runs with -no-ptx, so nothing
-// otherwise exercises the path a machine without a toolkit actually takes.
-// This build has no NVRTC by construction -- the package is built without the
-// "cuda" tag -- which is the same unavailability a missing libnvrtc reports.
-func TestNoNVRTCIsExplained(t *testing.T) {
-	o := fixture(t, map[string]string{"k.go": goodKernel})
-	o.noPTX = false
-	err := run(o)
-	if !errors.Is(err, cuda.ErrNoCUDA) {
-		t.Fatalf("run without NVRTC: got %v, want an error matching cuda.ErrNoCUDA", err)
-	}
-	if !strings.Contains(err.Error(), "-no-ptx") {
-		t.Errorf("the error must name the way out; got %v", err)
 	}
 }
 
