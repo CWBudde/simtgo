@@ -1,0 +1,34 @@
+# treefmt runs every formatter this repository uses, so that "is it formatted?"
+# has one answer and one command -- `treefmt --ci` -- rather than one per tool.
+# It only multiplexes: the formatting rules stay gofmt's and prettier's.
+#
+# The formatters are named, not pathed, so this file says nothing about where a
+# machine keeps its toolchain. gofmt ships with Go; prettier has to be on PATH
+# (`npm i -g prettier`), and its absence is an error rather than a silent skip,
+# because a formatter that quietly did not run is indistinguishable here from
+# one that had nothing to do.
+
+# Nothing below is hand-written, so reformatting it would only produce diffs
+# nobody authored: the PTX and the generated Go are build artifacts, and the
+# .cu goldens are the exact bytes the emitter produced, which is the whole
+# point of committing them.
+excludes = [
+  "kernels/prebuilt/prebuilt_gen.go",
+  "*.ptx",
+  "simt/testdata/*.cu",
+  ".gocuda-cache/*",
+]
+
+# Files no formatter claims are normal here (go.sum, *.cu, .gitattributes), so
+# report them at debug rather than making every run print warnings about them.
+on-unmatched = "debug"
+
+[formatter.gofmt]
+command = "gofmt"
+options = ["-w"]
+includes = ["*.go"]
+
+[formatter.prettier]
+command = "prettier"
+options = ["--write"]
+includes = ["*.md", "*.yml", "*.yaml", "*.json"]

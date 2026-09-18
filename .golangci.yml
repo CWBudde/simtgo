@@ -1,0 +1,59 @@
+# golangci-lint configuration.
+#
+# The set below is the tool's default plus a handful of linters that were
+# measured to be clean on this tree; nothing here is aspirational. A linter
+# that would need its findings silenced across the repository is left off
+# rather than enabled and muzzled, because a config that reports zero issues
+# only because it was told to is worse than no config at all.
+#
+# Not covered: the `cuda`-tagged half of the tree. A single run sees one build
+# configuration, and the untagged one is where the transpiler, the analyzer and
+# the CPU emulator live -- the bulk of the code and all of the logic a lint can
+# reason about. The driver and NVRTC bindings behind //go:build cuda are
+# reached by `go vet -tags cuda ./...` in CI instead, which is weaker but real.
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    # Prose is a first-class concern in this repository; a typo in a doc
+    # comment survives review much longer than one in an identifier.
+    - misspell
+    # Doc comments here are full sentences by convention, and godot is the
+    # only thing that keeps that from drifting one comment at a time.
+    - godot
+    # The emitter's whole job is types; a conversion that does nothing is a
+    # sign the author was unsure which type they had.
+    - unconvert
+    - copyloopvar
+    - usestdlibvars
+    - nilerr
+    - nakedret
+
+  settings:
+    errcheck:
+      # Writing usage text to a flag set's output or to stderr has no failure
+      # a program can act on -- the place the message would go is the thing
+      # that failed. Checking it would only add noise at every call site.
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+
+  exclusions:
+    generated: lax
+    paths:
+      # Written by `gocuda generate`; its shape is the generator's business.
+      - kernels/prebuilt/prebuilt_gen\.go
+    rules:
+      # A deferred Close on a CUDA context in an example or a test has nowhere
+      # to report to: the process is on its way out and the device teardown is
+      # not what the example or the test is demonstrating.
+      - path: (^examples/|_test\.go$)
+        linters:
+          - errcheck
+        source: \.Close\(\)
+
+formatters:
+  enable:
+    - gofmt

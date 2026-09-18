@@ -125,7 +125,7 @@ func run(o generateOptions) error {
 		units = append(units, u)
 	}
 
-	compiled := map[string]compiledPTX{}
+	var compiled map[string]compiledPTX
 	switch {
 	case o.check || o.noPTX:
 		// Both modes reuse whatever PTX is on disk, and keep only what still
