@@ -30,7 +30,8 @@ and a CPU/GPU parity test.
 | `compute-sanitizer` clean on all four tools                  | it runs by hand, not in CI                      |
 | A kernel that cannot be lowered fails `go build`             | —                                               |
 | Builds and ships with no CUDA installed, no cgo anywhere     | Windows                                         |
-| 1-D/2-D/3-D grids, structs, arrays, atomics, warp vocabulary | fast math, tuple returns                        |
+| 1-D/2-D/3-D grids, structs, arrays, atomics, warp vocabulary | tuple returns                                   |
+| Opt-in fast math, with the hash split that keeps it honest   | a timing harness to say it is faster            |
 | Driver API: 18 calls, fully synchronous                      | streams, events, async copies, pinned memory    |
 | Tile track: 7 ops, 1-D `float32`, one windowed               | reductions, 2-D, fusion planning                |
 
@@ -220,23 +221,32 @@ The shapes of those decisions are in
 Two remain.
 
 - [ ] **Opt-in fast math, and `#pragma unroll` hints for tap-style loops.**
-  - [ ] `//gocuda:fastmath`, read exactly as `//gocuda:float64` is:
+  - [x] `//gocuda:fastmath`, read exactly as `//gocuda:float64` is:
         translation-unit scoped, refused on a device function for the same
-        reason.
-  - [ ] `cuda.Compile` gains the option. Today it passes only
-        `--gpu-architecture`, which is why every numerical setting is a default
-        nobody chose — see
-        [`docs/toolchain.md`](docs/toolchain.md#the-compile-options-are-one-option).
-  - [ ] **`Unit.SourceHash` must cover the flag.** Otherwise a prebuilt compiled
-        without it is found and used for a kernel that asked for it, and the
-        whole staleness story depends on that hash meaning "these exact bytes,
-        compiled this exact way".
-  - [ ] `NUMERICS.md` gains a section. `--use_fast_math` implies `--ftz=true`,
-        `--prec-div=false`, `--prec-sqrt=false` and `--fmad=true` — four of the
-        measured defaults reversed at once — so the tolerance policy has to say
-        what a fast-math kernel may still be asserted to.
+        reason. (2026-09-19) — and refused on a helper for a second reason of
+        its own: NVRTC takes the option for a compilation, not for a function.
+  - [x] `cuda.Compile` gains the option. (2026-09-19) — variadic
+        `CompileOption`s, built in `nvrtcOptions` in the untagged half so the
+        command line is pinned by a test on a machine with no CUDA. See
+        [`docs/toolchain.md`](docs/toolchain.md#the-compile-options-are-one-option-plus-the-one-a-kernel-asks-for).
+  - [x] **`Unit.SourceHash` must cover the flag.** (2026-09-19) — by emitting a
+        `// gocuda: fastmath` marker into the generated C rather than salting
+        the hash, so `SourceHash` still means "these exact bytes" and
+        `internal/jit`'s cache key inherits the split for free.
+  - [x] `NUMERICS.md` gains a section. (2026-09-19) — _Fast math, when it is
+        asked for_: the one-variable PTX experiment, the measured 1 ulp on a
+        T550, and the tolerance a fast-math kernel may be held to. It also
+        corrected three claims the new artifact falsified.
   - [ ] `#pragma unroll` separately and smaller: a directive on a tap-style
         loop. Measure before claiming; NVRTC already unrolls these.
+        (2026-09-19) — partial: measured, and the answer is that the emitter
+        should **not** write one. The pragma leaves the PTX alone but adds a
+        `.pragma "nounroll"` that stops `ptxas` unrolling, taking `FIR`'s tap
+        loop from 29 `FFMA` in SASS to 5.
+        [What was measured](docs/toolchain.md#pragma-unroll-on-the-fir-tap-loop-makes-it-slower).
+        Closing the box is a decision, not a measurement: it needs either
+        agreement that "no directive" is the answer, or Phase 5's timing
+        harness to say something instruction counts cannot.
 - [ ] **Tuple assignment from a call** — `a, b := f()`. The correction worth
       keeping: this is neither necessary nor sufficient for `ctx.GlobalID2()`
       ([why](docs/decisions.md#per-axis-accessors-not-globalid2)), so it splits
@@ -325,7 +335,9 @@ The machinery is described in
   - [ ] `__trap()`, and what the host sees afterwards — the context is unusable,
         so say so in the error rather than letting the next call fail obscurely.
   - [ ] The interaction with `SourceHash` and the prebuilt registry, the same
-        problem fast math has: a debug build must not find a release artifact.
+        problem fast math had, and solved the same way: a debug build must not
+        find a release artifact, so the flag belongs in the generated source
+        where `SourceHash` already sees it.
 
 ## Phase 4 — Host runtime for real workloads (M)
 
