@@ -34,6 +34,19 @@ func TestShapesLowerWithTheirPadding(t *testing.T) {
 		"STail": {pad: "gocuda_pad0[6]", size: 16, why: "six bytes at the end, which move no field and change sizeof"},
 	}
 
+	// Both directions, because the loop below only checks the shapes that are
+	// there: a catalogue that lost STail would run three passing subtests and
+	// say nothing about the trailing hole nothing else can see.
+	have := make(map[string]bool, len(fuzz.Shapes))
+	for _, shape := range fuzz.Shapes {
+		have[shape.Name] = true
+	}
+	for name, w := range want {
+		if !have[name] {
+			t.Errorf("the catalogue no longer has %s (%s)", name, w.why)
+		}
+	}
+
 	for _, shape := range fuzz.Shapes {
 		t.Run(shape.Name, func(t *testing.T) {
 			w, ok := want[shape.Name]
