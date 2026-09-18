@@ -32,20 +32,31 @@ It must be a plain function: no receiver, no results, no type parameters, and
 every parameter named. A kernel package may import **only**
 `github.com/CWBudde/gocuda/gpu`.
 
-Three directives change what a declaration is, and each is a whole comment line
+Four directives change what a declaration is, and each is a whole comment line
 in a doc comment — a mention inside a sentence is prose about the directive:
 
-| Directive          | On a function | On a file's package comment | Means                                                    |
-| ------------------ | ------------- | --------------------------- | -------------------------------------------------------- |
-| `//gocuda:ignore`  | yes           | yes                         | not a kernel, and not lowered at all                     |
-| `//gocuda:device`  | yes           | **no**                      | a helper, not a kernel; refused if it takes no `gpu.Ctx` |
-| `//gocuda:float64` | yes           | yes                         | this kernel may use double precision                     |
+| Directive           | On a function | On a file's package comment | Means                                                    |
+| ------------------- | ------------- | --------------------------- | -------------------------------------------------------- |
+| `//gocuda:ignore`   | yes           | yes                         | not a kernel, and not lowered at all                     |
+| `//gocuda:device`   | yes           | **no**                      | a helper, not a kernel; refused if it takes no `gpu.Ctx` |
+| `//gocuda:float64`  | yes           | yes                         | this kernel may use double precision                     |
+| `//gocuda:fastmath` | yes           | yes                         | compile this kernel with `--use_fast_math`               |
 
 `//gocuda:float64` is a promise about what a launch costs, so it belongs to the
 kernel and covers the whole translation unit including every helper the kernel
 reaches. A helper may not carry its own — otherwise a kernel without the
 directive could acquire double precision through a call. The same helper may
 therefore lower as `float` in one kernel and `double` in another.
+
+`//gocuda:fastmath` is scoped the same way and refused on a helper for the same
+reason, with one of its own: `--use_fast_math` is given to a compilation rather
+than to a function, so honouring it for one helper and not the rest of the
+translation unit is not something NVRTC can be asked for. It changes no
+generated code — it sets four NVRTC options, which
+[`NUMERICS.md`](NUMERICS.md) tabulates — but the generated source records it in
+a `// gocuda: fastmath` marker line, so a kernel compiled with the flag and the
+same kernel without it hash differently and cannot share an ahead-of-time
+artifact.
 
 ### Device functions
 
@@ -329,6 +340,7 @@ is what the diagnostic contains. `simt/spec_test.go` checks both directions.
 
 - float64 without the directive — diagnostic: `float64 needs //gocuda:float64 on kernel K`
 - //gocuda:float64 on a device function — diagnostic: `belongs on the kernel, not on device function half`
+- //gocuda:fastmath on a device function — diagnostic: `belongs on the kernel, not on device function scaled`
 - a float64 helper whose type never surfaces — diagnostic: `gpu.Sqrt64 is double precision and needs //gocuda:float64 on kernel K`
 - a float64 helper on a float64 kernel without the directive — diagnostic: `needs //gocuda:float64 on kernel K`
 

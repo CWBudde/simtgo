@@ -40,6 +40,14 @@ var refusals = []refusal{{
 	body: "//gocuda:float64\nfunc half(x float32) float32 { return x / 2 }\n\nfunc K(ctx gpu.Ctx, a []float32) { a[0] = half(a[1]) }",
 	want: "belongs on the kernel, not on device function half",
 }, {
+	// Refused for the reason the float64 one above is, with a sharper edge:
+	// --use_fast_math is handed to a compilation, not to a function, so NVRTC
+	// could not honour it for one helper and not the rest of the unit even if
+	// the emitter tried.
+	name: "//gocuda:fastmath on a device function",
+	body: "//gocuda:fastmath\nfunc scaled(x float32) float32 { return x / 2 }\n\nfunc K(ctx gpu.Ctx, a []float32) { a[0] = scaled(a[1]) }",
+	want: "belongs on the kernel, not on device function scaled",
+}, {
 	// The four narrow integers are storage and nothing else. They cross as
 	// slice elements, array elements and struct fields, where the widths
 	// agree and no arithmetic happens; every position that exists in order

@@ -141,12 +141,13 @@ So the committed artifacts are all built by 12.8 and stay at `.version 8.7`,
 even when the only NVRTC on the machine doing the work is newer. Worth knowing
 before regenerating: check what `nvrtcVersion` reports, not what is on `PATH`.
 
-## The compile options are one option
+## The compile options are one option, plus the one a kernel asks for
 
-`cuda.Compile` passes exactly one NVRTC option, `--gpu-architecture`. **Every
-numerical setting is therefore a default nobody chose**, which is a different
-claim from "we chose the defaults" and is the reason
-[`../NUMERICS.md`](../NUMERICS.md) exists.
+`cuda.Compile` passes `--gpu-architecture` always and `--use_fast_math` when
+the caller asks, which `simt` does for a kernel carrying `//gocuda:fastmath`
+and never otherwise. **Every other numerical setting is a default nobody
+chose**, which is a different claim from "we chose the defaults" and is the
+reason [`../NUMERICS.md`](../NUMERICS.md) exists.
 
 Those defaults were established rather than assumed: recompiling `FIR.cu`,
 `Quantize.cu` and `Magnitude.cu` with only that option reproduces the committed
@@ -168,6 +169,56 @@ Two findings that the reasoning did not anticipate, both recorded in
   not reach.
 - **`Magnitude`'s `fma` survives `--fmad=false`**, so it is inside `hypotf` and
   is not evidence of source contraction. FIR and Quantize are.
+
+## `#pragma unroll` on the FIR tap loop makes it slower
+
+Measured because the roadmap's own note — "NVRTC already unrolls these" — was a
+guess, and because the answer turned out to be stronger than the guess: the
+pragma is not redundant, it is **counterproductive**.
+
+The experiment is `kernels/prebuilt/FIR.cu`, unmodified and with
+`#pragma unroll 4` and bare `#pragma unroll` inserted directly above the tap
+loop `for (int k = 0; k < h_len; k++)`. Each is compiled with NVRTC 12.8 at
+`--gpu-architecture=compute_75`, then assembled for `sm_75` and disassembled:
+
+```sh
+ptxas -arch=sm_75 fir.ptx -o fir.cubin && cuobjdump -sass fir.cubin
+```
+
+**At the PTX level the pragma changes almost nothing.** All three produce the
+same 153 instructions with the same five `fma.rn.f32` — NVRTC's front end has
+_already_ unrolled the tap loop five ways, which is where `../NUMERICS.md`'s
+"`fma.rn.f32` appears five times in `FIR`" comes from. The only difference is
+one added line: a `.pragma "nounroll"` on the tap loop's own basic block.
+
+**At the SASS level that one line costs most of the unrolling**, because
+`ptxas` was doing the real work and the marker tells it to stop:
+
+| variant            | SASS instructions | `FFMA` | `LDS` | `BRA` |
+| ------------------ | ----------------- | ------ | ----- | ----- |
+| unmodified         | 272               | 29     | 29    | 16    |
+| `#pragma unroll 4` | 176               | 5      | 5     | 11    |
+| `#pragma unroll`   | 176               | 5      | 5     | 11    |
+
+So the loop that runs on the device is unrolled **29 ways** when nothing asks
+for it and **5** when something does. Fewer static instructions here means more
+dynamic iterations, not less work.
+
+The conclusion for the roadmap item: there is nothing for the emitter to do.
+Teaching it to write `#pragma unroll` on a tap-style loop would hand `ptxas` a
+`nounroll` marker it does not currently get. If unrolling is ever worth
+controlling it has to be controlled where the decision is made, which is
+`ptxas`, and on evidence from a timing harness this repository does not yet
+have — the numbers above are instruction counts, and no part of this measures
+speed.
+
+**Caveat, and it is a real one.** The `ptxas` on this machine is 12.0 while
+NVRTC is 12.8, so NVRTC's PTX (ISA 8.7) has to have its `.version` line
+rewritten to 8.0 before this `ptxas` will assemble it. The instructions in
+`FIR` predate both, and the comparison is between three PTX files treated
+identically, so the skew cannot favour one variant — but a machine with a
+matched toolkit might see different absolute counts. One machine is one
+machine.
 
 ## Launch parameters go through `runtime.Pinner`
 

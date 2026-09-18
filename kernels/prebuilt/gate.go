@@ -23,6 +23,7 @@ var Gate = []Lowered{
 	Histogram,
 	VecAdd,
 	Magnitude,
+	MagnitudeFast,
 	Quantize,
 	Scale,
 	Softclip,

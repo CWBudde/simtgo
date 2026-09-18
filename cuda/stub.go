@@ -74,7 +74,7 @@ func (f *Function) LaunchSync(grid, block Dim3, sharedBytes int, args ...Arg) er
 }
 
 // Compile JIT-compiles CUDA C to PTX.
-func Compile(src, name, arch string) (*PTX, error) { return nil, ErrNoCUDA }
+func Compile(src, name, arch string, opts ...CompileOption) (*PTX, error) { return nil, ErrNoCUDA }
 
 // NVRTCVersion reports the version of the NVRTC library.
 func NVRTCVersion() (major, minor int, err error) { return 0, 0, ErrNoCUDA }

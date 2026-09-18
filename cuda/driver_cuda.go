@@ -437,7 +437,11 @@ func (f *Function) LaunchSync(grid, block Dim3, sharedBytes int, args ...Arg) er
 // carries the warnings a generated kernel provoked, and on failure it is the
 // only thing that explains what the kernel got wrong, which is why a refused
 // compilation is a *CompileError holding the whole log rather than a code.
-func Compile(src, name, arch string) (*PTX, error) {
+//
+// arch is required; opts are the numerical settings, of which WithFastMath is
+// currently the only one. Everything not passed is NVRTC's default, and
+// NUMERICS.md says what those defaults are and how they were measured.
+func Compile(src, name, arch string, opts ...CompileOption) (*PTX, error) {
 	if err := loadNVRTC(); err != nil {
 		return nil, err
 	}
@@ -451,12 +455,21 @@ func Compile(src, name, arch string) (*PTX, error) {
 	// The options array is a char** of NUL-terminated strings. purego converts
 	// a string *argument* for us, but this one is an array, so it is built by
 	// hand and pinned like any other pointer-to-pointer handed to C.
-	opt := append([]byte("--gpu-architecture="+arch), 0)
-	opts := []*byte{&opt[0]}
+	//
+	// Every element has to stay pinned for the whole call, so the NUL-
+	// terminated copies are kept in args until nvrtcCompileProgram returns:
+	// pinning argv alone would leave the strings it points at free to move.
 	var pin runtime.Pinner
-	pin.Pin(&opt[0])
-	pin.Pin(&opts[0])
-	cres := nvrtcCompileProgram(prog, 1, unsafe.Pointer(&opts[0]))
+	strs := nvrtcOptions(arch, opts)
+	args := make([][]byte, len(strs))
+	argv := make([]*byte, len(strs))
+	for i, o := range strs {
+		args[i] = append([]byte(o), 0)
+		argv[i] = &args[i][0]
+		pin.Pin(argv[i])
+	}
+	pin.Pin(&argv[0])
+	cres := nvrtcCompileProgram(prog, int32(len(argv)), unsafe.Pointer(&argv[0]))
 	pin.Unpin()
 
 	// The log is read before the status is acted on, because it is the part of

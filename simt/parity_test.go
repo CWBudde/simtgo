@@ -1298,3 +1298,136 @@ func MinMaxProbe(ctx gpu.Ctx, out, a, b []float32) {
 		}
 	}
 }
+
+// TestMagnitudeFastParity is the fast-math kernel, and the one parity test in
+// this file whose tolerance is not 1e-6.
+//
+// The band is 1e-5 rather than 1e-6 because --use_fast_math replaces
+// sqrt.rn.f32 with sqrt.approx.f32 and div.rn.f32 with div.approx.f32, which
+// CUDA documents to roughly 2 ULP each. The measured worst error on this
+// device is one ULP -- the test logs it -- so the band is headroom over a
+// documented bound, not a number the measurement demanded. NUMERICS.md records
+// both figures and says which of them a test may rely on.
+//
+// The reference exists for the usual reason and earns its keep twice here: it
+// is the only way to tell an approximate instruction apart from a wrong one.
+func TestMagnitudeFastParity(t *testing.T) {
+	ctx := device(t)
+	const n, block = 1 << 14, 256
+	const scale float32 = 3
+	re, im := randomSignal(n), randomSignal(n)
+
+	want := make([]float32, n)
+	gpu.RunCPU((n+block-1)/block, block, func(c gpu.Ctx) { kernels.MagnitudeFast(c, want, re, im, scale) })
+
+	// An independent reference, in float64 throughout so that the comparison
+	// measures what the device did rather than what a float32 host did too.
+	ref := make([]float32, n)
+	for i := range ref {
+		r, m := float64(re[i]), float64(im[i])
+		ref[i] = float32(math.Sqrt(r*r+m*m) / float64(scale))
+	}
+	tolerance.AssertClose(t, "cpu vs reference", want, ref, 1e-6)
+
+	k, err := simt.Build(ctx, gocuda.Kernels(), "MagnitudeFast")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	dm, _ := cuda.NewSlice[float32](ctx, n)
+	dre, _ := cuda.Upload(ctx, re)
+	dim, _ := cuda.Upload(ctx, im)
+	defer dm.Free()
+	defer dre.Free()
+	defer dim.Free()
+
+	if err := k.LaunchN(n, block, dm, dre, dim, scale); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	got, _ := dm.Download()
+	tolerance.AssertClose(t, "gpu vs cpu", got, want, 1e-5)
+	tolerance.AssertClose(t, "gpu vs reference", got, ref, 1e-5)
+
+	// The measurement the tolerance above rests on. It is reported rather than
+	// asserted at a tighter bound on purpose: the number is a property of this
+	// driver on this architecture, and pinning it would turn a NUMERICS.md
+	// finding into a test that fails on somebody else's card.
+	var worst float64
+	for i := range got {
+		if d := math.Abs(float64(got[i]) - float64(ref[i])); d/math.Max(math.Abs(float64(ref[i])), 1) > worst {
+			worst = d / math.Max(math.Abs(float64(ref[i])), 1)
+		}
+	}
+	t.Logf("worst relative error against the float64 reference: %g", worst)
+}
+
+// TestFastMathChangesTheAnswer is the negative control for the directive, and
+// the measurement NUMERICS.md's fast-math section rests on.
+//
+// Everything else about fast math can be verified without a device: the marker
+// line, the hash split, the option string. None of that proves the flag
+// reached the hardware. This builds one source twice, differing only in the
+// directive, and compares what the device produced -- so a regression that
+// quietly dropped the option would show up as two identical outputs.
+//
+// It asserts the *shape* of the difference rather than a number: that some
+// outputs differ at all, and that none differs by more than the band the
+// parity test above uses. The exact count is a property of this driver, this
+// architecture and this input, so it is logged and not pinned.
+func TestFastMathChangesTheAnswer(t *testing.T) {
+	ctx := device(t)
+	const n, block = 1 << 14, 256
+	const d float32 = 3
+	a, b := randomSignal(n), randomSignal(n)
+
+	body := "func K(ctx gpu.Ctx, y, a, b []float32, d float32) {\n" +
+		"\ti := ctx.GlobalID()\n" +
+		"\tif i < len(y) {\n" +
+		"\t\tr, m := a[i], b[i]\n" +
+		"\t\ty[i] = gpu.Sqrt(r*r+m*m) / d\n" +
+		"\t}\n}"
+
+	run := func(fast bool) []float32 {
+		src := "package kernels\n\nimport \"github.com/CWBudde/gocuda/gpu\"\n\n"
+		if fast {
+			src += "//gocuda:fastmath\n"
+		}
+		src += body + "\n"
+
+		k, err := simt.Build(ctx, fstest.MapFS{"k.go": &fstest.MapFile{Data: []byte(src)}}, "K")
+		if err != nil {
+			t.Fatalf("Build(fastmath=%v): %v", fast, err)
+		}
+		dy, _ := cuda.NewSlice[float32](ctx, n)
+		da, _ := cuda.Upload(ctx, a)
+		db, _ := cuda.Upload(ctx, b)
+		defer dy.Free()
+		defer da.Free()
+		defer db.Free()
+		if err := k.LaunchN(n, block, dy, da, db, d); err != nil {
+			t.Fatalf("Launch(fastmath=%v): %v", fast, err)
+		}
+		out, _ := dy.Download()
+		return out
+	}
+
+	plain, fast := run(false), run(true)
+
+	differing, worst := 0, 0.0
+	for i := range plain {
+		if plain[i] == fast[i] {
+			continue
+		}
+		differing++
+		if e := math.Abs(float64(plain[i])-float64(fast[i])) / math.Max(math.Abs(float64(plain[i])), 1); e > worst {
+			worst = e
+		}
+	}
+	t.Logf("%d of %d outputs differ (%.1f%%), worst relative gap %g", differing, n, 100*float64(differing)/float64(n), worst)
+
+	if differing == 0 {
+		t.Error("fast math changed nothing on the device; the option is not reaching NVRTC")
+	}
+	if worst > 1e-5 {
+		t.Errorf("fast math moved a result by %g, beyond the 1e-5 the parity tests assert", worst)
+	}
+}

@@ -185,6 +185,48 @@ type PTX struct {
 	Arch  string
 }
 
+// A CompileOption is one setting handed to NVRTC alongside --gpu-architecture.
+//
+// Options are functional rather than a struct so that Compile's signature
+// survives the next one: the arch is required and everything else is a choice,
+// which is the shape simt.BuildOption already has. The type lives here, in the
+// untagged half, so that driver_cuda.go and stub.go declare the same Compile
+// and cuda/surface_test.go can compare them.
+type CompileOption func(*compileOptions)
+
+// compileOptions is the accumulated set. It is unexported because the only
+// thing a caller can usefully do with it is build one, and NVRTC's option
+// strings are an implementation detail of this package rather than an API.
+type compileOptions struct {
+	fastMath bool
+}
+
+// WithFastMath compiles with --use_fast_math.
+//
+// That single flag sets four: --ftz=true, --prec-div=false, --prec-sqrt=false
+// and --fmad=true. NUMERICS.md records what each one does to the emitted PTX
+// and what a test may still assert about a kernel compiled this way. It is
+// never inferred -- simt reaches it only from a kernel's //gocuda:fastmath
+// directive, which is also recorded in the generated source so that the two
+// compilations hash differently.
+func WithFastMath() CompileOption { return func(o *compileOptions) { o.fastMath = true } }
+
+// nvrtcOptions renders the options as the argument strings NVRTC expects,
+// arch first. It is shared by both build tags so that a build without the tag
+// still type-checks the same option set, and so the order is decided in one
+// place -- the committed PTX is reproducible only if the command line is.
+func nvrtcOptions(arch string, opts []CompileOption) []string {
+	var o compileOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+	args := []string{"--gpu-architecture=" + arch}
+	if o.fastMath {
+		args = append(args, "--use_fast_math")
+	}
+	return args
+}
+
 // CompileError is a kernel NVRTC refused.
 type CompileError struct {
 	Name, Arch string

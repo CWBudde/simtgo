@@ -34,6 +34,12 @@ type Request struct {
 
 	// CacheDir receives the .cu and .ptx dumps. Empty disables them.
 	CacheDir string
+
+	// FastMath compiles with --use_fast_math. It needs no place in cacheKey:
+	// simt sets it only for a kernel whose generated Src carries the
+	// "// gocuda: fastmath" marker, so the source the key already hashes
+	// differs, and the two builds cannot collide in the module cache.
+	FastMath bool
 }
 
 // Result is a compiled and loaded kernel.
@@ -160,7 +166,11 @@ func load(ctx *cuda.Context, key string, req Request) (*Result, error) {
 			remember(key, artifacts{ptx: req.PTX, prebuilt: true, arch: req.PTXArch})
 			return req.PTX, nil
 		}
-		p, err := cuda.Compile(req.Src, req.Name+".cu", ctx.Arch())
+		var opts []cuda.CompileOption
+		if req.FastMath {
+			opts = append(opts, cuda.WithFastMath())
+		}
+		p, err := cuda.Compile(req.Src, req.Name+".cu", ctx.Arch(), opts...)
 		if err != nil {
 			// Dump the source even though there is no PTX: a kernel that does
 			// not compile is exactly the one worth reading. The error is

@@ -27,14 +27,18 @@ below carries its provenance:
 
 ## What the compiler is told
 
-**[measured]** `cuda.Compile` (`cuda/driver_cuda.go`) passes NVRTC exactly one
-option — `--gpu-architecture=<arch>` — and the option count in the
-`nvrtcCompileProgram` call is the literal `1`. There is no place in this
-repository where a numerical flag is set.
+**[measured]** `cuda.Compile` (`cuda/driver_cuda.go`) builds its option list in
+`nvrtcOptions` (`cuda/error.go`). `--gpu-architecture=<arch>` is always there
+and is the only one a caller cannot influence; `--use_fast_math` is added when
+the caller passes `cuda.WithFastMath()`, which `simt` does for a kernel
+carrying `//gocuda:fastmath` and for no other reason. There is no third option
+and no other place in this repository where a numerical flag is set.
 
-Every numerical property below is therefore a default that nobody chose. That
-is worth saying plainly, because a default is a decision the moment somebody
-relies on it.
+Every numerical property below is therefore a default that nobody chose —
+**except** in a fast-math kernel, which is the one place somebody did. That
+distinction is the whole point of the directive being opt-in, and the section
+[Fast math, when it is asked for](#fast-math-when-it-is-asked-for) is what it
+buys and costs.
 
 **[cited]** NVRTC's defaults for the four options that matter are
 `--fmad=true`, `--ftz=false`, `--prec-div=true` and `--prec-sqrt=true`;
@@ -56,16 +60,20 @@ exactly one thing each:
 | `--prec-div=false`  | `div.rn.f32`                              | `div.full.f32`                       |
 | `--prec-sqrt=false` | `sqrt.rn.f32`                             | `sqrt.approx.f32`                    |
 
-So the arithmetic the generated kernels get is: multiply-add contracted,
-denormals kept, division and square root in their precise forms rather than
-their approximate ones.
+So the arithmetic a kernel that asked for nothing gets is: multiply-add
+contracted, denormals kept, division and square root in their precise forms
+rather than their approximate ones.
 
-**[measured]** The committed artifacts agree. Across all twelve
-`kernels/prebuilt/*.ptx`: `fma.rn.f32` appears five times in `FIR` and once
-each in `Classify`, `Magnitude` and `Quantize`, `fma.rn.f64` once in
-`BandGain`; `div.rn.f32` appears in `Quantize` and `Softclip` and `sqrt.rn.f32`
-in `Magnitude`; and `grep '\.ftz\.'` and `grep approx` over all of them return
-nothing.
+**[measured]** The committed artifacts agree. Across the twelve
+`kernels/prebuilt/*.ptx` built without a directive: `fma.rn.f32` appears five
+times in `FIR` and once each in `Classify`, `Magnitude` and `Quantize`,
+`fma.rn.f64` once in `BandGain`; `div.rn.f32` appears in `Quantize` and
+`Softclip` and `sqrt.rn.f32` in `Magnitude`; and `grep '\.ftz\.'` and
+`grep approx` over those twelve return nothing.
+
+`MagnitudeFast.compute_75.ptx` is the thirteenth and is deliberately the
+exception — it carries `//gocuda:fastmath`, and every one of those greps finds
+it. That is the point of it existing.
 
 **[unverified]** All of this is **PTX, and PTX is not what runs**. The driver
 JITs it to SASS for the device it finds, and nobody here has looked at that
@@ -142,8 +150,8 @@ question above is still open.
 
 ## Division, square root and the library functions
 
-**[measured]** `div.rn.f32` and `sqrt.rn.f32` — the round-to-nearest forms,
-with no `approx` spelling anywhere in the committed PTX.
+**[measured]** `div.rn.f32` and `sqrt.rn.f32` — the round-to-nearest forms, in
+every committed kernel but the one that asked otherwise.
 
 **[cited]** NVIDIA's accuracy figures for the single-precision library, from
 the _CUDA C++ Programming Guide_, appendix "Mathematical Functions", table
@@ -156,6 +164,68 @@ rounded under `--prec-sqrt=true`; `logf` is within 1 ulp; `sinf`, `cosf` and
 this repository has been compared against a correctly rounded reference on a
 device, so they are an expectation the parity tests are built around rather
 than something the repository has confirmed.
+
+## Fast math, when it is asked for
+
+A kernel carrying `//gocuda:fastmath` is compiled with `--use_fast_math`.
+Nothing else in the repository sets a numerical flag, and no kernel acquires
+this one by being called from one that has it — the directive is refused on a
+device function, because NVRTC takes the option for a compilation and not for a
+function.
+
+**[measured]** The flag reaches NVRTC, and the experiment is one variable.
+Compiling the committed `kernels/prebuilt/MagnitudeFast.cu` twice at
+`--gpu-architecture=compute_75`, once plain and once with `--use_fast_math`,
+changes exactly the four things the option is documented to change and nothing
+else:
+
+| plain         | with `--use_fast_math` |
+| ------------- | ---------------------- |
+| `sqrt.rn.f32` | `sqrt.approx.ftz.f32`  |
+| `div.rn.f32`  | `div.approx.ftz.f32`   |
+| `fma.rn.f32`  | `fma.rn.ftz.f32`       |
+| `mul.f32`     | `mul.ftz.f32`          |
+
+The second column is byte-for-byte what `go generate` committed as
+`MagnitudeFast.compute_75.ptx`, apart from the `.version` line — NVRTC 12.8
+targets PTX ISA 8.7 and a `nvcc -ptx` reproduction defaults to 8.0. The
+instruction stream is identical, which is what makes this a measurement of the
+pipeline rather than of a hand-run compiler.
+
+**[measured]** It changes the answer on the device, and by about one ulp.
+`TestFastMathChangesTheAnswer` (`simt/parity_test.go`, `-tags cuda`) builds one
+source twice, differing only in the directive, and compares what came back from
+a T550 (`sm_75`, CUDA 12.8, driver 580.178.04): **6605 of 16384 outputs differ,
+40.3% of them, and the worst relative gap is 1.19·10⁻⁷** — one ulp of a
+`float32` at the top of its binade. `TestMagnitudeFastParity` measures the same
+kernel against a `float64` reference and gets the same worst figure.
+
+Both halves of that matter. That 40% differ is why the test is a real negative
+control: a regression that dropped the option would show two identical outputs.
+That the worst gap is one ulp is **this kernel, this input, this device** —
+`sqrtf` and division are the two operations here, both of which
+`--use_fast_math` demotes to instructions NVIDIA documents at roughly 2 ulp, so
+a kernel leaning on `expf`, `sinf` or a long accumulation has no claim on this
+number.
+
+**[unverified]** What fast math is _for_ — that it is faster. Nothing here has
+timed it. The repository has no kernel-execution benchmarks at all (that is
+Phase 5), so `--use_fast_math` is currently a documented change in the
+instruction stream and an opt-in to a looser bound, with the speed it is named
+for taken on trust. A kernel should carry the directive because its author
+measured something, not because this file says the flag exists.
+
+**What a test may assert about a fast-math kernel.** The tolerance policy below
+is unchanged; what changes is which number goes in it. `1e-6`, the band every
+other parity test uses, is on the order of ten ulp and is fine here on the
+measured evidence — but it is fine by a factor of ten on one device, against
+one input, for the two cheapest operations the flag touches. `1e-5` is what
+`simt/parity_test.go` actually asserts for `MagnitudeFast`, and it is headroom
+over NVIDIA's documented 2 ulp rather than a number the measurement demanded.
+A fast-math kernel may **not** be held to the exact-equality rule below, in any
+of its three cases: the approximate instructions are not correctly rounded, so
+"every value is exactly representable" stops being a property of the source and
+becomes a property of the compiler's mood.
 
 ## What `float32` means in the emulator
 

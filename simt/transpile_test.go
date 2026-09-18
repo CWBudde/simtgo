@@ -14,7 +14,7 @@ import (
 // TestGolden pins the generated CUDA for every example kernel. Run with
 // GOCUDA_UPDATE=1 to refresh the golden files after an intentional change.
 func TestGolden(t *testing.T) {
-	for _, name := range []string{"VecAdd", "Magnitude", "Scale", "FIR", "Classify", "Softclip", "Transpose", "Quantize", "BandGain", "Gray", "Histogram", "WarpReduceSum"} {
+	for _, name := range []string{"VecAdd", "Magnitude", "MagnitudeFast", "Scale", "FIR", "Classify", "Softclip", "Transpose", "Quantize", "BandGain", "Gray", "Histogram", "WarpReduceSum"} {
 		t.Run(name, func(t *testing.T) {
 			u, err := simt.Transpile(gocuda.Kernels(), name)
 			if err != nil {
@@ -1759,5 +1759,73 @@ func TestUniformBarriersLower(t *testing.T) {
 				t.Errorf("generated CUDA does not contain %q:\n%s", tc.want, got)
 			}
 		})
+	}
+}
+
+// TestFastMathDirective covers both spellings of the opt-in and, more
+// importantly, that asking for it changes the identity of the generated
+// source.
+//
+// That second assertion is the whole item. Fast math is a compiler flag and
+// leaves no trace in the C, so without the marker line the two compilations
+// would produce identical bytes, hash identically, and a prebuilt built
+// without the flag would be found and loaded for a kernel that asked for it.
+// The test is written as an inequality between two hashes rather than as a
+// search for the marker so that it keeps holding if the marker is ever spelled
+// differently.
+func TestFastMathDirective(t *testing.T) {
+	const body = "func K(ctx gpu.Ctx, y []float32, d float32) { y[0] = gpu.Sqrt(y[1]) / d }"
+
+	plain := transpile(t, body)
+	onFunc := transpile(t, "//gocuda:fastmath\n"+body)
+
+	if !onFunc.FastMath {
+		t.Error("directive on the function did not set Unit.FastMath")
+	}
+	if plain.FastMath {
+		t.Error("Unit.FastMath set on a kernel that never asked for it")
+	}
+	if onFunc.SourceHash == plain.SourceHash {
+		t.Fatalf("fast math did not change SourceHash; a prebuilt compiled without the flag would be found for a kernel that asked for it:\n%s", onFunc.Source)
+	}
+
+	// Directly above the package clause, with no blank line: that is what makes
+	// it the file's doc comment rather than a detached comment near the top.
+	src := "//gocuda:fastmath\npackage kernels\n\nimport \"github.com/CWBudde/gocuda/gpu\"\n\n" + body + "\n"
+	onFile, err := simt.Transpile(fstest.MapFS{"k.go": &fstest.MapFile{Data: []byte(src)}}, "K")
+	if err != nil {
+		t.Fatalf("directive in the package comment was not honoured: %v", err)
+	}
+	if !onFile.FastMath {
+		t.Errorf("file-wide directive had no effect:\n%s", onFile.Source)
+	}
+	if onFile.SourceHash != onFunc.SourceHash {
+		t.Error("the two spellings of the directive produced different source; they are the same promise and must be interchangeable")
+	}
+}
+
+// TestFastMathPrebuiltDoesNotCrossOver is the consequence of the hash split,
+// stated as the thing that would actually go wrong: PTX registered for the
+// ordinary build of a kernel must not satisfy the fast-math build of the same
+// kernel, or the flag would be silently dropped on the ahead-of-time path.
+func TestFastMathPrebuiltDoesNotCrossOver(t *testing.T) {
+	const body = "func K(ctx gpu.Ctx, y []float32, d float32) { y[0] = gpu.Sqrt(y[1]) / d }"
+	plainSrc := "package kernels\n\nimport \"github.com/CWBudde/gocuda/gpu\"\n\n" + body + "\n"
+	fastSrc := "package kernels\n\nimport \"github.com/CWBudde/gocuda/gpu\"\n\n//gocuda:fastmath\n" + body + "\n"
+
+	plainFS := fstest.MapFS{"k.go": &fstest.MapFile{Data: []byte(plainSrc)}}
+	fastFS := fstest.MapFS{"k.go": &fstest.MapFile{Data: []byte(fastSrc)}}
+
+	plain, err := simt.Transpile(plainFS, "K")
+	if err != nil {
+		t.Fatalf("Transpile: %v", err)
+	}
+	simt.RegisterPrebuilt(simt.Prebuilt{Name: "K", SourceSHA256: plain.SourceHash, Arch: "compute_75", PTX: []byte("plain")})
+
+	if err := simt.VerifyPrebuilt(plainFS, "K"); err != nil {
+		t.Fatalf("VerifyPrebuilt for the source that was registered: %v", err)
+	}
+	if err := simt.VerifyPrebuilt(fastFS, "K"); err == nil {
+		t.Error("the plain kernel's PTX satisfied the fast-math kernel; the flag would be dropped on the prebuilt path")
 	}
 }
