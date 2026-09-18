@@ -233,7 +233,7 @@ func (p *Program) writeRange(w *srcWriter, s *Range) {
 	if s.Val != nil {
 		names += ", " + s.Val.Name
 	}
-	over := ""
+	var over string
 	switch {
 	case s.Over.Buf != nil:
 		over = s.Over.Buf.Name

@@ -52,6 +52,10 @@ linters:
     # re-evaluated its own bound on every iteration, which is what a C-style
     # loop lets you not notice.
     - intrange
+    # A value written and then overwritten before anything reads it is either
+    # a leftover or a missing branch, and the two are indistinguishable from
+    # the outside -- which is the reason to have neither.
+    - wastedassign
 
   settings:
     errcheck:
