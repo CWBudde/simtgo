@@ -454,6 +454,67 @@ func TestUnsupported(t *testing.T) {
 		name: "a negative shuffle delta",
 		body: "func K(ctx gpu.Ctx, y []float32) { y[0] = ctx.ShuffleDownF32(y[1], -2) }",
 		want: "takes a lane offset and -2 is negative",
+	}, {
+		// The three barrier-divergence rules. A __syncthreads() that only some
+		// threads of a block reach is undefined on the device, and the three
+		// ways to write one are a thread-varying branch around it, a loop that
+		// runs a different number of times per thread, and a return that lets
+		// some threads out before it.
+		name: "a barrier under a thread-varying if",
+		body: "func K(ctx gpu.Ctx, y []float32) { s := ctx.SharedF32(4)\n" +
+			"if ctx.ThreadIdx() == 0 { ctx.SyncThreads() }\ny[0] = s[0] }",
+		want: "ctx.SyncThreads() is under a thread-varying if",
+	}, {
+		name: "a barrier under a thread-varying switch",
+		body: "func K(ctx gpu.Ctx, y []float32) { s := ctx.SharedF32(4)\n" +
+			"switch ctx.ThreadIdx() {\ncase 0:\n\tctx.SyncThreads()\n}\ny[0] = s[0] }",
+		want: "ctx.SyncThreads() is under a thread-varying switch",
+	}, {
+		// The staging loop every kernel here has, with the barrier moved
+		// inside it. This is the case a lexical rule misses: nothing about the
+		// barrier's surroundings is conditional, and the divergence is in how
+		// many times the loop runs.
+		name: "a barrier inside a loop with a thread-varying trip count",
+		body: "func K(ctx gpu.Ctx, y []float32) { s := ctx.SharedF32(4)\n" +
+			"for k := ctx.ThreadIdx(); k < 4; k += ctx.BlockDim() { ctx.SyncThreads() }\ny[0] = s[0] }",
+		want: "ctx.SyncThreads() is inside a loop whose trip count differs between threads",
+	}, {
+		// The trip count is two constants, and it still varies: n is assigned
+		// where only some threads go, so the threads that did not go there
+		// still hold the zero. Without the control dependence in the lattice
+		// this reads as uniform.
+		name: "a barrier in a loop bounded by a thread-varying assignment",
+		body: "func K(ctx gpu.Ctx, y []float32) { n := 0\n" +
+			"if ctx.ThreadIdx() == 0 { n = 10 }\n" +
+			"for k := 0; k < n; k++ { ctx.SyncThreads() }\ny[0] = 1 }",
+		want: "ctx.SyncThreads() is inside a loop whose trip count differs between threads",
+	}, {
+		// A uniform loop that some threads leave early runs a different number
+		// of times for them, which the condition alone cannot show.
+		name: "a barrier in a loop some threads break out of",
+		body: "func K(ctx gpu.Ctx, y []float32) { s := ctx.SharedF32(4)\n" +
+			"for k := 0; k < 4; k++ {\n\tif ctx.ThreadIdx() > 2 { break }\n\tctx.SyncThreads()\n}\ny[0] = s[0] }",
+		want: "ctx.SyncThreads() is inside a loop whose trip count differs between threads",
+	}, {
+		name: "a barrier after a thread-varying return",
+		body: "func K(ctx gpu.Ctx, y []float32) { s := ctx.SharedF32(4)\n" +
+			"if ctx.GlobalID() >= len(y) { return }\nctx.SyncThreads()\ny[0] = s[0] }",
+		want: "ctx.SyncThreads() is preceded by a return at",
+	}, {
+		// The barrier is a call away, which is the whole reason the analysis
+		// is interprocedural: nothing at this call site says a rendezvous is
+		// behind it.
+		name: "a barrier reached through a call, after a thread-varying return",
+		body: "//gocuda:ignore\nfunc stage(ctx gpu.Ctx) float32 { s := ctx.SharedF32(4)\n" +
+			"ctx.SyncThreads()\nreturn s[0] }\n\n" +
+			"func K(ctx gpu.Ctx, y []float32) { if ctx.GlobalID() >= len(y) { return }\ny[0] = stage(ctx) }",
+		want: "stage, which reaches ctx.SyncThreads(), is preceded by a return at",
+	}, {
+		// The warp primitives are held to the same rule, because the emitter
+		// writes the full-warp mask into every one of them.
+		name: "a warp primitive under a thread-varying if",
+		body: "func K(ctx gpu.Ctx, y []float32) { if ctx.ThreadIdx() == 0 { y[0] = ctx.ShuffleF32(y[1], 0) } }",
+		want: "ctx.ShuffleF32 is under a thread-varying if",
 	}}
 
 	for _, tc := range cases {
@@ -479,5 +540,77 @@ func TestImportRefused(t *testing.T) {
 	_, err := simt.Transpile(fsys, "K")
 	if err == nil || !strings.Contains(err.Error(), "may not import") {
 		t.Fatalf("got %v, want an import refusal", err)
+	}
+}
+
+// TestUniformBarriersAccepted is the other half of the barrier-divergence
+// rules, and the half that decides whether they are worth having: a check that
+// refuses everything is easy and useless. Every kernel here writes a barrier
+// or a warp primitive in a place the rules have to leave alone, and each one
+// is a shape the kernels in kernels/ actually use.
+func TestUniformBarriersAccepted(t *testing.T) {
+	const prelude = "package kernels\n\nimport \"github.com/CWBudde/gocuda/gpu\"\n\n"
+	cases := []struct{ name, body string }{{
+		// blockIdx is the same in every thread of a block, so a branch on it
+		// is one the whole block takes together. Refusing this would be the
+		// rule's worst failure: it is how a kernel gives one block a job.
+		name: "a barrier under a block-uniform if",
+		body: "func K(ctx gpu.Ctx, y []float32) { s := ctx.SharedF32(4)\n" +
+			"if ctx.BlockIdx() == 0 { ctx.SyncThreads() }\ny[0] = s[0] }",
+	}, {
+		name: "a barrier under an if on a scalar parameter",
+		body: "func K(ctx gpu.Ctx, y []float32, n int32) { s := ctx.SharedF32(4)\n" +
+			"if n > 0 { ctx.SyncThreads() }\ny[0] = s[0] }",
+	}, {
+		// The staging loop itself: the trip count varies, and the barrier is
+		// after the loop rather than inside it, where every thread arrives.
+		name: "a barrier after a loop with a thread-varying trip count",
+		body: "func K(ctx gpu.Ctx, y []float32) { s := ctx.SharedF32(4)\n" +
+			"for k := ctx.ThreadIdx(); k < 4; k += ctx.BlockDim() { s[k] = 1 }\n" +
+			"ctx.SyncThreads()\ny[0] = s[0] }",
+	}, {
+		// The ragged-tail guard every kernel writes. It varies, and because it
+		// does not return, the threads it excludes are waiting at the barrier
+		// on the other side of it.
+		name: "a barrier after a thread-varying if that does not return",
+		body: "func K(ctx gpu.Ctx, y []float32) { s := ctx.SharedF32(4)\n" +
+			"if ctx.GlobalID() < len(y) { s[0] = 1 }\nctx.SyncThreads()\ny[0] = s[0] }",
+	}, {
+		name: "a barrier inside a loop the whole block runs the same number of times",
+		body: "func K(ctx gpu.Ctx, y []float32) { s := ctx.SharedF32(4)\n" +
+			"for k := 0; k < 4; k++ { ctx.SyncThreads() }\ny[0] = s[0] }",
+	}, {
+		// A slice's length is its companion parameter, which the launch fixes,
+		// so ranging over one counts to a bound the whole block agrees on.
+		name: "a barrier inside a range over a slice",
+		body: "func K(ctx gpu.Ctx, y []float32) { s := ctx.SharedF32(4)\n" +
+			"for i := range y { s[0] = float32(i) \nctx.SyncThreads() }\ny[0] = s[0] }",
+	}, {
+		// WarpReduceSum's shape. The offsets are constants, so every lane
+		// makes every exchange.
+		name: "a warp primitive in a loop over constants",
+		body: "func K(ctx gpu.Ctx, y []float32) { v := y[ctx.GlobalID()]\n" +
+			"for off := gpu.WarpSize / 2; off > 0; off /= 2 { v += ctx.ShuffleDownF32(v, off) }\ny[0] = v }",
+	}, {
+		// A vote is a call every thread makes in order to find out what the
+		// others said; it is the condition, not something under one.
+		name: "a vote in the condition of an if",
+		body: "func K(ctx gpu.Ctx, y []float32) { if ctx.Any(y[0] > 0) { y[1] = 1 } }",
+	}, {
+		// The barrier is behind a call, and every thread makes the call.
+		name: "a barrier reached through a call on the common path",
+		body: "//gocuda:ignore\nfunc stage(ctx gpu.Ctx) float32 { s := ctx.SharedF32(4)\n" +
+			"ctx.SyncThreads()\nreturn s[0] }\n\n" +
+			"func K(ctx gpu.Ctx, y []float32) { v := stage(ctx)\n" +
+			"if ctx.GlobalID() < len(y) { y[0] = v } }",
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fsys := fstest.MapFS{"k.go": &fstest.MapFile{Data: []byte(prelude + tc.body + "\n")}}
+			if _, err := simt.Transpile(fsys, "K"); err != nil {
+				t.Fatalf("refused a kernel every thread of the block runs the same way: %v", err)
+			}
+		})
 	}
 }

@@ -1400,3 +1400,64 @@ func TestWarpPrimitives(t *testing.T) {
 		})
 	}
 }
+
+// TestUniformBarriersLower is the emitted half of the barrier-divergence
+// rules: the shapes the check leaves alone have to keep producing the
+// __syncthreads() and the _sync built-ins they always did.
+//
+// It exists beside TestUniformBarriersAccepted in errors_test.go because the
+// two can fail apart. That one would still pass if the check were relaxed and
+// the emitter then dropped the barrier; this one reads the generated C. The
+// check emits nothing, so every line below is the line the emitter wrote
+// before it existed.
+func TestUniformBarriersLower(t *testing.T) {
+	cases := []struct{ name, body, want string }{{
+		name: "a block-uniform branch keeps its barrier",
+		body: "func K(ctx gpu.Ctx, y []float32) { s := ctx.SharedF32(4)\n" +
+			"if ctx.BlockIdx() == 0 { ctx.SyncThreads() }\ny[0] = s[0] }",
+		want: "if ((int)blockIdx.x == 0)",
+	}, {
+		// The staging loop out of FIR and Histogram, which is the shape the
+		// trip-count rule had to be written not to refuse.
+		name: "a thread-varying staging loop with the barrier after it",
+		body: "func K(ctx gpu.Ctx, y []float32) { s := ctx.SharedF32(4)\n" +
+			"for k := ctx.ThreadIdx(); k < 4; k += ctx.BlockDim() { s[k] = 1 }\n" +
+			"ctx.SyncThreads()\ny[0] = s[0] }",
+		want: "for (int k = (int)threadIdx.x; k < 4; k += (int)blockDim.x)",
+	}, {
+		name: "a ragged-tail guard with the barrier after it",
+		body: "func K(ctx gpu.Ctx, y []float32) { s := ctx.SharedF32(4)\n" +
+			"if ctx.GlobalID() < len(y) { s[0] = 1 }\nctx.SyncThreads()\ny[0] = s[0] }",
+		want: "__syncthreads();",
+	}, {
+		name: "a barrier in a loop the whole block runs the same number of times",
+		body: "func K(ctx gpu.Ctx, y []float32) { s := ctx.SharedF32(4)\n" +
+			"for k := 0; k < 4; k++ { ctx.SyncThreads() }\ny[0] = s[0] }",
+		want: "for (int k = 0; k < 4; k++)",
+	}, {
+		// WarpReduceSum's exchange, with the mask the emitter supplies: a
+		// uniform trip count is what makes that mask true.
+		name: "a warp exchange in a loop over constants",
+		body: "func K(ctx gpu.Ctx, y []float32) { v := y[ctx.GlobalID()]\n" +
+			"for off := gpu.WarpSize / 2; off > 0; off /= 2 { v += ctx.ShuffleDownF32(v, off) }\ny[0] = v }",
+		want: "v += __shfl_down_sync(0xffffffff, v, off);",
+	}, {
+		// The barrier is inside the __device__ function and the call is on the
+		// block's common path, which is what makes it every thread's barrier.
+		name: "a barrier inside a device function called by everyone",
+		body: "//gocuda:ignore\nfunc stage(ctx gpu.Ctx) float32 { s := ctx.SharedF32(4)\n" +
+			"ctx.SyncThreads()\nreturn s[0] }\n\n" +
+			"func K(ctx gpu.Ctx, y []float32) { v := stage(ctx)\n" +
+			"if ctx.GlobalID() < len(y) { y[0] = v } }",
+		want: "__device__ float stage()",
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := transpile(t, tc.body).Source
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("generated CUDA does not contain %q:\n%s", tc.want, got)
+			}
+		})
+	}
+}

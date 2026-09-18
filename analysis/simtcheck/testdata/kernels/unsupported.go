@@ -124,3 +124,47 @@ func blend(out, a []float32) { out[0] = a[0] * 2 }
 func AliasedCall(ctx gpu.Ctx, y []float32) {
 	blend(y, y) // want `passed the same buffer as both out and a`
 }
+
+// DivergentBarrier is the refused half of the barrier rules. The analyzer runs
+// the same lowering, so what it has to agree with the transpiler about is that
+// a barrier only some threads reach is refused at all -- the rule lives in
+// internal/lower and neither of them may have its own copy.
+func DivergentBarrier(ctx gpu.Ctx, y []float32) {
+	s := ctx.SharedF32(4)
+	if ctx.ThreadIdx() == 0 {
+		ctx.SyncThreads() // want `is under a thread-varying if`
+	}
+	y[0] = s[0]
+}
+
+// DivergentLoopBarrier is the trip-count rule: nothing around the barrier is
+// conditional, and the threads still do not execute it the same number of
+// times. It is the staging loop every kernel here writes, with the barrier
+// moved inside it.
+func DivergentLoopBarrier(ctx gpu.Ctx, y []float32) {
+	s := ctx.SharedF32(4)
+	for k := ctx.ThreadIdx(); k < 4; k += ctx.BlockDim() {
+		ctx.SyncThreads() // want `is inside a loop whose trip count differs between threads`
+		s[k] = 1
+	}
+	y[0] = s[0]
+}
+
+// stagedTile is where the barrier the kernel below never spells lives.
+//
+//gocuda:ignore
+func stagedTile(ctx gpu.Ctx) float32 {
+	s := ctx.SharedF32(4)
+	ctx.SyncThreads()
+	return s[0]
+}
+
+// ReturnsBeforeBarrier is the return rule, and the interprocedural half of it
+// at once: the threads that returned are gone, and the rendezvous they are
+// missing is inside a function this kernel only calls.
+func ReturnsBeforeBarrier(ctx gpu.Ctx, y []float32) {
+	if ctx.GlobalID() >= len(y) {
+		return
+	}
+	y[0] = stagedTile(ctx) // want `which reaches ctx.SyncThreads\(\), is preceded by a return at`
+}

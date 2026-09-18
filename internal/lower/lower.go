@@ -181,6 +181,14 @@ type transpiler struct {
 	// guard; see readonly.go.
 	written   map[*ast.FuncDecl]map[types.Object]bool
 	analysing map[*ast.FuncDecl]bool
+	// uses memoises the barrier-divergence summaries, varying the uniformity
+	// set each one was computed against, and diverging is that walk's cycle
+	// guard; see diverge.go. They are separate from the three above because
+	// the two analyses answer different questions about the same declarations
+	// and neither needs the other's intermediate state.
+	uses      map[*ast.FuncDecl]barrierUse
+	varying   map[*ast.FuncDecl]map[types.Object]bool
+	diverging map[*ast.FuncDecl]bool
 	// diags collects every construct this kernel was refused for.
 	diags []Diagnostic
 	// mark is len(diags) when the current statement began. Refusals are
@@ -359,6 +367,12 @@ func (t *transpiler) kernel(fd *ast.FuncDecl) {
 	// body is lowered anyway so that its own problems are reported in the
 	// same run. Nothing is emitted while any diagnostic stands.
 	t.checkGeneratedNames(fd, params[1:])
+
+	// Divergence is a property of the whole call graph rather than of any one
+	// statement, so it is asked once about the kernel here rather than at each
+	// barrier as the body is rendered. It emits nothing; every answer it has
+	// is a refusal.
+	t.checkDivergence(fd)
 
 	written := t.writtenParams(fd)
 	var decls []string

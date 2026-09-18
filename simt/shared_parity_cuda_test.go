@@ -228,13 +228,18 @@ func TestLaunchRefusesTheWrongSharedSpelling(t *testing.T) {
 // typedProbe stages through a tile per element type and through a device
 // function that has one of its own, which is the construct A3 made legal.
 //
-// The ragged tail is guarded rather than returned from, and that is not a
-// style preference. An early return before a barrier is a thread that never
-// arrives at it, which is undefined on the device and, until the block barrier
-// learned to be left, an unkillable hang under RunCPU. This probe had exactly
-// that shape and survived only because the test below launches a geometry in
-// which the guard is never true. Guarding instead keeps every thread on the
-// same path through the barrier, which is what the kernels in kernels/ do too.
+// The ragged tail is guarded rather than returned from, and the guard covers
+// the store rather than the call, and neither is a style preference. An early
+// return before a barrier is a thread that never arrives at it, which is
+// undefined on the device and, until the block barrier learned to be left, an
+// unkillable hang under RunCPU. This probe had that shape and survived only
+// because the test below launches a geometry in which the guard is never true.
+// Turning the return into a guard moved the problem rather than removing it:
+// staged() barriers inside, so a call to it under the guard is the same thread
+// missing the same rendezvous, one level down -- which is what the
+// barrier-divergence check now refuses and what made it visible. Hoisting the
+// call keeps every thread on the same path through both barriers, which is
+// what the kernels in kernels/ do too.
 const typedProbe = `package kernels
 
 import "github.com/CWBudde/gocuda/gpu"
@@ -257,8 +262,9 @@ func TypedProbe(ctx gpu.Ctx, out []int64, x []int32) {
 		narrow[t] = uint32(x[i])
 	}
 	ctx.SyncThreads()
+	s := staged(ctx, wide[t])
 	if i < len(out) {
-		out[i] = staged(ctx, wide[t]) + int64(narrow[t])
+		out[i] = s + int64(narrow[t])
 	}
 }
 `
