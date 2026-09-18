@@ -254,7 +254,7 @@ func (t *transpiler) kernel(fd *ast.FuncDecl) {
 			decls = append(decls, fmt.Sprintf("%s* %s", elem, name), fmt.Sprintf("int %s_len", name))
 			t.lens[p.obj] = name + "_len"
 		default:
-			decls = append(decls, fmt.Sprintf("%s %s", t.ctype(p.typ, p.pos), name))
+			decls = append(decls, t.cdecl(p.typ, name, p.pos))
 		}
 	}
 
@@ -439,7 +439,7 @@ func (t *transpiler) signature(fd *ast.FuncDecl) string {
 			decls = append(decls, fmt.Sprintf("%s* %s", elem, name), fmt.Sprintf("int %s_len", name))
 			t.lens[p.obj] = name + "_len"
 		default:
-			decls = append(decls, fmt.Sprintf("%s %s", t.ctype(p.typ, p.pos), name))
+			decls = append(decls, t.cdecl(p.typ, name, p.pos))
 		}
 	}
 	return strings.Join(decls, ", ")
@@ -520,6 +520,17 @@ func IsCtx(typ types.Type) bool {
 	}
 	obj := named.Obj()
 	return obj != nil && obj.Name() == "Ctx" && obj.Pkg() != nil && obj.Pkg().Path() == GPUPkgPath
+}
+
+// cdecl renders a C declaration of typ named name, without a terminator.
+//
+// It exists because C's declarator syntax is not "type, then name": an array's
+// extent goes after the name, as `float taps[4]`, so no function returning a
+// type alone can spell one. Every site that declares something -- parameters,
+// locals, struct fields -- goes through here; ctype is what remains for the two
+// places that genuinely want a bare type, a cast and a return type.
+func (t *transpiler) cdecl(typ types.Type, name string, pos token.Pos) string {
+	return t.ctype(typ, pos) + " " + name
 }
 
 // ctype maps a Go type to its device counterpart.

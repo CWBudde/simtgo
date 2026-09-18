@@ -108,13 +108,13 @@ func (t *transpiler) define(id *ast.Ident, rhs ast.Expr) string {
 		return ""
 	}
 	before := len(t.diags)
-	ctype := t.ctype(obj.Type(), id.Pos())
+	decl := t.cdecl(obj.Type(), cname(id.Name), id.Pos())
 	if len(t.diags) > before {
 		// The variable exists but has no device type. Every later use of it
 		// would be a fresh complaint about the same declaration.
 		t.poison(obj)
 	}
-	return fmt.Sprintf("%s %s = %s", ctype, cname(id.Name), t.expr(rhs).s)
+	return fmt.Sprintf("%s = %s", decl, t.expr(rhs).s)
 }
 
 // returnStmt lowers a return. A kernel writes through its parameters and has
@@ -268,7 +268,7 @@ func (t *transpiler) decl(s *ast.DeclStmt) {
 					continue
 				}
 				before := len(t.diags)
-				ctype := t.ctype(obj.Type(), n.Pos())
+				decl := t.cdecl(obj.Type(), cname(n.Name), n.Pos())
 				if len(t.diags) > before {
 					// Every later use of a variable with no device type would
 					// repeat this one refusal.
@@ -276,10 +276,10 @@ func (t *transpiler) decl(s *ast.DeclStmt) {
 					continue
 				}
 				if len(vs.Values) == 0 {
-					t.line("%s %s = 0;", ctype, cname(n.Name))
+					t.line("%s = 0;", decl)
 					continue
 				}
-				t.line("%s %s = %s;", ctype, cname(n.Name), t.expr(vs.Values[i]).s)
+				t.line("%s = %s;", decl, t.expr(vs.Values[i]).s)
 			}
 		}
 	default:
@@ -568,8 +568,8 @@ func (t *transpiler) rangeStmt(s *ast.RangeStmt) {
 			t.fail(value.Pos(), "%s has no resolved type", value.Name)
 			return
 		}
-		elem := t.ctype(obj.Type(), value.Pos())
-		head = fmt.Sprintf("%s %s = %s[%s];", elem, cname(value.Name), t.expr(s.X).at(precPostfix), name)
+		elem := t.cdecl(obj.Type(), cname(value.Name), value.Pos())
+		head = fmt.Sprintf("%s = %s[%s];", elem, t.expr(s.X).at(precPostfix), name)
 	}
 
 	// The limit becomes the right operand of a comparison, so anything binding
@@ -732,7 +732,7 @@ func (t *transpiler) chainSwitch(s *ast.SwitchStmt) {
 			t.ind--
 			t.line("}")
 		}()
-		t.line("%s %s = %s;", t.ctype(typ, s.Tag.Pos()), tag, t.expr(s.Tag).s)
+		t.line("%s = %s;", t.cdecl(typ, tag, s.Tag.Pos()), t.expr(s.Tag).s)
 	}
 
 	var dflt *ast.CaseClause
