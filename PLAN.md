@@ -758,16 +758,40 @@ A transpiler is trusted through evidence, not review.
       a test every future run pays for and an automated commit would add them
       faster than anybody diagnoses them.
 
-      Two more findings from the sustained runs, both of them in the
-      *generator* rather than the emitter, which is the outcome the failure
-      message is written to allow for. It clamped every float to ±1000 before
+      **Two more emitter defects from the sustained runs**, both invisible to
+      a golden and to a parity test. A `range` index the body assigns to was
+      emitted as the loop counter, so `p--` in the body decremented the loop
+      against its own `p++` and the kernel never terminated — Go's range
+      variable is per-iteration, and the fix is what the range *value* had
+      always done. And `o << (o & 31)` on a Go `int`, which is the narrowing
+      above.
+
+      The non-terminating case also found a hole in the oracle itself:
+      `hostrun.Run` did not bound the child, so one input took a whole fuzz
+      worker with it — the driver sat at 100% of a core for four and a half
+      minutes with no diagnosis and no failing case recorded. It has a
+      timeout now, and a `TimeoutError` distinct from a compile failure and
+      from a non-zero exit, because "does not finish" may be either the
+      generator's fault or the emitter's and the caller has to be able to say
+      which.
+
+      Two further findings were in the *generator* rather than the emitter,
+      which is the outcome the failure message is written to allow for. It clamped every float to ±1000 before
       converting it to an integer — right in principle, since such a
       conversion is implementation-dependent in Go and undefined in C — but
       to a *signed* range, so a negative float reached a `uint32` and the two
-      backends disagreed on every element. And it wrote `o << (o & 31)` on a
-      Go `int`, which is the narrowing above. `NUMERICS.md` gained the
+      backends disagreed on every element. And `tolerance.Agree` settled a NaN
+      for a `float32` and let a `float64` fall through to
+      `reflect.DeepEqual`, which compares them with `==`, so two NaNs in a
+      `[]float64` were reported as disagreeing. `NUMERICS.md` gained the
       conversion rule, because it is a trap for a kernel author and not only
       for a generator.
+
+      **Five defects in all, in roughly twenty-five minutes of searching**,
+      three of them in the emitter and two in the oracle. That ratio is worth
+      recording: an oracle this young has its own bugs, and a differential
+      that reports a mismatch as "a finding about one of them and not a
+      verdict about which" is what makes those cheap to tell apart.
 
       What is committed: three targets in `simt/`, two of them running in CI on
       every push. Go runs a fuzz target's seeds as ordinary tests under plain
