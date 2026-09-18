@@ -14,7 +14,7 @@ import (
 // TestGolden pins the generated CUDA for every example kernel. Run with
 // GOCUDA_UPDATE=1 to refresh the golden files after an intentional change.
 func TestGolden(t *testing.T) {
-	for _, name := range []string{"VecAdd", "Magnitude", "Scale", "FIR", "Classify", "Softclip", "Transpose", "Quantize", "BandGain"} {
+	for _, name := range []string{"VecAdd", "Magnitude", "Scale", "FIR", "Classify", "Softclip", "Transpose", "Quantize", "BandGain", "Histogram"} {
 		t.Run(name, func(t *testing.T) {
 			u, err := simt.Transpile(gocuda.Kernels(), name)
 			if err != nil {
@@ -140,9 +140,172 @@ func TestUnitRequirements(t *testing.T) {
 	// A kernel that says nothing about its geometry must not acquire a
 	// requirement out of thin air.
 	plain := transpile(t, "func K(ctx gpu.Ctx, y []float32) { y[ctx.GlobalID()] = 1 }")
-	if plain.RequiredBlock != 0 || plain.SharedBytes != 0 {
-		t.Errorf("RequiredBlock = %d, SharedBytes = %d, want 0 and 0", plain.RequiredBlock, plain.SharedBytes)
+	if plain.RequiredBlock != 0 || plain.SharedBytes != 0 || plain.DynSharedWidth != 0 {
+		t.Errorf("RequiredBlock = %d, SharedBytes = %d, DynSharedWidth = %d, want three zeros",
+			plain.RequiredBlock, plain.SharedBytes, plain.DynSharedWidth)
 	}
+
+	// Each tile is counted at its own element width, which comes from
+	// go/types rather than from a second table of widths in the emitter.
+	for _, tc := range []struct {
+		call string
+		want int
+	}{
+		{"SharedF32(4)", 16},
+		{"SharedI32(4)", 16},
+		{"SharedU32(4)", 16},
+		{"SharedF64(4)", 32},
+		{"SharedI64(4)", 32},
+		{"SharedU64(4)", 32},
+	} {
+		t.Run(tc.call, func(t *testing.T) {
+			u := transpile(t, "//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float32) { s := ctx."+tc.call+"; y[0] = float32(s[0]) }")
+			if u.SharedBytes != tc.want {
+				t.Errorf("SharedBytes = %d, want %d", u.SharedBytes, tc.want)
+			}
+			if u.DynSharedWidth != 0 {
+				t.Errorf("DynSharedWidth = %d, want 0 for a statically sized tile", u.DynSharedWidth)
+			}
+		})
+	}
+
+	// Tiles of different element types add up at their own widths.
+	both := transpile(t, "func K(ctx gpu.Ctx, y []float32) { a := ctx.SharedF32(4); b := ctx.SharedI64(2); y[0] = a[0] + float32(b[0]) }")
+	if want := 4*4 + 8*2; both.SharedBytes != want {
+		t.Errorf("SharedBytes = %d, want %d", both.SharedBytes, want)
+	}
+
+	// A dynamically sized tile contributes no static bytes and reports its
+	// element width instead, which is what the launch multiplies its element
+	// count by.
+	dyn := transpile(t, "func K(ctx gpu.Ctx, y []float32) { s := ctx.SharedDynI64(); y[0] = float32(s[0]) }")
+	if dyn.SharedBytes != 0 {
+		t.Errorf("SharedBytes = %d, want 0: a dynamic tile is not statically declared", dyn.SharedBytes)
+	}
+	if dyn.DynSharedWidth != 8 {
+		t.Errorf("DynSharedWidth = %d, want 8", dyn.DynSharedWidth)
+	}
+}
+
+// TestSharedTiles pins the lowering of every shared-tile constructor.
+//
+// The element type is the whole point: it is derived once, from the same
+// go/types view the rest of the emitter uses, so these cases are what say that
+// "derived" produced the spellings CUDA actually has.
+func TestSharedTiles(t *testing.T) {
+	cases := []struct{ name, body, want string }{{
+		name: "float32",
+		body: "func K(ctx gpu.Ctx, y []float32) { s := ctx.SharedF32(8); y[0] = s[0] }",
+		want: "__shared__ float s[8];",
+	}, {
+		name: "float64",
+		body: "//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float64) { s := ctx.SharedF64(8); y[0] = s[0] }",
+		want: "__shared__ double s[8];",
+	}, {
+		name: "int32",
+		body: "func K(ctx gpu.Ctx, y []int32) { s := ctx.SharedI32(8); y[0] = s[0] }",
+		want: "__shared__ int s[8];",
+	}, {
+		name: "int64",
+		body: "func K(ctx gpu.Ctx, y []int64) { s := ctx.SharedI64(8); y[0] = s[0] }",
+		want: "__shared__ long long s[8];",
+	}, {
+		name: "uint32",
+		body: "func K(ctx gpu.Ctx, y []uint32) { s := ctx.SharedU32(8); y[0] = s[0] }",
+		want: "__shared__ unsigned int s[8];",
+	}, {
+		name: "uint64",
+		body: "func K(ctx gpu.Ctx, y []uint64) { s := ctx.SharedU64(8); y[0] = s[0] }",
+		want: "__shared__ unsigned long long s[8];",
+	}, {
+		// A tile is addressable, which t.lens is the test for, so the atomics
+		// reach an int32 tile exactly as they reach a slice parameter.
+		name: "an atomic on an int32 tile",
+		body: "func K(ctx gpu.Ctx, y []int32) { s := ctx.SharedI32(8); gpu.AtomicAddI32(s, 0, 1); y[0] = s[0] }",
+		want: "atomicAdd(&s[0], 1)",
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := transpile(t, tc.body).Source
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("generated CUDA does not contain %q:\n%s", tc.want, got)
+			}
+		})
+	}
+}
+
+// TestSharedTileInADeviceFunction pins the accounting as well as the emission:
+// __shared__ inside a __device__ function is block-scoped storage, legal CUDA,
+// and counted on the kernel that reaches it because that is what has to ask
+// the device for it.
+func TestSharedTileInADeviceFunction(t *testing.T) {
+	u := transpile(t, "//gocuda:ignore\nfunc stage(ctx gpu.Ctx, x []float32) float32 {\n"+
+		"\ttile := ctx.SharedF32(64)\n"+
+		"\ttile[ctx.ThreadIdx()%64] = x[0]\n"+
+		"\tctx.SyncThreads()\n"+
+		"\treturn tile[0]\n}\n\n"+
+		"func K(ctx gpu.Ctx, y, x []float32) { y[0] = stage(ctx, x) + stage(ctx, x) }")
+	for _, want := range []string{
+		"__device__ float stage(float* x, int x_len)",
+		"__shared__ float tile[64];",
+	} {
+		if !strings.Contains(u.Source, want) {
+			t.Errorf("generated CUDA does not contain %q:\n%s", want, u.Source)
+		}
+	}
+	// Reached twice, emitted once, counted once.
+	if n := strings.Count(u.Source, "__shared__ float tile[64];"); n != 1 {
+		t.Errorf("the tile is declared %d times, want 1", n)
+	}
+	if want := 4 * 64; u.SharedBytes != want {
+		t.Errorf("SharedBytes = %d, want %d", u.SharedBytes, want)
+	}
+}
+
+// TestDynamicSharedTile pins the lowering of the launch-sized tile: the
+// `extern __shared__` declaration, and the length parameter that lets len()
+// work and the launch say how long it is.
+func TestDynamicSharedTile(t *testing.T) {
+	u := transpile(t, "func K(ctx gpu.Ctx, y []float32) {\n"+
+		"\ts := ctx.SharedDynF32()\n"+
+		"\tfor i := ctx.ThreadIdx(); i < len(s); i += ctx.BlockDim() {\n\t\ts[i] = 1\n\t}\n"+
+		"\tctx.SyncThreads()\n"+
+		"\ty[0] = s[0]\n}")
+	for _, want := range []string{
+		// The generated length is the last parameter, where the emitter
+		// appends it and where LaunchShared passes it.
+		"extern \"C\" __global__ void K(float* y, int y_len, int s_len)",
+		"extern __shared__ float s[];",
+		"i < s_len",
+	} {
+		if !strings.Contains(u.Source, want) {
+			t.Errorf("generated CUDA does not contain %q:\n%s", want, u.Source)
+		}
+	}
+
+	// One per element type, since the spelling of the element is the only
+	// thing that differs.
+	for _, tc := range []struct{ call, want string }{
+		{"SharedDynF32", "extern __shared__ float s[];"},
+		{"SharedDynI32", "extern __shared__ int s[];"},
+		{"SharedDynI64", "extern __shared__ long long s[];"},
+		{"SharedDynU32", "extern __shared__ unsigned int s[];"},
+		{"SharedDynU64", "extern __shared__ unsigned long long s[];"},
+	} {
+		t.Run(tc.call, func(t *testing.T) {
+			got := transpile(t, "func K(ctx gpu.Ctx, y []float32) { s := ctx."+tc.call+"(); y[0] = float32(s[0]) }").Source
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("generated CUDA does not contain %q:\n%s", tc.want, got)
+			}
+		})
+	}
+	t.Run("SharedDynF64", func(t *testing.T) {
+		got := transpile(t, "//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float64) { s := ctx.SharedDynF64(); y[0] = s[0] }").Source
+		if want := "extern __shared__ double s[];"; !strings.Contains(got, want) {
+			t.Errorf("generated CUDA does not contain %q:\n%s", want, got)
+		}
+	})
 }
 
 // TestSwitch pins both lowerings of a Go switch. A switch whose cases are all

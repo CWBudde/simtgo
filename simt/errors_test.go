@@ -156,10 +156,64 @@ func TestUnsupported(t *testing.T) {
 		body: "func any(xs ...float32) float32 { return xs[0] }\n\nfunc K(ctx gpu.Ctx, a []float32) { a[0] = any(a[1]) }",
 		want: "must not be variadic",
 	}, {
-		name: "shared memory inside a device function",
-		body: "//gocuda:ignore\nfunc stage(ctx gpu.Ctx) float32 { s := ctx.SharedF32(4)\nreturn s[0] }\n\n" +
+		// A statically sized tile in a device function is accepted -- it is
+		// block-scoped storage, which a __device__ function may declare -- but
+		// the dynamic one cannot be, because its length is a parameter of the
+		// kernel and a helper has no way to reach it.
+		name: "a dynamically sized shared tile inside a device function",
+		body: "//gocuda:ignore\nfunc stage(ctx gpu.Ctx) float32 { s := ctx.SharedDynF32()\nreturn s[0] }\n\n" +
 			"func K(ctx gpu.Ctx, a []float32) { a[0] = stage(ctx) }",
-		want: "shared memory may only be declared in a kernel",
+		want: "may only be declared in a kernel: its length is a launch parameter",
+	}, {
+		name: "AssumeBlockDim inside a device function",
+		body: "//gocuda:ignore\nfunc stage(ctx gpu.Ctx) float32 { ctx.AssumeBlockDim(256)\nreturn 1 }\n\n" +
+			"func K(ctx gpu.Ctx, a []float32) { a[0] = stage(ctx) }",
+		want: "AssumeBlockDim may only be called in a kernel",
+	}, {
+		// CUDA has one dynamic __shared__ block per launch, and NVRTC accepts
+		// a second `extern __shared__` declaration without a word -- of a
+		// different element type as readily as of the same one. The two names
+		// would then be two views of one buffer.
+		name: "two dynamically sized shared tiles",
+		body: "func K(ctx gpu.Ctx, y []float32) { a := ctx.SharedDynF32(); b := ctx.SharedDynI32(); y[0] = a[0] + float32(b[0]) }",
+		want: "at most one dynamically sized shared tile, and a is already one",
+	}, {
+		name: "a float64 tile without the directive",
+		body: "func K(ctx gpu.Ctx, y []float32) { s := ctx.SharedF64(4); y[0] = float32(s[0]) }",
+		want: "float64 needs //gocuda:float64 on kernel K",
+	}, {
+		name: "a dynamically sized float64 tile without the directive",
+		body: "func K(ctx gpu.Ctx, y []float32) { s := ctx.SharedDynF64(); y[0] = float32(s[0]) }",
+		want: "float64 needs //gocuda:float64 on kernel K",
+	}, {
+		// The refusal names the launch-sized constructor of the same element
+		// type, because that is what the author wanted and could not spell.
+		name: "a runtime size on a typed tile",
+		body: "func K(ctx gpu.Ctx, a []int32) { s := ctx.SharedI32(len(a)); s[0] = 1 }",
+		want: "use SharedDynI32, whose length the launch gives",
+	}, {
+		// A dynamic tile generates an `int s_len` parameter exactly as a slice
+		// parameter does, so it can collide with either kind of name.
+		name: "a dynamic tile's length collides with a parameter",
+		body: "func K(ctx gpu.Ctx, y []float32, s_len int32) { s := ctx.SharedDynF32(); y[0] = s[0] + float32(s_len) }",
+		want: "collides with parameter s_len",
+	}, {
+		// The other half of that check, and the only way to reach it: a tile
+		// cannot be named after a parameter, since both are in the kernel's
+		// scope, so its generated length can only meet a slice's through a
+		// C++ keyword. The parameter "float" is declared as "float_", whose
+		// generated length is "float__len" -- which is also what a tile called
+		// "float_" would generate.
+		name: "a dynamic tile's length collides with a slice's generated length",
+		body: "func K(ctx gpu.Ctx, float []float32) { float_ := ctx.SharedDynF32(); float[0] = float_[0] }",
+		want: "collides with the length generated for slice parameter float",
+	}, {
+		// The top level of the enclosing function, now that a device function
+		// may have a tile too: a tile declared inside a conditional is one the
+		// threads of a block could disagree about.
+		name: "a shared tile inside a conditional",
+		body: "func K(ctx gpu.Ctx, y []float32) { if ctx.ThreadIdx() == 0 { s := ctx.SharedF32(4); y[0] = s[0] } }",
+		want: "top level of the function",
 	}, {
 		// Without the opt-out the helper is a kernel in its own right, and
 		// calling a kernel is what the previous case refuses.
