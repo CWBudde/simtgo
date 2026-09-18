@@ -390,8 +390,21 @@ func (f *Function) LaunchSync(grid, block Dim3, sharedBytes int, args ...Arg) er
 		return err
 	}
 
-	const slot = 8 // one 8-byte aligned slot per parameter
-	store := make([]byte, max(len(args), 1)*slot)
+	// Each parameter gets its own width, rounded up to 8, rather than a fixed
+	// 8-byte slot: a struct passed by value is as wide as the struct, and
+	// copying it into an 8-byte slot would overwrite the parameters after it.
+	// The rounding keeps every slot 8-aligned, which is enough because no type
+	// the subset accepts is aligned more strictly than a double.
+	const align = 8
+	offsets := make([]int, len(args))
+	total := 0
+	for i, a := range args {
+		offsets[i] = total
+		total += (max(len(a.b), align) + align - 1) / align * align
+	}
+	// At least one slot, so &store[0] exists and the allocator gives it the
+	// 8-byte alignment the driver reads these through.
+	store := make([]byte, max(total, align))
 	table := make([]unsafe.Pointer, max(len(args), 1))
 
 	var pin runtime.Pinner
@@ -400,8 +413,8 @@ func (f *Function) LaunchSync(grid, block Dim3, sharedBytes int, args ...Arg) er
 	defer pin.Unpin()
 
 	for i, a := range args {
-		copy(store[i*slot:], a.b)
-		table[i] = unsafe.Pointer(&store[i*slot])
+		copy(store[offsets[i]:], a.b)
+		table[i] = unsafe.Pointer(&store[offsets[i]])
 	}
 
 	var params unsafe.Pointer

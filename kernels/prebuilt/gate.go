@@ -16,10 +16,12 @@ type Lowered string
 //
 // Add a name here whenever you add a kernel.
 var Gate = []Lowered{
+	BandGain,
 	Classify,
 	FIR,
 	VecAdd,
 	Magnitude,
+	Quantize,
 	Scale,
 	Softclip,
 	Transpose,

@@ -8,6 +8,9 @@ import (
 	"github.com/CWBudde/gocuda/simt"
 )
 
+// BandGain reports that the kernel of that name lowered to CUDA C.
+const BandGain Lowered = "BandGain"
+
 // Classify reports that the kernel of that name lowered to CUDA C.
 const Classify Lowered = "Classify"
 
@@ -23,11 +26,17 @@ const Magnitude Lowered = "Magnitude"
 // Scale reports that the kernel of that name lowered to CUDA C.
 const Scale Lowered = "Scale"
 
+// Quantize reports that the kernel of that name lowered to CUDA C.
+const Quantize Lowered = "Quantize"
+
 // Softclip reports that the kernel of that name lowered to CUDA C.
 const Softclip Lowered = "Softclip"
 
 // Transpose reports that the kernel of that name lowered to CUDA C.
 const Transpose Lowered = "Transpose"
+
+//go:embed BandGain.compute_75.ptx
+var ptxBandGain []byte
 
 //go:embed Classify.compute_75.ptx
 var ptxClassify []byte
@@ -44,6 +53,9 @@ var ptxMagnitude []byte
 //go:embed Scale.compute_75.ptx
 var ptxScale []byte
 
+//go:embed Quantize.compute_75.ptx
+var ptxQuantize []byte
+
 //go:embed Softclip.compute_75.ptx
 var ptxSoftclip []byte
 
@@ -51,6 +63,12 @@ var ptxSoftclip []byte
 var ptxTranspose []byte
 
 func init() {
+	simt.RegisterPrebuilt(simt.Prebuilt{
+		Name:         "BandGain",
+		SourceSHA256: "90af0d5375f0ae737706a1ee7eb53690b2613e2b3ea2940639ef82197f0ca985",
+		Arch:         "compute_75",
+		PTX:          ptxBandGain,
+	})
 	simt.RegisterPrebuilt(simt.Prebuilt{
 		Name:         "Classify",
 		SourceSHA256: "e3028060d7d017aa7a9ac12aa82b3ea795e7fcc9106e5b64af960d86f8d4fab3",
@@ -82,6 +100,12 @@ func init() {
 		SourceSHA256: "d1d7367069cb2aa540f2ec71543d5a06e9c750d56ba32d3a925e4a5b80c29911",
 		Arch:         "compute_75",
 		PTX:          ptxScale,
+	})
+	simt.RegisterPrebuilt(simt.Prebuilt{
+		Name:         "Quantize",
+		SourceSHA256: "0e1ed9f2def451a1bfb27a35c059b00c560597065ace9da2fc3195f50e70ce3d",
+		Arch:         "compute_75",
+		PTX:          ptxQuantize,
 	})
 	simt.RegisterPrebuilt(simt.Prebuilt{
 		Name:         "Softclip",

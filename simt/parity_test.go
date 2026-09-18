@@ -7,6 +7,7 @@ import (
 	"math"
 	"math/rand/v2"
 	"testing"
+	"testing/fstest"
 
 	"github.com/CWBudde/gocuda"
 	"github.com/CWBudde/gocuda/cuda"
@@ -357,4 +358,222 @@ func TestLaunchDimCountsTheWholeBlock(t *testing.T) {
 	if bad.Want != 256 || bad.Got != 128 {
 		t.Errorf("BlockSizeError says want %d got %d, expected 256 and 128", bad.Want, bad.Got)
 	}
+}
+
+// assertEqual is assertClose's counterpart for types that have no tolerance to
+// speak of. An integer or a bool that disagrees is a bug, not a rounding.
+func assertEqual[T comparable](t *testing.T, name string, got, want []T) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("%s: length %d, want %d", name, len(got), len(want))
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("%s element %d: gpu %v, cpu %v", name, i, got[i], want[i])
+		}
+	}
+}
+
+// TestQuantizeParity covers the integer half of the widened type map: an int32
+// output, an int64 accumulator, a []bool, and a uint32 whose arithmetic wraps.
+//
+// Everything is compared exactly. Nothing here is floating point once the
+// rounding has happened, so a tolerance would only hide a disagreement.
+func TestQuantizeParity(t *testing.T) {
+	ctx := device(t)
+	const n, block = 1 << 14, 256
+	const step, seed = 0.05, 0x9e3779b9
+
+	x := randomSignal(n)
+	code := make([]int32, n)
+	energy := make([]int64, n)
+	clipped := make([]bool, n)
+	gpu.RunCPU((n+block-1)/block, block, func(c gpu.Ctx) {
+		kernels.Quantize(c, code, energy, clipped, x, step, seed)
+	})
+
+	// An independent reference for the parts that do not depend on the dither:
+	// energy is the square of the code whatever the rounding did, and clipped
+	// is exactly the codes at the rails.
+	for i := range code {
+		if want := int64(code[i]) * int64(code[i]); energy[i] != want {
+			t.Fatalf("cpu energy %d: %d, want %d", i, energy[i], want)
+		}
+		if want := code[i] == 127 || code[i] == -128; clipped[i] != want {
+			t.Fatalf("cpu clipped %d: %v, want %v", i, clipped[i], want)
+		}
+	}
+
+	k, err := simt.Build(ctx, gocuda.Kernels(), "Quantize")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	dcode, _ := cuda.NewSlice[int32](ctx, n)
+	denergy, _ := cuda.NewSlice[int64](ctx, n)
+	dclipped, _ := cuda.NewSlice[bool](ctx, n)
+	dx, _ := cuda.Upload(ctx, x)
+	defer dcode.Free()
+	defer denergy.Free()
+	defer dclipped.Free()
+	defer dx.Free()
+
+	if err := k.LaunchN(n, block, dcode, denergy, dclipped, dx, float32(step), uint32(seed)); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	gotCode, err := dcode.Download()
+	if err != nil {
+		t.Fatalf("Download code: %v", err)
+	}
+	gotEnergy, err := denergy.Download()
+	if err != nil {
+		t.Fatalf("Download energy: %v", err)
+	}
+	gotClipped, err := dclipped.Download()
+	if err != nil {
+		t.Fatalf("Download clipped: %v", err)
+	}
+	assertEqual(t, "code", gotCode, code)
+	assertEqual(t, "energy", gotEnergy, energy)
+	assertEqual(t, "clipped", gotClipped, clipped)
+}
+
+// TestBandGainParity covers the struct half: a []Band read as a slice of
+// structs, a Shape passed by value, a fixed-size array local, and float64
+// accumulation under //gocuda:float64.
+//
+// The Shape by value is also what the fixed 8-byte parameter slot could not
+// carry: at 16 bytes it used to overwrite nothing, because nothing that wide
+// existed, and would have overwritten the next parameter the moment one did.
+func TestBandGainParity(t *testing.T) {
+	ctx := device(t)
+	const n, block = 1 << 14, 256
+
+	x := randomSignal(n)
+	bands := []kernels.Band{
+		{Upper: -0.5, Gain: 0.25},
+		{Upper: 0, Gain: 0.5},
+		{Upper: 0.5, Gain: 1},
+		{Upper: 1, Gain: 2},
+	}
+	cfg := kernels.Shape{Floor: 0.125, Count: 3, Bias: 0.001}
+
+	want := make([]float32, n)
+	gpu.RunCPU((n+block-1)/block, block, func(c gpu.Ctx) {
+		kernels.BandGain(c, want, x, bands, cfg)
+	})
+
+	// An independent reference, written the obvious way rather than the way the
+	// kernel is written: a linear scan for the band and a plain windowed mean.
+	ref := make([]float32, n)
+	for i := range ref {
+		gain := cfg.Floor
+		for _, b := range bands {
+			if x[i] <= b.Upper {
+				gain = b.Gain
+				break
+			}
+		}
+		sum := 0.0
+		for j := range kernels.BandGainTaps {
+			if k := i + j - kernels.BandGainTaps/2; k >= 0 && k < n {
+				sum += float64(x[k])
+			}
+		}
+		acc := sum / float64(kernels.BandGainTaps) * float64(gain)
+		ref[i] = float32(acc+cfg.Bias) * float32(cfg.Count)
+	}
+	assertClose(t, want, ref, 1e-6)
+
+	k, err := simt.Build(ctx, gocuda.Kernels(), "BandGain")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	dy, _ := cuda.NewSlice[float32](ctx, n)
+	dx, _ := cuda.Upload(ctx, x)
+	dbands, _ := cuda.Upload(ctx, bands)
+	defer dy.Free()
+	defer dx.Free()
+	defer dbands.Free()
+
+	if err := k.LaunchN(n, block, dy, dx, dbands, cuda.ArgOf(cfg)); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	got, err := dy.Download()
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	assertClose(t, got, want, 1e-6)
+}
+
+// TestStructLayoutRoundTrip pins the field offsets that the generated
+// static_asserts cannot.
+//
+// NVRTC compiles a string with no include path, so it has no offsetof and the
+// assertions can only reach sizeof and alignof -- which catch a padding
+// disagreement but not a reordering. This puts a distinct value in each field
+// and has the device read them back one field per output slot, so an offset
+// that disagrees returns another field's value rather than something merely
+// close. Bias is the one that matters most: it sits after four bytes of
+// padding, which is exactly where two languages would part company.
+//
+// The probe kernel is built from an inline source rather than committed to
+// kernels/, because it is a test of the layout rule and not a kernel anyone
+// would launch -- and a committed one would cost a gate entry, a golden and a
+// regeneration to say the same thing.
+func TestStructLayoutRoundTrip(t *testing.T) {
+	ctx := device(t)
+
+	const probe = `package kernels
+
+import "github.com/CWBudde/gocuda/gpu"
+
+type Band struct {
+	Upper float32
+	Gain  float32
+}
+
+type Shape struct {
+	Floor float32
+	Count int32
+	Bias  float64
+}
+
+//gocuda:float64
+func StructProbe(ctx gpu.Ctx, out []float32, bands []Band, cfg Shape) {
+	if ctx.GlobalID() != 0 {
+		return
+	}
+	out[0] = bands[0].Upper
+	out[1] = bands[0].Gain
+	out[2] = bands[1].Upper
+	out[3] = bands[1].Gain
+	out[4] = cfg.Floor
+	out[5] = float32(cfg.Count)
+	out[6] = float32(cfg.Bias)
+}
+`
+	src := fstest.MapFS{"probe.go": &fstest.MapFile{Data: []byte(probe)}}
+	k, err := simt.Build(ctx, src, "StructProbe")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	// Values a shifted offset cannot reproduce by accident: no two fields share
+	// one, and they differ by orders of magnitude rather than by a little.
+	bands := []kernels.Band{{Upper: 1, Gain: 1000}, {Upper: 2, Gain: 2000}}
+	cfg := kernels.Shape{Floor: 7, Count: 11, Bias: 13}
+
+	dout, _ := cuda.NewSlice[float32](ctx, 7)
+	dbands, _ := cuda.Upload(ctx, bands)
+	defer dout.Free()
+	defer dbands.Free()
+
+	if err := k.LaunchN(1, 32, dout, dbands, cuda.ArgOf(cfg)); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	got, err := dout.Download()
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	assertEqual(t, "fields", got, []float32{1, 1000, 2, 2000, 7, 11, 13})
 }
