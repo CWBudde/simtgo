@@ -247,6 +247,16 @@ const DeviceDirective = "//gocuda:device"
 // a decision somebody wrote down.
 const Float64Directive = "//gocuda:float64"
 
+// FastMathDirective opts a kernel into NVRTC's --use_fast_math.
+//
+// It is opt-in for the mirror of Float64Directive's reason. Double precision is
+// invisibly slow; fast math is invisibly *inexact* -- it flips --ftz, --prec-div
+// and --prec-sqrt in one go (NUMERICS.md tabulates what each does to the PTX),
+// so a kernel that acquired it by accident would still compile, still run, and
+// quietly answer differently. The directive makes that a decision somebody
+// wrote down, and Unit.FastMath carries it as far as the compiler.
+const FastMathDirective = "//gocuda:fastmath"
+
 // Ignored reports whether doc carries the opt-out directive.
 //
 // It lives here, beside the rule it opts out of, because every caller that
@@ -268,6 +278,9 @@ func DeviceMarked(doc *ast.CommentGroup) bool { return hasDirective(doc, DeviceD
 
 // Float64Enabled reports whether doc carries the double-precision opt-in.
 func Float64Enabled(doc *ast.CommentGroup) bool { return hasDirective(doc, Float64Directive) }
+
+// FastMathEnabled reports whether doc carries the fast-math opt-in.
+func FastMathEnabled(doc *ast.CommentGroup) bool { return hasDirective(doc, FastMathDirective) }
 
 // hasDirective reports whether doc carries the line name, alone or followed by
 // a space and an explanation. A directive is a whole line, so a mention of it
