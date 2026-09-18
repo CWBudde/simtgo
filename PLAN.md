@@ -885,6 +885,57 @@ A transpiler is trusted through evidence, not review.
 
 - [ ] **`compute-sanitizer`** (`memcheck`, `racecheck`, `initcheck`,
       `synccheck`) over every kernel in CI.
+
+      (2026-09-19) — partial: the sweep exists and all four tools are clean;
+      what is missing is a runner to run it on, which is Phase 1.4's item and
+      the reason this box is not ticked. The criterion says **in CI**, and CI
+      cannot do this.
+
+      The harness is `go test -exec`, not a program: wrapping the tagged test
+      binaries of `simt`, `tile` and `cuda` is the whole surface, because those
+      are the only packages that reach a device and between them they launch
+      all twelve kernels in `kernels/prebuilt/gate.go`, the inline probes the
+      parity tests build, the hand-written kernel in `cuda`'s raw-API test, and
+      the **tile track's fused kernels** — a second code generator that a
+      `simt`-only sweep would have missed entirely.
+
+      **Measured on the T550**, all four tools, every package: `ERROR SUMMARY:
+      0 errors`, and `RACECHECK SUMMARY: 0 hazards displayed`. The cost is not
+      what the folklore says: `memcheck` takes `simt` from 8.6 s to 14.2 s, and
+      `racecheck`, `initcheck` and `synccheck` are within noise of an
+      uninstrumented run. These kernels are small and there are not many
+      launches; the 10–100× figure is about neither.
+
+      A clean result is an absence, so the harness was held to a planted fault
+      before it was believed: a kernel with no bounds guard, launched with 256
+      threads over 16 elements, passes `go test` and is 224 `Invalid __global__
+      write` errors under `memcheck`. That is what makes the zero a claim.
+
+      Three flags and an environment variable, each load-bearing, because the
+      default behaviour of every one of them is the wrong answer here.
+      `--error-exitcode 1`: `compute-sanitizer` exits 0 on findings, so without
+      it a clean run and a dirty one are the same result and the job is
+      decoration. `--report-api-errors no`: the default counts a CUDA API call
+      returning an error as an error, and `cuda`'s error tests hand
+      `cuModuleLoadData` deliberate garbage on purpose — that is two "findings"
+      the repository already tests more precisely than the sanitizer can, by
+      asserting the `CUresult`. `GOCUDA_REQUIRE_DEVICE=1`, new, turns the test
+      helpers' "no CUDA device available" **skip into a failure**: the worst
+      outcome available to a sanitizer job is to go green having launched
+      nothing, and a silent skip is exactly how that happens. Phase 1.4's GPU
+      job will want the same switch for the same reason.
+
+      One thing to know before reading a green run: it prints **nothing**.
+      `go test` discards a passing binary's stdout, so the `ERROR SUMMARY`
+      lines appear only on a failure — or under `-v`, which is how the numbers
+      above were read.
+
+      `.github/workflows/sanitizer.yml` is written against the runner that does
+      not exist yet: `runs-on: [self-hosted, gpu]`, one matrix leg per tool so
+      one finding cannot hide another, and `workflow_dispatch` **only** —
+      a `schedule` with no matching runner queues a job forever and reports
+      nothing, which is worse than not running.
+
 - [x] **Barrier-divergence analysis.** (2026-09-18) — `internal/lower/diverge.go`,
       three rules: a barrier under a thread-varying condition, a barrier inside
       a loop whose trip count is thread-varying, and a barrier preceded by a
@@ -919,7 +970,7 @@ A transpiler is trusted through evidence, not review.
       Both limits are written down at the site rather than left to be
       rediscovered.
 
-- [ ] **Aliasing.** Detect, or explicitly document, two slice parameters bound
+- [x] **Aliasing.** Detect, or explicitly document, two slice parameters bound
       to the same device buffer. Largely done for the SIMT track by the
       `const`/`__restrict__` work in Phase 2: `Kernel.Launch` compares device
       ranges and refuses an overlap where the kernel writes through one of
@@ -927,6 +978,47 @@ A transpiler is trusted through evidence, not review.
       uncovered is the **tile track**, which has its own code generator, emits
       no qualifiers and does no launch-time check, and the **CPU emulator**,
       which never sees the caller's slices.
+
+      (2026-09-19) — the tile track now makes the promise and then checks it,
+      which is the order that matters: a qualifier nothing verifies is
+      undefined behaviour with a comment on it. Inputs are emitted
+      `const float* __restrict__` and the output `float* __restrict__`, and
+      `checkAliasing` runs in `Tensor.run` — the tile analogue of
+      `Kernel.launch`, and the point both `Materialize` and
+      `MaterializeStepwise` funnel through, so one check covers both paths.
+      Only an overlap with the **output** is refused, because `out` is the only
+      thing a fused kernel writes and `restrict` forbids reaching a *modified*
+      object through another pointer. Same position the SIMT check takes.
+
+      **Nothing can fail that check today, and saying so is the honest part.**
+      `run` allocates `out` with `cuda.NewSlice` on every call, so it cannot be
+      a buffer the graph already holds, and `generate` emits one parameter per
+      distinct node, so `Mul(t, t)` is one pointer rather than two. The gap is
+      prospective, and Phase 4's device-resident values is what opens it — the
+      unused `node.dev` field has been anticipating exactly that.
+
+      What *is* live is the case the check **accepts**: `MaterializeStepwise`
+      caches a materialised node's buffer, so a node feeding both operands is
+      handed to the kernel twice and `p0` and `p1` are one allocation. Two
+      readers of one buffer is what `restrict` allows, so the launch has to go
+      through and compute the right numbers rather than be refused for looking
+      suspicious. That is the test that runs on the device; the rest is
+      arithmetic on device addresses and is tested without one, the same
+      argument `simt/alias_test.go` makes for itself.
+
+      The **emulator half was already closed, by the second half of the item's
+      own "or"**: `RunCPU`'s doc comment states that the kernel's slices arrive
+      through a closure and never pass through it, so there is nothing to
+      compare, and that this is deliberate rather than an oversight — there a
+      kernel is ordinary Go, where aliasing is defined. Detecting it would mean
+      a new API taking the buffers, which is a cost for a backend that has no
+      undefined behaviour to prevent.
+
+      `SPEC.md` is deliberately untouched. It is the SIMT subset's contract and
+      mentions the tile track nowhere; the statement went to `README.md`'s tile
+      section instead, whose generated-CUDA sample was showing the unqualified
+      signature and is now regenerated from the emitter rather than edited.
+
 - [ ] **Debug mode.** Emit bounds checks, device `printf` and a trap, behind a
       flag — the closest thing to a panic the device can offer.
 - [x] **Numerical policy.** (2026-09-18) — `NUMERICS.md`, organised so that

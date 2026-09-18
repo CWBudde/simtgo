@@ -1,0 +1,74 @@
+# compute-sanitizer over every kernel this repository can launch.
+#
+# What this covers is every kernel, not every test: the tagged tests of simt,
+# tile and cuda are the only places anything reaches a device, and between them
+# they launch all twelve kernels in kernels/prebuilt/gate.go, the inline probe
+# kernels the parity tests build, the tile track's fused kernels -- a separate
+# code generator, which a simt-only sweep would miss -- and the hand-written
+# kernel in cuda's raw-API test. Wrapping those three packages' test binaries
+# is therefore the whole surface.
+#
+# It does not run on a schedule and it will not run on a push, because there is
+# no runner for it yet: no GitHub-hosted runner has a GPU, and this repository
+# has no self-hosted one registered. The job is written against the runner
+# PLAN.md's Phase 1.4 will provide, and workflow_dispatch keeps it from queueing
+# forever in the meantime. Until then the sweep is a local command, recorded in
+# CLAUDE.md, and its results are in PLAN.md rather than in a badge.
+
+name: compute-sanitizer
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: auto
+
+jobs:
+  sanitize:
+    runs-on: [self-hosted, gpu]
+    strategy:
+      # One leg per tool. A tool stops at nothing, but the four answer
+      # different questions, and a single job would report whichever failed
+      # first as though it were the only finding -- the same reason fuzz.yml
+      # gives each of its targets a leg.
+      fail-fast: false
+      matrix:
+        tool: [memcheck, racecheck, initcheck, synccheck]
+
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # Asserted out loud, the way fuzz.yml asserts g++: a job whose whole
+      # point is that kernels ran should not discover halfway through that it
+      # has no device, and a sanitizer too old for the installed driver fails
+      # in ways that look like findings.
+      - run: nvidia-smi
+      - run: compute-sanitizer --version
+
+      # GOCUDA_REQUIRE_DEVICE turns the test helpers' "no CUDA device
+      # available" skip into a failure. Without it this job's worst outcome is
+      # available: green, having launched nothing.
+      #
+      # --error-exitcode is what makes the run a gate; compute-sanitizer exits
+      # 0 on findings otherwise. --report-api-errors no drops a class this
+      # repository tests better than the sanitizer does: cuda's error tests
+      # feed cuModuleLoadData deliberate garbage and assert the CUresult that
+      # comes back, which the default setting counts as two errors.
+      # -timeout 0 hands the bounding to the job, as fuzz.yml does.
+      #
+      # A clean run prints nothing: go test discards a passing binary's stdout,
+      # so the ERROR SUMMARY lines appear only when something failed -- which
+      # is when they are worth reading. Add -v to see them either way.
+      - name: ${{ matrix.tool }}
+        env:
+          GOCUDA_REQUIRE_DEVICE: "1"
+        run: |
+          go test -tags cuda -count=1 -timeout 0 \
+            -exec "compute-sanitizer --tool=${{ matrix.tool }} --error-exitcode 1 --report-api-errors no --target-processes application-only" \
+            ./simt/ ./tile/ ./cuda/
