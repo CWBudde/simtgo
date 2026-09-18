@@ -228,7 +228,14 @@ func reusePTX(o generateOptions, units []*lower.Unit) map[string]compiledPTX {
 func compilePTX(o generateOptions, units []*lower.Unit) (map[string]compiledPTX, error) {
 	out := map[string]compiledPTX{}
 	for _, u := range units {
-		ptx, err := cuda.Compile(u.Source, u.Name+".cu", o.arch)
+		// The unit decides, not the flag: a prebuilt is filed under the hash
+		// of the source that asked for fast math, so compiling it any other
+		// way would register PTX under a key it does not match.
+		var opts []cuda.CompileOption
+		if u.FastMath {
+			opts = append(opts, cuda.WithFastMath())
+		}
+		ptx, err := cuda.Compile(u.Source, u.Name+".cu", o.arch, opts...)
 		if err != nil {
 			// ErrNoCUDA covers both halves of "there is no NVRTC here": a
 			// binary built without the "cuda" tag, and a tagged one that could

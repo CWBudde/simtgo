@@ -104,7 +104,7 @@ func Build(dev *cuda.Context, fsys fs.FS, name string, opts ...BuildOption) (*Ke
 		return nil, &SharedMemoryError{Kernel: name, Bytes: u.SharedBytes, Limit: limit}
 	}
 
-	req := jit.Request{Src: u.Source, Name: name, CacheDir: o.cacheDir}
+	req := jit.Request{Src: u.Source, Name: name, CacheDir: o.cacheDir, FastMath: u.FastMath}
 	var pre Prebuilt
 	if !o.noPrebuilt {
 		major, minor := dev.ComputeCapability()
