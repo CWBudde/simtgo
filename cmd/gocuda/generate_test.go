@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/CWBudde/gocuda/cuda"
 )
 
 const goodKernel = `package kernels
@@ -158,7 +160,10 @@ func TestOutMustNotBeThePackage(t *testing.T) {
 	}
 }
 
-func TestParseArchLocal(t *testing.T) {
+// TestArchFlag pins what -arch accepts. The rule itself now lives in package
+// cuda, where the run-time compiler reads it too, so the flag and a JIT build
+// cannot come to different conclusions about the same string.
+func TestArchFlag(t *testing.T) {
 	for _, tc := range []struct {
 		in           string
 		major, minor int
@@ -172,18 +177,22 @@ func TestParseArchLocal(t *testing.T) {
 		{in: "compute_7", wantErr: true},
 		{in: "compute_", wantErr: true},
 		{in: "", wantErr: true},
+		// Refused as a capability rather than mistaken for an
+		// arch-conditional target: an "a" with no digits in front of it names
+		// nothing, and pointing at "compute_" would be advice that cannot work.
+		{in: "compute_a", wantErr: true},
 	} {
-		major, minor, err := parseArchLocal(tc.in)
+		major, minor, err := cuda.ParseArch(tc.in)
 		if tc.wantErr {
 			if err == nil {
-				t.Errorf("parseArchLocal(%q) = (%d, %d), want an error", tc.in, major, minor)
+				t.Errorf("ParseArch(%q) = (%d, %d), want an error", tc.in, major, minor)
 			}
 			continue
 		}
 		if err != nil {
-			t.Errorf("parseArchLocal(%q): %v", tc.in, err)
+			t.Errorf("ParseArch(%q): %v", tc.in, err)
 		} else if major != tc.major || minor != tc.minor {
-			t.Errorf("parseArchLocal(%q) = (%d, %d), want (%d, %d)", tc.in, major, minor, tc.major, tc.minor)
+			t.Errorf("ParseArch(%q) = (%d, %d), want (%d, %d)", tc.in, major, minor, tc.major, tc.minor)
 		}
 	}
 }

@@ -2,17 +2,16 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"go/format"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/CWBudde/gocuda/cuda"
 	"github.com/CWBudde/gocuda/internal/lower"
 )
 
@@ -72,8 +71,8 @@ kernel from the generated file -- which is what makes "go build" fail on it.
 }
 
 func run(o generateOptions) error {
-	if _, _, err := parseArchLocal(o.arch); err != nil {
-		return err
+	if _, _, err := cuda.ParseArch(o.arch); err != nil {
+		return fmt.Errorf("-arch: %w", err)
 	}
 	// The artifacts must not land in the kernel package itself. It is
 	// type-checked as a whole and may import nothing but gpu, so a generated
@@ -126,7 +125,7 @@ func run(o generateOptions) error {
 		units = append(units, u)
 	}
 
-	compiled := map[string]compiledPTX{}
+	var compiled map[string]compiledPTX
 	switch {
 	case o.check || o.noPTX:
 		// Both modes reuse whatever PTX is on disk, and keep only what still
@@ -194,31 +193,6 @@ func sameDir(a, b string) (bool, error) {
 	return filepath.Clean(pa) == filepath.Clean(pb), nil
 }
 
-// parseArchLocal validates -arch without importing package cuda, which would
-// drag cgo into a tool that must build without a toolkit.
-func parseArchLocal(s string) (major, minor int, err error) {
-	const prefix = "compute_"
-	digits, ok := strings.CutPrefix(s, prefix)
-	if !ok || digits == "" {
-		return 0, 0, fmt.Errorf("-arch %q is not a virtual architecture, e.g. compute_75", s)
-	}
-	for i, r := range digits {
-		if r < '0' || r > '9' {
-			if i == len(digits)-1 && (r == 'a' || r == 'f') {
-				return 0, 0, fmt.Errorf("-arch %q is an arch-conditional target, whose PTX is not forward compatible; use %q", s, prefix+digits[:i])
-			}
-			return 0, 0, fmt.Errorf("-arch %q is not a virtual architecture, e.g. compute_75", s)
-		}
-	}
-	if len(digits) < 2 {
-		return 0, 0, fmt.Errorf("-arch %q needs a major and a minor digit, e.g. compute_75", s)
-	}
-	for _, r := range digits[:len(digits)-1] {
-		major = major*10 + int(r-'0')
-	}
-	return major, int(digits[len(digits)-1] - '0'), nil
-}
-
 type compiledPTX struct {
 	ptx  []byte
 	log  string
@@ -244,59 +218,32 @@ func reusePTX(o generateOptions, units []*lower.Unit) map[string]compiledPTX {
 	return out
 }
 
-// compilePTX shells out to the NVRTC helper. The whole batch goes in one
-// invocation: "go run" of a cgo package is the expensive part, not the compile.
+// compilePTX runs NVRTC over the batch.
+//
+// A kernel NVRTC refuses is reported and left out, because the others are
+// still worth generating and the caller decides what a refusal means. Not
+// reaching NVRTC at all is the opposite case: it says nothing about any
+// kernel, every one of them would fail identically, and PTX already on disk
+// must not be replaced on the strength of it, so the run stops instead.
 func compilePTX(o generateOptions, units []*lower.Unit) (map[string]compiledPTX, error) {
-	if len(units) == 0 {
-		return map[string]compiledPTX{}, nil
-	}
-	req := struct {
-		Arch  string `json:"arch"`
-		Units []struct {
-			Name   string `json:"name"`
-			Source string `json:"source"`
-		} `json:"units"`
-	}{Arch: o.arch}
-	for _, u := range units {
-		req.Units = append(req.Units, struct {
-			Name   string `json:"name"`
-			Source string `json:"source"`
-		}{u.Name, u.Source})
-	}
-	in, err := json.Marshal(req)
-	if err != nil {
-		return nil, err
-	}
-
-	cmd := exec.Command("go", "run", "-tags", "cuda", "github.com/CWBudde/gocuda/cmd/gocuda-nvrtc")
-	cmd.Stdin = bytes.NewReader(in)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf(`could not run the NVRTC helper, so no PTX was produced and nothing was written.
-Is the CUDA toolkit installed? Re-run with -no-ptx to refresh the gate without it.
-
-%s%w`, stderr.String(), err)
-	}
-
-	var resp struct {
-		Results []struct {
-			Name  string `json:"name"`
-			PTX   []byte `json:"ptx"`
-			Log   string `json:"log"`
-			Error string `json:"error"`
-		} `json:"results"`
-	}
-	if err := json.Unmarshal(stdout.Bytes(), &resp); err != nil {
-		return nil, fmt.Errorf("reading the NVRTC helper's response: %w", err)
-	}
 	out := map[string]compiledPTX{}
-	for _, r := range resp.Results {
-		if r.Error != "" {
-			fmt.Fprintf(os.Stderr, "%s: %s\n", r.Name, r.Error)
+	for _, u := range units {
+		ptx, err := cuda.Compile(u.Source, u.Name+".cu", o.arch)
+		if err != nil {
+			// ErrNoCUDA covers both halves of "there is no NVRTC here": a
+			// binary built without the "cuda" tag, and a tagged one that could
+			// not load libnvrtc. To someone running go generate they are the
+			// same missing toolkit, and the same -no-ptx gets them moving.
+			if errors.Is(err, cuda.ErrNoCUDA) {
+				return nil, fmt.Errorf(`could not reach NVRTC, so no PTX was produced and nothing was written.
+Is the CUDA toolkit installed, and was this built with -tags cuda? Re-run with -no-ptx to refresh the gate without it.
+
+%w`, err)
+			}
+			fmt.Fprintf(os.Stderr, "%s: %v\n", u.Name, err)
 			continue
 		}
-		out[r.Name] = compiledPTX{ptx: r.PTX, log: r.Log, arch: o.arch}
+		out[u.Name] = compiledPTX{ptx: ptx.Bytes, log: ptx.Log, arch: o.arch}
 	}
 	return out, nil
 }

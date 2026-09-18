@@ -85,8 +85,17 @@ func TestGPUPackageMatchesReal(t *testing.T) {
 			if _, isFunc := obj.(*types.Func); !isFunc {
 				continue
 			}
+			if _, ok := gpuAtomics[name]; ok {
+				// The atomics are lowered by dedicated code rather than by the
+				// float32 table, because their first two arguments become one
+				// C operand: &s[i].
+				continue
+			}
+			if _, ok := gpuFuncs64[name]; ok {
+				continue
+			}
 			if _, ok := gpuFuncs[name]; !ok {
-				t.Errorf("gpu.%s has no entry in gpuFuncs; the emitter cannot lower it", name)
+				t.Errorf("gpu.%s has no entry in gpuFuncs, gpuFuncs64 or gpuAtomics; the emitter cannot lower it", name)
 			}
 		}
 		for name := range methodSigs(namedCtx(t, real)) {

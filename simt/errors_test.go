@@ -168,6 +168,34 @@ func TestUnsupported(t *testing.T) {
 			"func K(ctx gpu.Ctx, a []float32) { a[0] = float32(where(ctx)) }",
 		want: "where is a kernel",
 	}, {
+		// The refusal that lives in ctype cannot see this one: no float64 is
+		// written down anywhere. The argument is an untyped constant and the
+		// result is converted away, so without a check on the call itself the
+		// kernel would have run a double it never named.
+		name: "a float64 helper whose type never surfaces",
+		body: "func K(ctx gpu.Ctx, y []float32) { y[0] = float32(gpu.Sqrt64(2)) }",
+		want: "gpu.Sqrt64 is double precision and needs //gocuda:float64 on kernel K",
+	}, {
+		name: "a float64 helper on a float64 kernel without the directive",
+		body: "func K(ctx gpu.Ctx, y []float64) { y[0] = gpu.Hypot64(y[1], y[2]) }",
+		want: "needs //gocuda:float64 on kernel K",
+	}, {
+		// An atomic names a buffer and an index rather than a pointer, so the
+		// emitter is what writes the "&". A slice expression has no address to
+		// take, and saying so is more use than letting NVRTC complain about
+		// code the author never wrote.
+		name: "an atomic on a slice expression rather than a buffer",
+		body: "func K(ctx gpu.Ctx, h []int32) { gpu.AtomicAddI32(h[0:2], 0, 1) }",
+		want: "needs the buffer itself as its first argument",
+	}, {
+		name: "an atomic on a shared buffer built inline",
+		body: "func K(ctx gpu.Ctx, y []float32) { gpu.AtomicAddF32(ctx.SharedF32(4), 0, 1); y[0] = 1 }",
+		want: "needs the buffer itself as its first argument",
+	}, {
+		name: "an atomic on a package-level buffer",
+		body: "var g []int32\n\nfunc K(ctx gpu.Ctx, y []float32) { gpu.AtomicAddI32(g, 0, 1); y[0] = 1 }",
+		want: "declared outside the kernel",
+	}, {
 		name: "multiple assignment",
 		body: "func K(ctx gpu.Ctx, a []float32) { i, j := 0, 1; a[i] = a[j] }",
 		want: "multiple assignment",

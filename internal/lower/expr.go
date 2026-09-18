@@ -266,8 +266,14 @@ func (t *transpiler) call(c *ast.CallExpr) cexpr {
 		}
 		if id, ok := f.X.(*ast.Ident); ok {
 			if pkg, ok := t.info.Uses[id].(*types.PkgName); ok && pkg.Imported().Path() == GPUPkgPath {
+				if cfn, ok := gpuAtomics[f.Sel.Name]; ok {
+					return t.atomic(c, f.Sel.Name, cfn)
+				}
 				if cfn, ok := gpuFuncs[f.Sel.Name]; ok {
 					return atom("%s(%s)", cfn, t.args(c))
+				}
+				if cfn, ok := gpuFuncs64[f.Sel.Name]; ok {
+					return t.float64Call(c, f.Sel.Name, cfn)
 				}
 				t.fail(c.Pos(), "gpu.%s has no device equivalent", f.Sel.Name)
 				return atom("")

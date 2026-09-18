@@ -19,7 +19,7 @@ What the PoC is not:
 | ------------ | ---------------------------------------------------------- | -------------------------------------------- |
 | Driver API   | 18 calls, fully synchronous                                | streams, events, async copies, pinned memory |
 | Grids        | ~~1-D only~~ 1-D/2-D/3-D                                   | —                                            |
-| Types        | ~~`float32`, `int32`/`int`~~ scalars, structs, arrays      | narrow integers, `float64` math              |
+| Types        | ~~`float32`, `int32`/`int`~~ scalars, structs, arrays      | narrow integers                              |
 | Kernel calls | ~~none~~ `__device__` functions, recursion refused         | —                                            |
 | Errors       | surface at **run time**, inside `main()`                   | at **build time**                            |
 | Toolchain    | ~~hard-coded `/usr/local/cuda`~~ run-time `dlopen`, no cgo | Windows                                      |
@@ -182,11 +182,25 @@ from **28.7 ms to 0.9 ms** when the PTX is prebuilt.
       test was impossible before, because loading the tagged half needed a
       toolkit — so the machine that most needed the check was the one that
       could not run it.
-- [ ] **Collapse `cmd/gocuda-nvrtc` into `cmd/gocuda`.** The child process
-      exists only because `simt` used to be cgo while `cmd/gocuda` had to build
-      without a toolkit (`cmd/gocuda-nvrtc/main.go` says so itself). Nothing is
-      cgo now, so `generate` could call NVRTC directly and drop the JSON
-      protocol, the `go run` of a second binary, and the build-tag split.
+- [x] **Collapse `cmd/gocuda-nvrtc` into `cmd/gocuda`.** (2026-09-18) — done
+      as described: `generate` calls `cuda.Compile` in process, and the JSON
+      protocol, the `go run` of a second binary and the build-tag split are
+      gone. `package cuda` already carried the split internally, so the tool
+      still builds and runs untagged, where `Compile` is the stub's and answers
+      `ErrNoCUDA`. One behavioural change came with it, and it is the kind that
+      would otherwise be found by a silently empty artifact directory: the
+      `//go:generate` line now carries `-tags cuda`, because untagged the tool
+      reaches that stub and produces no PTX at all.
+
+      `parseArchLocal` went too, and it was the worse of the two
+      implementations rather than merely the redundant one: any trailing `a` or
+      `f` was read as an arch-conditional target without looking at what
+      preceded it, so `compute_a` was refused with advice naming a string the
+      function itself rejects. Every case the test already pinned behaves
+      identically under `cuda.ParseArch`.
+
+      Nothing had ever exercised the toolkit-missing path, because every test
+      in `generate_test.go` sets `-no-ptx`. One does now.
 
 One finding worth writing down, because it is silent when wrong: the driver's
 exported symbols are not the names in `cuda.h`. The header `#define`s
@@ -231,7 +245,30 @@ Nothing below is verifiable without this.
 
 - [ ] GPU runner (self-hosted or cloud), matrix over CUDA 12.x/13.x ×
       `sm_75`/`86`/`89`/`90` × Linux/Windows × supported Go versions.
-- [ ] Non-GPU job proving the no-tag build, `go vet`, and the race detector.
+- [x] Non-GPU job proving the no-tag build, `go vet`, and the race detector.
+      (2026-09-18) — `.github/workflows/ci.yml`, ubuntu-latest, three jobs:
+      `go build`, `go vet` under both tags, `go test ./...`,
+      `go test -race ./gpu/`, `CGO_ENABLED=0 go build -tags cuda ./...`,
+      `gocuda generate -check`, and `go test -tags cuda ./...`; plus
+      `golangci-lint` and `treefmt --ci`. The workflow itself is the one thing
+      here that cannot be verified before it is pushed; every command in it was
+      run by hand first.
+
+      The tagged test run took two fixes to become possible at all.
+      `TestGeneratedCCompiles` and `cuda`'s `TestNVRTCVersion` both needed only
+      the toolkit and neither skipped without one, so `go test -tags cuda ./...`
+      **failed** rather than skipped on a machine with neither toolkit nor
+      device — the machine where the emitter's own tests are most worth
+      running, and the only kind of machine CI has. Both skip now, which is
+      what turns that command into a gate rather than a known-red step.
+
+      `golangci-lint` has to be built with this module's own Go. The version
+      check compares the toolchain that built the linter against `go.mod`, so a
+      release binary built with an older Go refuses the module outright — hence
+      the action's `install-mode: goinstall`. `treefmt` cannot be `go install`ed
+      at any version: the module zip is rejected by the proxy itself over a
+      non-ASCII path in its own test data, and its GitHub releases are drafts,
+      so CI builds it from a pinned tag.
 
 ## Phase 2 — Language coverage (L)
 
@@ -319,11 +356,17 @@ Phase 3, so pulling it forward would be doing that item, not this one.
 
       Left behind, as items rather than as prose:
 
-      - [ ] **Double-precision `gpu` math** — `Sqrt64`, `Hypot64` and the rest,
+      - [x] **Double-precision `gpu` math** — `Sqrt64`, `Hypot64` and the rest,
             mapping to CUDA's unsuffixed `sqrt`/`hypot` and legal only under
-            `//gocuda:float64`. A `float64` kernel currently gets arithmetic,
-            comparison and conversion and nothing from `gpu`, which `go/types`
-            reports as an ordinary type error rather than as a missing feature.
+            `//gocuda:float64`. (2026-09-18) — and the opt-in turned out to
+            need enforcing somewhere new. Every other `float64` refusal lives
+            in `ctype`, which sees a type somebody wrote down, and
+            `y[i] = float32(gpu.Sqrt64(2))` writes none: the argument is an
+            untyped constant and the result is converted away, so the kernel
+            would have run a double it never named. The permission is about
+            what the device is asked to execute, so the check belongs on the
+            call. Membership of `gpuFuncs64` is what requires the directive,
+            which keeps a name added later from quietly escaping it.
       - [ ] **Narrow integer storage** — `[]uint8` image buffers and the like.
             The widths already agree; the arithmetic does not, because C
             promotes to `int` and Go does not. The honest design is a
@@ -334,8 +377,42 @@ Phase 3, so pulling it forward would be doing that item, not this one.
             Lifting it belongs with offset checking, not with the field rule.
 
 - [ ] **Shared memory.** Typed (`SharedI32`, …) and dynamically sized at launch.
-- [ ] **Atomics.** `atomicAdd`/`Min`/`Max`/`CAS`, with a Go-side vocabulary
-      that the emulator implements faithfully.
+- [x] **Atomics.** `atomicAdd`/`Min`/`Max`/`CAS`, with a Go-side vocabulary
+      that the emulator implements faithfully. (2026-09-18) — `AtomicAddF32`,
+      `AtomicAddI32`, `AtomicMinI32`, `AtomicMaxI32`, `AtomicExchI32` and
+      `AtomicCASI32`, each returning the old value as the built-in does.
+
+      They take a **buffer and an index** rather than a pointer, which is
+      forced rather than chosen: the subset has no address-of, so `&s[i]` is
+      something the emitter writes and a kernel can never say. The shape pays
+      for itself twice, because it also gives the first argument something to
+      be checked against — it must be a slice parameter or a shared tile, which
+      are exactly the objects `t.lens` holds and exactly the ones that lower to
+      something with a device address. A tile therefore works, and keeps
+      working when it is passed on to a device function, where it is an
+      ordinary pointer parameter.
+
+      The vocabulary stops where CUDA's overloads stop at `compute_75` with no
+      header, which is all NVRTC has. Those gaps are named in `gpu`'s package
+      comment rather than left to be rediscovered: `atomicMin`, `atomicMax` and
+      `atomicCAS` have no float form, and `atomicAdd` has no `long long` form,
+      only `unsigned long long`, so 64-bit variants would each need a different
+      reinterpret cast and the one-Go-name-to-one-built-in table would stop
+      holding.
+
+      The emulator serialises every read-modify-write on one package-level
+      mutex, because global memory there is the caller's own Go slice and there
+      is nowhere per-buffer to hang a lock. What the lock does *not* do matters
+      more: it creates a happens-before edge only between goroutines that take
+      it, so a plain write to the same element is still reported by `-race`,
+      which is right, because on the device that is a race too. It unlocks
+      through `defer`, and that is load-bearing rather than stylistic — an
+      out-of-range index panics with the lock held, `RunCPU`'s per-thread
+      recover turns that into a diagnosis rather than a crash, and without the
+      `defer` the next launch to use an atomic would block forever. Removing it
+      makes `TestAtomicPanicDoesNotStrandTheLock` hang until the test timeout,
+      which is the only way that bug ever announces itself.
+
 - [ ] **Warp-level primitives.** Shuffle, ballot, `__activemask`, warp
       reductions — the basis of every fast reduction.
 - [x] **Missing statements.** `switch`, labelled `break`/`continue`,
@@ -389,9 +466,18 @@ What these three left behind, as items rather than as prose:
       at its launch. Lifting that means propagating the accounting through the
       call graph.
 
-One caveat on the evidence, since Phase 1.4 is still open: all of the above is
-verified on **one** GPU — a T550, `sm_75`, CUDA 12.8. The parity tests do not
-need CI to run, but they need CI to have run anywhere else.
+One caveat on the evidence, and it is now two caveats. Everything through the
+type work is verified on **one** GPU — a T550, `sm_75`, CUDA 12.8; the parity
+tests do not need CI to run, but they need CI to have run anywhere else.
+
+The atomics and the `float64` helpers are weaker than that: they were written
+where there is no device **and no toolkit**, so their parity tests and their
+NVRTC cases have never run anywhere. What is verified is the lowering, the
+refusals, the drift test, the analyzer and the emulator under `-race`; the
+generated C was read, not compiled. Whether NVRTC declares `atomicAdd` and the
+unsuffixed `sqrt` with no headers included is a measurement
+`simt/nvrtc_cuda_test.go` is written to make and nothing here could make. The
+first run on real hardware is the one that settles it.
 
 ## Phase 3 — Correctness at scale (L)
 
@@ -483,11 +569,26 @@ Seven operations, 1-D, `float32`, one windowed op, no reductions.
 - [ ] CHANGELOG and release automation.
 - [ ] A published support matrix: CUDA versions, architectures, OSes, Go
       versions.
-- [ ] Repository scaffolding that is simply missing: there is no LICENSE, no
-      `.golangci.yml` (Trunk runs `golangci-lint2` on defaults), and no CI at
-      all. `.trunk/trunk.yaml` also pins `go@1.21.0` and `gofmt@1.20.4` against
-      a `go 1.26` module, so the linter's Go runtime cannot parse the sources
-      it is checking.
+- [ ] Repository scaffolding that is simply missing. **There is no LICENSE**,
+      which is the one that blocks everything else here. `.golangci.yml`,
+      `treefmt.toml` and CI landed on 2026-09-18.
+
+      The earlier version of this bullet described a `.trunk/trunk.yaml`
+      pinning `go@1.21.0` and `gofmt@1.20.4` against a `go 1.26` module. That
+      file has never existed in the repository, on any branch, so there was
+      nothing stale to fix and nothing to migrate: Trunk is simply dropped, and
+      linting is `golangci-lint` with formatting by `treefmt`. Worth recording
+      as a correction rather than a silent edit, because a plan that describes
+      files it cannot see is the same failure as a README that describes code
+      it does not have.
+
+      Seven linters are enabled beyond the standard set, each measured clean
+      before it was turned on. Seven more are left off rather than suppressed —
+      `errorlint`, `perfsprint`, `predeclared`, `gocritic`, `intrange`,
+      `wastedassign`, `revive` — because their findings are real and fixing
+      them is a change to the emitter and the driver that belongs in its own
+      commit. A config that excluded them would say the code is clean when it
+      is not.
 
 ## What 1.0 means
 

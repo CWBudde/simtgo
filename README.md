@@ -10,13 +10,13 @@ kernels on real hardware.
 
 ## The two tracks
 
-|                         | CUDA Rust                                                                                             | This repository                                                                                                      |
-| ----------------------- | ----------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| **SIMT track**          | A custom `rustc` codegen backend lowers `#[kernel]` functions through MIR and LLVM IR to PTX          | `go/ast` + `go/types` lower a Go subset to CUDA C, which NVRTC compiles to PTX at run time (package `simt`)          |
-| **Tile track**          | A `#[cutile::module]` proc macro embeds the kernel AST in the host binary and JITs it through Tile IR | The graph is recorded at run time by ordinary Go calls, then fused into one generated kernel (package `tile`)        |
-| **Safety**              | `DisjointSlice<T>`, launch contracts, const generics                                                  | Runtime shape checks; the CPU emulator plus `go test -race`                                                          |
-| **When errors surface** | `rustc` rejects the kernel                                                                            | `gocuda vet` rejects it, and `go generate` makes an unlowerable kernel fail `go build`                               |
-| **Toolchain**           | Pinned nightly Rust, custom LLVM                                                                      | Plain `go1.26`, cgo, NVRTC. The library has no third-party dependencies; the `gocuda` tool uses `golang.org/x/tools` |
+|                         | CUDA Rust                                                                                             | This repository                                                                                                            |
+| ----------------------- | ----------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| **SIMT track**          | A custom `rustc` codegen backend lowers `#[kernel]` functions through MIR and LLVM IR to PTX          | `go/ast` + `go/types` lower a Go subset to CUDA C, which NVRTC compiles to PTX at run time (package `simt`)                |
+| **Tile track**          | A `#[cutile::module]` proc macro embeds the kernel AST in the host binary and JITs it through Tile IR | The graph is recorded at run time by ordinary Go calls, then fused into one generated kernel (package `tile`)              |
+| **Safety**              | `DisjointSlice<T>`, launch contracts, const generics                                                  | Runtime shape checks; the CPU emulator plus `go test -race`                                                                |
+| **When errors surface** | `rustc` rejects the kernel                                                                            | `gocuda vet` rejects it, and `go generate` makes an unlowerable kernel fail `go build`                                     |
+| **Toolchain**           | Pinned nightly Rust, custom LLVM                                                                      | Plain `go1.26`, no cgo, NVRTC loaded at run time. One dependency, purego; the `gocuda` tool also uses `golang.org/x/tools` |
 
 ### Why Go cannot take Rust's route
 
@@ -132,6 +132,25 @@ A kernel that sizes shared memory against a fixed block size says so with
 quietly reading the wrong stretch of memory. `Build` likewise refuses a kernel
 whose shared memory exceeds what the device offers per block.
 
+`gpu.AtomicAddF32`, `AtomicAddI32`, `AtomicMinI32`, `AtomicMaxI32`,
+`AtomicExchI32` and `AtomicCASI32` become `atomicAdd`, `atomicMin` and the
+rest, and each returns the value the element held before, as the CUDA built-in
+does. They take a **buffer and an index** rather than a pointer, because the
+subset has no address-of: `&s[i]` is something the emitter writes and a kernel
+can never say. That shape is also what makes the first argument checkable — it
+must be a slice parameter or a shared tile, the only two things a kernel has
+whose address means anything on the device, and anything else is refused with a
+position rather than left to NVRTC.
+
+The vocabulary stops where CUDA's overloads do at `compute_75` with no header,
+which is all NVRTC has: `atomicMin`, `atomicMax` and `atomicCAS` have no float
+form, so there is no `AtomicMinF32`, and `atomicAdd` has no `long long` form,
+only `unsigned long long`, so 64-bit variants would each need a different
+reinterpret cast. The CPU emulator serialises all of them on one lock, which
+is atomic enough to be faithful and deliberately not enough to hide a plain
+write racing an atomic — `go test -race` still reports that, because on the
+device it is a race too.
+
 A kernel may call another function in its package, which is emitted as a
 `__device__` function alongside it: a prototype for each one the kernel
 reaches, then the definitions, then the entry point. Slice parameters split
@@ -170,9 +189,12 @@ fraction of the float32 rate, so a kernel that acquired one by accident would
 be correct and far slower — and the opt-in makes that something somebody wrote
 down. It covers the kernel's whole translation unit, device functions included;
 a helper may not carry its own, for the reason `SharedF32` and `AssumeBlockDim`
-may not either. There is no `float64` vocabulary in `gpu`: `gpu.Sqrt` and
-friends are `float32`, so a double kernel gets arithmetic, comparison and
-conversion and nothing else.
+may not either. `gpu.Sqrt` and friends stay `float32`; the double-precision
+half is spelled `gpu.Sqrt64`, `gpu.Hypot64`, `gpu.Fmax64` and the rest, which
+become CUDA's unsuffixed `sqrt`, `hypot`, `fmax`. Reaching one of those without
+the directive is refused by name, and the refusal has to sit on the _call_
+rather than on a type: `y[i] = float32(gpu.Sqrt64(2))` writes no `float64`
+anywhere, so a check that waits for one to be declared never sees it.
 
 **Go's `int` is 64-bit and CUDA's is 32-bit.** That narrowing is the one
 deliberate infidelity, and it holds only for a value passed on its own, where
@@ -389,8 +411,7 @@ simt/          transpile, build and launch             (track 1)
 tile/          lazy graph -> one fused kernel          (track 2)
 internal/lower/   Go AST -> CUDA C; the one definition of the subset
 analysis/simtcheck/  the go/analysis Analyzer behind "gocuda vet"
-cmd/gocuda/    vet and generate                        (no driver needed)
-cmd/gocuda-nvrtc/  the NVRTC child process             (build tag "cuda")
+cmd/gocuda/    vet and generate; calls NVRTC in process, no driver needed
 kernels/       the example kernels, embedded as source
 kernels/prebuilt/  generated: CUDA C, PTX, and the build gate
 internal/jit/  compile, cache and load, shared by both tracks

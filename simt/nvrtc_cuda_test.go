@@ -3,6 +3,7 @@
 package simt_test
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -24,15 +25,25 @@ import (
 // track exists to remove.
 //
 // No device is needed, only the toolkit: NVRTC compiles to PTX, and nothing
-// here launches anything.
+// here launches anything. When the toolkit is missing there is no question to
+// answer, so the test skips rather than fails -- an absent libnvrtc says
+// nothing about the emitter, and reporting it as a failure would train readers
+// to ignore the one signal this test exists to give.
 func TestGeneratedCCompiles(t *testing.T) {
+	// The cheapest probe that loads libnvrtc and nothing else. *LibraryError
+	// reports ErrNoCUDA as well as ErrLibraryNotFound, so this single
+	// comparison covers both "no toolkit installed" and "the library is
+	// somewhere the search does not look".
+	if _, _, err := cuda.NVRTCVersion(); errors.Is(err, cuda.ErrNoCUDA) {
+		t.Skipf("no CUDA toolkit available: %v", err)
+	}
+
 	const arch = "compute_75"
 	cases := []struct{ name, body string }{{
-		// The float64 vocabulary is arithmetic and nothing else: gpu.Sqrt and
-		// friends are float32-only, so the interesting question is whether the
-		// builtins the emitter does reach have double overloads NVRTC can see
-		// with no headers included. min/max are the ones expr.go maps directly,
-		// and a comment claiming CUDA provides them is not a measurement.
+		// Whether the built-ins the emitter reaches have double overloads
+		// NVRTC can see with no headers included. min/max are the ones expr.go
+		// maps directly, and a comment claiming CUDA provides them is not a
+		// measurement.
 		name: "float64 arithmetic, min/max on doubles, and 64-bit literals",
 		body: "//gocuda:float64\n" +
 			"func K(ctx gpu.Ctx, out, a, b []float64) {\n" +
@@ -148,6 +159,50 @@ func TestGeneratedCCompiles(t *testing.T) {
 			"\tj := ctx.ThreadIdxY() + ctx.ThreadIdxZ() + ctx.BlockIdxY() + ctx.BlockIdxZ()\n" +
 			"\tk := ctx.BlockDimY() + ctx.BlockDimZ() + ctx.GridDimY() + ctx.GridDimZ()\n" +
 			"\tif i+j+k < len(y) { y[0] = 1 }\n}",
+	}, {
+		// The double-precision vocabulary added in Phase 2. The question is
+		// the same one the case above asks and it is worth asking separately:
+		// these are the unsuffixed names, and an unsuffixed name that NVRTC
+		// resolved to the float overload instead would compile silently and
+		// halve the precision the kernel asked for.
+		name: "the float64 gpu helpers with no headers included",
+		body: "//gocuda:float64\n" +
+			"func K(ctx gpu.Ctx, out, a, b []float64) {\n" +
+			"\ti := ctx.GlobalID()\n" +
+			"\tif i < len(out) {\n" +
+			"\t\tout[i] = gpu.Fmax64(gpu.Hypot64(gpu.Sqrt64(gpu.Abs64(a[i])), b[i]),\n" +
+			"\t\t\tgpu.Fmin64(gpu.Log64(gpu.Exp64(a[i])), gpu.Sin64(a[i])+gpu.Cos64(b[i])))\n" +
+			"\t}\n}",
+	}, {
+		// The atomic vocabulary. NVRTC compiles a bare string with no
+		// #include, so whether atomicAdd and friends are even declared is a
+		// measurement rather than a claim -- and this is the only test that
+		// can make it. Every overload the emitter can reach is here: the float
+		// and int adds, min, max, exch and CAS.
+		name: "the atomic vocabulary with no headers included",
+		body: "func K(ctx gpu.Ctx, y []float32, h []int32) {\n" +
+			"\ti := ctx.GlobalID()\n" +
+			"\tgpu.AtomicAddF32(y, i%4, 1)\n" +
+			"\told := gpu.AtomicAddI32(h, 0, 1)\n" +
+			"\tgpu.AtomicMinI32(h, 1, old)\n" +
+			"\tgpu.AtomicMaxI32(h, 2, old)\n" +
+			"\tgpu.AtomicExchI32(h, 3, old)\n" +
+			"\tif gpu.AtomicCASI32(h, 4, 0, old) == 0 {\n\t\ty[0] = 1\n\t}\n}",
+	}, {
+		// An atomic on a __shared__ tile takes the address of an array rather
+		// than of a pointer's target, so the operand is a generic pointer and
+		// not a global one. Whether NVRTC accepts that overload at all is the
+		// question; the hardware resolving it back to a shared atomic is what
+		// the parity test measures.
+		name: "an atomic on a shared tile, and one across a device function",
+		body: "//gocuda:ignore\n" +
+			"func bump(h []int32, i int) { gpu.AtomicAddI32(h, i, 1) }\n\n" +
+			"func K(ctx gpu.Ctx, y []float32, h []int32) {\n" +
+			"\ts := ctx.SharedF32(256)\n" +
+			"\tgpu.AtomicAddF32(s, ctx.ThreadIdx(), 1)\n" +
+			"\tctx.SyncThreads()\n" +
+			"\tbump(h, ctx.GlobalID()%4)\n" +
+			"\ty[0] = s[0]\n}",
 	}}
 
 	for _, tc := range cases {

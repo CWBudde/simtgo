@@ -53,3 +53,15 @@ var gain float32 = 2
 func PackageLevelVar(ctx gpu.Ctx, a []float32) {
 	a[0] = gain // want `declared outside the kernel`
 }
+
+// AtomicOnAnExpression is refused because the device takes the address of one
+// element, and a slice expression has no address to take.
+func AtomicOnAnExpression(ctx gpu.Ctx, h []int32) {
+	gpu.AtomicAddI32(h[0:2], 0, 1) // want `needs the buffer itself as its first argument`
+}
+
+// Float64MathWithoutTheDirective is refused on the call rather than on a type,
+// because there is no float64 in the signature to refuse.
+func Float64MathWithoutTheDirective(ctx gpu.Ctx, a []float32) {
+	a[0] = float32(gpu.Sqrt64(2)) // want `is double precision and needs //gocuda:float64`
+}

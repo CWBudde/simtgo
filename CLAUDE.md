@@ -31,8 +31,17 @@ go run ./cmd/gocuda generate -pkg ./kernels -out ./kernels/prebuilt -no-ptx   # 
 go run -tags cuda ./examples/fir     # also: vecadd, magnitude, tilefir
 ```
 
-Linting is Trunk (`.trunk/trunk.yaml`: gofmt, golangci-lint2, markdownlint,
-prettier) — `trunk check`. There is no CI workflow in the repo yet.
+Linting is `golangci-lint run ./...` (`.golangci.yml`) and formatting is
+`treefmt` (`treefmt.toml`: gofmt for Go, prettier for Markdown, YAML and JSON);
+`treefmt --ci` checks without writing. Both run in
+`.github/workflows/ci.yml`, together with the checks above — that workflow is
+the **non-GPU** half of Phase 1.4, so nothing in CI runs on a device and the
+parity tests are unverified there.
+
+`golangci-lint` must be built with this module's own Go: the version check
+compares the toolchain that built the linter against `go.mod`, and a release
+binary built with an older Go refuses the module outright. CI uses the action's
+`install-mode: goinstall` for that reason.
 
 ## The `cuda` build tag
 
@@ -55,12 +64,15 @@ with no CUDA present (`cuda/library_test.go`). `GOCUDA_LIBCUDA` and
 ships with the driver, not the toolkit, so a toolkit root says nothing about
 where it lives.
 
-`cmd/gocuda` depends on `internal/lower` and never on `simt`. It reaches NVRTC
-by shelling out to `cmd/gocuda-nvrtc` (built with `-tags cuda`), which speaks
-JSON on stdin/stdout, one batch per invocation. That split existed because
-`simt` was cgo and `cmd/gocuda` had to build without a toolkit; now that
-nothing is cgo, the child process is no longer necessary — collapsing it is
-tracked in `PLAN.md` under Phase 1.2.
+`cmd/gocuda` depends on `internal/lower` and never on `simt`. It calls
+`cuda.Compile` directly, in process; the `cmd/gocuda-nvrtc` child that used to
+speak JSON on stdin/stdout is gone, because the reason for it — `simt` was cgo
+and `cmd/gocuda` had to build without a toolkit — went with cgo. `package
+cuda` carries the tag split internally, so the tool still builds and runs
+untagged, where `Compile` is `cuda/stub.go`'s and returns `ErrNoCUDA`. That is
+why the `//go:generate` line in `kernels.go` carries `-tags cuda`: untagged it
+would reach the stub and produce no PTX at all. Without a toolkit, `-no-ptx`
+refreshes the gate and never calls NVRTC.
 
 ## Architecture
 

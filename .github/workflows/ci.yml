@@ -1,0 +1,106 @@
+# The non-GPU half of the repository's checks: everything that can be decided
+# without a device.
+#
+# What this does NOT cover is the more interesting half. No runner here has a
+# GPU, and none has a CUDA toolkit, so the CPU/GPU parity tests, the launch
+# path, the prebuilt-PTX path and NVRTC itself all skip. A green run means the
+# code builds in every configuration, the transpiler still lowers what it
+# claims to, the committed artifacts match their sources and the emulator is
+# race-clean -- it does not mean a kernel produces the right numbers on a
+# device. Only `go test -tags cuda ./...` on real hardware answers that.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  # golangci-lint and treefmt each declare a newer Go than this module pins,
+  # and both are built from source below. "auto" lets the toolchain fetch what
+  # they ask for rather than failing the job over a version this repository has
+  # no opinion about.
+  GOTOOLCHAIN: auto
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - run: go build ./...
+      - run: go vet ./...
+
+      # The driver, the NVRTC bindings and their tests exist only behind the
+      # tag; without a tagged vet nothing would ever compile them.
+      - run: go vet -tags cuda ./...
+
+      - run: go test ./...
+
+      # The emulator runs one kernel from many goroutines over shared slices,
+      # which is exactly the shape a data race hides in.
+      - run: go test -race ./gpu/
+
+      # Nothing is cgo: the driver is dlopened at run time. This is the check
+      # that keeps it that way.
+      - run: CGO_ENABLED=0 go build -tags cuda ./...
+
+      # Catches a kernel that was edited but never regenerated, which the
+      # prebuilt gate alone cannot see.
+      - run: go run ./cmd/gocuda generate -check
+
+      # Strictly stronger than skipping the tagged tests: this compiles all of
+      # them and runs the ones that need neither a device nor a toolkit, so a
+      # tagged test that stopped building is caught here rather than on the one
+      # machine that has a GPU.
+      - run: go test -tags cuda ./...
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.2
+          # A released golangci-lint binary is built with whatever Go its
+          # authors used, and it refuses outright to load a config for a module
+          # whose go directive is newer than that -- which this module's is.
+          # Building it here with the toolchain selected above sidesteps a
+          # failure that has nothing to do with the code being linted.
+          install-mode: goinstall
+
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # Pinned, because a formatter's idea of correct output changes between
+      # releases and an unpinned one turns CI red on a day nobody touched the
+      # repository.
+      - run: npm install --global prettier@3.8.1
+
+      - name: Install treefmt
+        # `go install` cannot reach treefmt at any version: a path in its
+        # repository contains a character the module zip format forbids, so the
+        # proxy fails to build the zip and the download 404s. Building from a
+        # pinned tag is the way in.
+        run: |
+          git clone --depth 1 --branch v2.6.0 https://github.com/numtide/treefmt "$RUNNER_TEMP/treefmt"
+          mkdir -p "$RUNNER_TEMP/bin"
+          go build -C "$RUNNER_TEMP/treefmt" -o "$RUNNER_TEMP/bin/treefmt" .
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - run: treefmt --ci

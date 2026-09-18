@@ -104,8 +104,16 @@ func TestCompileError(t *testing.T) {
 
 // TestNVRTCVersion reports the compiler this build is linked against; it is
 // worth having in a test log next to a kernel that only fails on one toolkit.
+//
+// A missing toolkit is a skip rather than a failure, for the same reason the
+// device tests skip a missing device: there is no question to answer, and the
+// tagged suite has to be runnable on a machine that has neither if it is ever
+// to gate anything.
 func TestNVRTCVersion(t *testing.T) {
 	major, minor, err := cuda.NVRTCVersion()
+	if errors.Is(err, cuda.ErrNoCUDA) {
+		t.Skipf("no CUDA toolkit available: %v", err)
+	}
 	if err != nil {
 		t.Fatalf("NVRTCVersion: %v", err)
 	}
