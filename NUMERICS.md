@@ -218,6 +218,27 @@ ordinary numbers and disagrees the moment a NaN reaches it — the emulator
 propagates and the device does not. Nothing currently tests this, and no kernel
 in `kernels/` is affected. Prefer `gpu.Fmin` where a NaN is possible.
 
+## Converting a float to an integer it does not fit
+
+**[cited]** Neither language promises anything. Go's specification says that in
+a non-constant conversion, "if the result type cannot represent the value the
+conversion succeeds but the result value is implementation-dependent"; C leaves
+the same conversion undefined. So a float outside the destination's range is
+one of the few places where the emulator and the device may legitimately
+disagree and neither is wrong.
+
+**[measured]** The differential fuzzer walked into it, and the case is worth
+recording because it is not the obvious one. Its generator already clamped
+every float to ±1000 before converting, which is in range for a signed 32-bit
+integer — and not for an _unsigned_ one, where a negative value fits nothing.
+Converting `-4.0f` to a `uint32` gave one answer on the host and another in the
+emulator, on every element of the buffer. The clamp now takes the
+destination's signedness into account.
+
+Nothing refuses this at lowering, and nothing can: the value is not known until
+the kernel runs. Clamp before converting, and clamp to a floor the destination
+can hold.
+
 ## The tolerance policy
 
 There is one rule, it lives in `internal/tolerance`, and the three places that

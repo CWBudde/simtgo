@@ -510,7 +510,7 @@ func (g *gen) conv(k Kind, d int) Expr {
 		// host, which the subset refuses rather than lowering.
 		return nil
 	case from.float() && !k.float():
-		return &Conv{To: k, X: g.clampToInt(from, d)}
+		return &Conv{To: k, X: g.clampToInt(from, k, d)}
 	case k == KU32 || k == KU64:
 		// uint32(-6) is a constant outside the type, which Go rejects where
 		// the same conversion of a value would simply wrap.
@@ -519,20 +519,33 @@ func (g *gen) conv(k Kind, d int) Expr {
 	return &Conv{To: k, X: g.expr(from, d-1)}
 }
 
-// clampToInt bounds a float so that converting it to an integer is defined.
+// clampToInt bounds a float so that converting it to the integer kind `to` is
+// defined.
 //
 // Go leaves a conversion whose value does not fit implementation-dependent and
 // C leaves it undefined, and the input distribution deliberately contains NaN
 // and both infinities. gpu.Fmin and gpu.Fmax are the clamp because they follow
 // IEEE minNum/maxNum: a NaN operand is ignored and the number is returned, so
 // even a NaN comes out of this at a thousand.
-func (g *gen) clampToInt(k Kind, d int) Expr {
+//
+// The floor depends on where the value is going, which is what this originally
+// got wrong: clamping to -1000 and then converting to a uint32 is a negative
+// float reaching an unsigned integer, which is exactly the case neither
+// language defines. The host differential found it -- the two backends
+// disagreed on every element of a buffer -- and it was the generator
+// manufacturing a program whose answer nothing promises, not the emitter
+// mistranslating one.
+func (g *gen) clampToInt(from, to Kind, d int) Expr {
 	suffix := ""
-	if k == KF64 {
+	if from == KF64 {
 		suffix = "64"
 	}
-	lo := &MathCall{Fn: "Fmin" + suffix, K: k, Args: []Expr{g.expr(k, d-1), &Lit{K: k, F: 1000}}}
-	return &MathCall{Fn: "Fmax" + suffix, K: k, Args: []Expr{lo, &Lit{K: k, F: -1000}}}
+	floor := -1000.0
+	if !to.signed() {
+		floor = 0
+	}
+	lo := &MathCall{Fn: "Fmin" + suffix, K: from, Args: []Expr{g.expr(from, d-1), &Lit{K: from, F: 1000}}}
+	return &MathCall{Fn: "Fmax" + suffix, K: from, Args: []Expr{lo, &Lit{K: from, F: floor}}}
 }
 
 // callExpr calls a helper for its value, or returns nil when none has that
