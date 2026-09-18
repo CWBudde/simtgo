@@ -47,6 +47,11 @@ linters:
     # strings.Index's result without testing it for -1, two lines above a guard
     # the author had already written for exactly that case.
     - gocritic
+    # `for i := range n` is the spelling this module's Go has, and the four
+    # loops it found were the only ones left writing the old one. One of them
+    # re-evaluated its own bound on every iteration, which is what a C-style
+    # loop lets you not notice.
+    - intrange
 
   settings:
     errcheck:

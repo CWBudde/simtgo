@@ -488,7 +488,7 @@ func (c *compiler) rangeBuf(s *Range, body func(*frame) ctrl, label string) func
 	}
 	return func(f *frame) ctrl {
 		n := length(f)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			setKey(f, i)
 			if setVal != nil {
 				setVal(f)
@@ -549,7 +549,7 @@ func (c *compiler) rangeInt(s *Range, body func(*frame) ctrl, label string) func
 	}
 	return func(f *frame) ctrl {
 		n := limit(f)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			setKey(f, i)
 			if out, stop := loopCtrl(body(f), label); stop {
 				return out

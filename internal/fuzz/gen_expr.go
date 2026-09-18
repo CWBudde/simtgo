@@ -394,7 +394,7 @@ func (g *gen) mixed(k Kind, d int) Expr {
 	// fit its type at compile time, and a shifted or multiplied constant
 	// quickly does not.
 	e := g.anchor(k)
-	for i := 0; i < 2+g.r.IntN(3); i++ {
+	for range 2 + g.r.IntN(3) {
 		op := pick(g.r, pick(g.r, levels))
 		switch op {
 		case token.SHL, token.SHR:
