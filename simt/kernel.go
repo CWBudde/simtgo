@@ -163,14 +163,25 @@ func (e *BlockSizeError) Error() string {
 // at any other size: its shared tiles are sized for that one geometry, so a
 // different block would stage the wrong number of samples and read past them.
 func (k *Kernel) Launch(grid, block int, args ...any) error {
-	if k.RequiredBlock != 0 && block != k.RequiredBlock {
-		return &BlockSizeError{Kernel: k.Name, Want: k.RequiredBlock, Got: block}
+	return k.LaunchDim(cuda.D1(grid), cuda.D1(block), args...)
+}
+
+// LaunchDim is Launch over a grid of any rank, for a kernel that reads more
+// than one axis of its position.
+//
+// The block-size contract counts threads per block across all three axes:
+// AssumeBlockDim says how many threads fill a shared tile, not how they are
+// arranged, so a 16x16 block satisfies AssumeBlockDim(256).
+func (k *Kernel) LaunchDim(grid, block cuda.Dim3, args ...any) error {
+	threads := int(block.X) * int(block.Y) * int(block.Z)
+	if k.RequiredBlock != 0 && threads != k.RequiredBlock {
+		return &BlockSizeError{Kernel: k.Name, Want: k.RequiredBlock, Got: threads}
 	}
 	flat, err := cuda.BuildArgs(args...)
 	if err != nil {
 		return err
 	}
-	return k.fn.LaunchSync(cuda.D1(grid), cuda.D1(block), 0, flat...)
+	return k.fn.LaunchSync(grid, block, 0, flat...)
 }
 
 // LaunchN runs the kernel over enough blocks to cover n threads. Kernels guard

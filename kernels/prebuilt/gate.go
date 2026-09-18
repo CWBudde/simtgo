@@ -16,10 +16,13 @@ type Lowered string
 //
 // Add a name here whenever you add a kernel.
 var Gate = []Lowered{
+	Classify,
 	FIR,
 	VecAdd,
 	Magnitude,
 	Scale,
+	Softclip,
+	Transpose,
 }
 
 // Names returns Gate as plain strings, for simt.VerifyPrebuilt.

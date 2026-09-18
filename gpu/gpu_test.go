@@ -3,6 +3,7 @@ package gpu_test
 import (
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/CWBudde/gocuda/gpu"
@@ -247,4 +248,93 @@ func TestKernelPanicSurfaces(t *testing.T) {
 		})
 	})
 	wantContains(t, msg, "kernel panicked in block 0, thread 3", "boom")
+}
+
+// TestRunCPUDim covers a genuinely multi-dimensional launch: every thread of
+// the grid must run exactly once, and each must see its own coordinates.
+func TestRunCPUDim(t *testing.T) {
+	const gx, gy, bx, by = 3, 2, 4, 5
+	const w, h = gx * bx, gy * by
+
+	// One counter per global position. Blocks run concurrently, so the visits
+	// are counted atomically and `go test -race` has something to say if the
+	// emulator ever hands two threads the same coordinates.
+	visits := make([]int32, w*h)
+	var bad atomic.Int32
+	gpu.RunCPUDim(gpu.D2(gx, gy), gpu.D2(bx, by), func(c gpu.Ctx) {
+		if c.BlockDim() != bx || c.BlockDimY() != by || c.GridDim() != gx || c.GridDimY() != gy {
+			bad.Add(1)
+			return
+		}
+		if c.BlockDimZ() != 1 || c.GridDimZ() != 1 || c.ThreadIdxZ() != 0 || c.BlockIdxZ() != 0 {
+			bad.Add(1)
+			return
+		}
+		x, y := c.GlobalIDX(), c.GlobalIDY()
+		if x != c.BlockIdx()*bx+c.ThreadIdx() || y != c.BlockIdxY()*by+c.ThreadIdxY() {
+			bad.Add(1)
+			return
+		}
+		if c.GlobalIDZ() != 0 {
+			bad.Add(1)
+			return
+		}
+		atomic.AddInt32(&visits[y*w+x], 1)
+	})
+	if n := bad.Load(); n != 0 {
+		t.Fatalf("%d threads disagreed with their own coordinates", n)
+	}
+	for i, n := range visits {
+		if n != 1 {
+			t.Fatalf("global position %d ran %d times, want 1", i, n)
+		}
+	}
+}
+
+// TestRunCPUIsOneDimensional keeps the 1-D entry point meaning what it always
+// did, now that it is a wrapper.
+func TestRunCPUIsOneDimensional(t *testing.T) {
+	var seen atomic.Int32
+	gpu.RunCPU(3, 4, func(c gpu.Ctx) {
+		if c.GridDimY() == 1 && c.BlockDimY() == 1 && c.GlobalIDY() == 0 && c.GlobalID() == c.GlobalIDX() {
+			seen.Add(1)
+		}
+	})
+	if got := seen.Load(); got != 12 {
+		t.Errorf("%d of 12 threads saw a one-dimensional launch", got)
+	}
+}
+
+// TestSharedAcrossA2DBlock checks that the barrier and the shared slab span
+// the whole block, not just its x extent.
+func TestSharedAcrossA2DBlock(t *testing.T) {
+	const bx, by = 4, 3
+	out := make([]int, bx*by)
+	gpu.RunCPUDim(gpu.D1(1), gpu.D2(bx, by), func(c gpu.Ctx) {
+		s := c.SharedF32(bx * by)
+		i := c.ThreadIdxY()*bx + c.ThreadIdx()
+		s[i] = float32(i)
+		c.SyncThreads()
+		// Every thread reads what its neighbour wrote, which only works if
+		// the barrier waited for all bx*by of them.
+		out[i] = int(s[(i+1)%(bx*by)])
+	})
+	for i, v := range out {
+		if want := (i + 1) % (bx * by); v != want {
+			t.Errorf("thread %d read %d, want %d", i, v, want)
+		}
+	}
+}
+
+// TestAssumeBlockDimCountsTheWholeBlock pins what the launch contract counts:
+// threads per block, not the x extent.
+func TestAssumeBlockDimCountsTheWholeBlock(t *testing.T) {
+	gpu.RunCPUDim(gpu.D1(1), gpu.D2(8, 4), func(c gpu.Ctx) { c.AssumeBlockDim(32) })
+
+	msg := mustPanic(t, func() {
+		gpu.RunCPUDim(gpu.D1(1), gpu.D2(8, 4), func(c gpu.Ctx) { c.AssumeBlockDim(8) })
+	})
+	if !strings.Contains(msg, "AssumeBlockDim") {
+		t.Errorf("diagnosis %q does not mention AssumeBlockDim", msg)
+	}
 }

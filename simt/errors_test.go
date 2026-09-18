@@ -36,9 +36,53 @@ func TestUnsupported(t *testing.T) {
 		body: "func K(ctx gpu.Ctx, a []float32) { go func() { a[0] = 1 }() }",
 		want: "unsupported statement",
 	}, {
-		name: "calling a Go function",
-		body: "func helper(x float32) float32 { return x }\n\nfunc K(ctx gpu.Ctx, a []float32) { a[0] = helper(a[1]) }",
-		want: "device functions are not implemented",
+		// Device functions are emitted, but not ones that call themselves:
+		// there is no stack depth on the device to spend on it.
+		name: "a recursive device function",
+		body: "func down(x float32) float32 { if x > 0 { return down(x - 1) }\nreturn x }\n\n" +
+			"func K(ctx gpu.Ctx, a []float32) { a[0] = down(a[1]) }",
+		want: "down calls itself",
+	}, {
+		name: "mutually recursive device functions",
+		body: "func even(x float32) float32 { return odd(x) }\n\nfunc odd(x float32) float32 { return even(x) }\n\n" +
+			"func K(ctx gpu.Ctx, a []float32) { a[0] = even(a[1]) }",
+		want: "even, which is already being lowered",
+	}, {
+		name: "calling another kernel",
+		body: "func Other(ctx gpu.Ctx, a []float32) { a[0] = 1 }\n\nfunc K(ctx gpu.Ctx, a []float32) { Other(ctx, a) }",
+		want: "Other is a kernel",
+	}, {
+		name: "a device function returning two values",
+		body: "func two(x float32) (float32, float32) { return x, x }\n\nfunc K(ctx gpu.Ctx, a []float32) { two(a[0]); a[0] = 1 }",
+		want: "must return at most one value",
+	}, {
+		// (a, b float32) is one result field holding two values, so counting
+		// fields rather than the checked signature would let it through.
+		name: "a device function returning two named values",
+		body: "func two(x float32) (a, b float32) { a = x\nb = x\nreturn }\n\nfunc K(ctx gpu.Ctx, a []float32) { two(a[0]); a[0] = 1 }",
+		want: "must return at most one value",
+	}, {
+		// A named result is a local the body assigns to and a bare return
+		// that carries it; neither is emitted, so it is refused instead.
+		name: "a device function naming its result",
+		body: "func one(x float32) (r float32) { r = x\nreturn }\n\nfunc K(ctx gpu.Ctx, a []float32) { a[0] = one(a[1]) }",
+		want: "must not name its result",
+	}, {
+		name: "a variadic device function",
+		body: "func any(xs ...float32) float32 { return xs[0] }\n\nfunc K(ctx gpu.Ctx, a []float32) { a[0] = any(a[1]) }",
+		want: "must not be variadic",
+	}, {
+		name: "shared memory inside a device function",
+		body: "//gocuda:ignore\nfunc stage(ctx gpu.Ctx) float32 { s := ctx.SharedF32(4)\nreturn s[0] }\n\n" +
+			"func K(ctx gpu.Ctx, a []float32) { a[0] = stage(ctx) }",
+		want: "shared memory may only be declared in a kernel",
+	}, {
+		// Without the opt-out the helper is a kernel in its own right, and
+		// calling a kernel is what the previous case refuses.
+		name: "a gpu.Ctx helper that did not opt out of being a kernel",
+		body: "func where(ctx gpu.Ctx) int { return ctx.GlobalID() }\n\n" +
+			"func K(ctx gpu.Ctx, a []float32) { a[0] = float32(where(ctx)) }",
+		want: "where is a kernel",
 	}, {
 		name: "multiple assignment",
 		body: "func K(ctx gpu.Ctx, a []float32) { i, j := 0, 1; a[i] = a[j] }",
@@ -65,6 +109,24 @@ func TestUnsupported(t *testing.T) {
 		name: "conditional block size",
 		body: "func K(ctx gpu.Ctx, a []float32) { if len(a) > 0 { ctx.AssumeBlockDim(128) } }",
 		want: "top level of the kernel body",
+	}, {
+		name: "type switch",
+		body: "func K(ctx gpu.Ctx, a []float32) { var x any = 1; switch x.(type) { case int: a[0] = 1 } }",
+		want: "type switches are not supported",
+	}, {
+		// A switch with a non-constant case lowers to an if/else chain, where
+		// a C break would leave the enclosing loop instead of the switch.
+		name: "break inside a switch that lowered to an if/else chain",
+		body: "func K(ctx gpu.Ctx, a []float32, n int32) { for i := 0; i < int(n); i++ { switch { case i > 1: break } }; a[0] = 1 }",
+		want: "cannot break out of a switch",
+	}, {
+		name: "a label on something other than a loop",
+		body: "func K(ctx gpu.Ctx, a []float32, n int32) { here: switch n { case 1: break here }; a[0] = 1 }",
+		want: "a label may only be placed on a for loop",
+	}, {
+		name: "range with a value, assigned rather than declared",
+		body: "func K(ctx gpu.Ctx, y, x []float32) { var i int; var v float32; for i, v = range x { y[i] = v } }",
+		want: "only `for i := range x` and `for i, v := range x` are supported",
 	}}
 
 	for _, tc := range cases {

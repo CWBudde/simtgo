@@ -95,8 +95,15 @@ type DevPtr uint64
 // Dim3 is a CUDA grid or block dimension.
 type Dim3 struct{ X, Y, Z uint32 }
 
-// D1 returns a one-dimensional Dim3.
+// D1, D2 and D3 return a Dim3 of the given rank, leaving the axes above it at
+// one -- which is what CUDA treats an unused axis as, not zero.
 func D1(x int) Dim3 { return Dim3{X: uint32(x), Y: 1, Z: 1} }
+
+// D2 returns a two-dimensional Dim3.
+func D2(x, y int) Dim3 { return Dim3{X: uint32(x), Y: uint32(y), Z: 1} }
+
+// D3 returns a three-dimensional Dim3.
+func D3(x, y, z int) Dim3 { return Dim3{X: uint32(x), Y: uint32(y), Z: uint32(z)} }
 
 // Arg is one kernel parameter, held as its raw little-endian bytes. Launch
 // copies these into C memory, so an Arg never exposes Go memory to the driver.

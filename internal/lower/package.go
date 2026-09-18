@@ -144,7 +144,7 @@ func (p *Package) Kernel(name string) (*Unit, []Diagnostic, error) {
 		return nil, nil, fmt.Errorf("no kernel named %q; this package declares %s",
 			name, strings.Join(declared, ", "))
 	}
-	u, diags := Kernel(p.Fset, p.Info, fd)
+	u, diags := Kernel(p.Fset, p.Info, p.Files, fd)
 	return u, diags, nil
 }
 

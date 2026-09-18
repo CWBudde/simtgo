@@ -98,11 +98,33 @@ keep a shared misunderstanding from passing as agreement.
 ### The supported subset
 
 Slices lower to a pointer plus a length, so `len()` works. `:=`, `=`, compound
-assignment, `if`/`else`, three-clause `for`, `for i := range`, `break`,
-`continue`, arithmetic, comparisons, indexing and conversions all translate.
+assignment, `if`/`else`, three-clause `for`, `for i := range`,
+`for i, v := range`, `switch`, `break`, `continue`, their labelled forms,
+arithmetic, comparisons, indexing and conversions all translate.
 `gpu.Sqrt`, `gpu.Hypot` and friends become `sqrtf`, `hypotf`; `ctx.GlobalID()`
 becomes `blockIdx.x * blockDim.x + threadIdx.x`; `ctx.SharedF32(n)` becomes a
 `__shared__` array.
+
+Grids and blocks have three axes. The unsuffixed accessors are `x`, which is
+CUDA's own spelling, and `ThreadIdxY`, `BlockIdxZ`, `GlobalIDY` and the rest
+are the other two; `GlobalID` also answers to `GlobalIDX`, because next to
+`GlobalIDY` the bare name reads like an oversight. Each is one built-in rather
+than a tuple — `x, y := ctx.GlobalID2()` would need multiple assignment, which
+the subset does not have. The host side matches: `Kernel.LaunchDim` and
+`gpu.RunCPUDim` take a three-axis extent, `Launch` and `RunCPU` stay the
+one-dimensional spelling, and `AssumeBlockDim` counts threads per block across
+all three axes, so a 16×16 block satisfies `AssumeBlockDim(256)`.
+
+Two of those need a word, because Go and C disagree about what the spelling
+means. A `switch` whose cases are all constant becomes a C `switch`, with an
+explicit `break` closing each clause because Go does not fall through;
+`fallthrough` is honoured by leaving that `break` out. Any other switch — a
+tagless one, or one testing a variable — becomes the `if`/`else` chain that Go
+actually describes, and a bare `break` inside *that* is refused rather than
+emitted, because in C it would leave the enclosing loop. A labelled `break` or
+`continue` becomes a `goto` to a target after the loop or at the end of its
+body; before that was implemented the label was dropped, which is the kind of
+silent mistranslation the rest of this section exists to rule out.
 
 A kernel that sizes shared memory against a fixed block size says so with
 `ctx.AssumeBlockDim(n)`. It emits no code; it records the requirement, so that
@@ -110,10 +132,25 @@ A kernel that sizes shared memory against a fixed block size says so with
 quietly reading the wrong stretch of memory. `Build` likewise refuses a kernel
 whose shared memory exceeds what the device offers per block.
 
+A kernel may call another function in its package, which is emitted as a
+`__device__` function alongside it: a prototype for each one the kernel
+reaches, then the definitions, then the entry point. Slice parameters split
+into a pointer and a length there too, so the call passes both. Recursion is
+refused — there is no stack depth on the device to spend on it — and so are
+methods, generics, variadics, more than one result, and a *named* result,
+which would be a local the body assigns to and a bare return that carries it.
+A function taking a `gpu.Ctx` **is** a kernel by the rule above, so calling
+one is refused unless it carries `//gocuda:ignore`, which already means
+"not a kernel"; the `Ctx` then vanishes from the C signature as the kernel's
+own does, and shared memory and `AssumeBlockDim` stay refused inside it,
+because both are promises about a launch. The CPU side needs nothing at all
+for any of this: a device function is ordinary Go, so `RunCPU` runs the very
+code the device compiles.
+
 Everything else is **refused with a file and line**, never mistranslated:
-allocation, interfaces, goroutines, multiple assignment, calls to other Go
-functions, `float64` (1/32 rate on `sm_75`), and any import other than
-package `gpu`. `simt/errors_test.go` pins that boundary.
+allocation, interfaces, goroutines, multiple assignment, `float64` (1/32 rate
+on `sm_75`), and any import other than package `gpu`. `simt/errors_test.go`
+pins that boundary.
 
 One deliberate infidelity: Go's `int` is 64-bit, CUDA's is 32-bit. Kernel
 indices are bounded by the grid, so they are narrowed.
@@ -255,10 +292,12 @@ Honest limits, not papered over:
   compile time that threads do not alias. Go has no borrow checker and no
   const generics; this repository substitutes runtime shape checks and a
   race-detectable CPU emulator. That is weaker, and knowingly so.
-- **No device functions.** A kernel cannot call another Go function yet.
-  Inlining or emitting `__device__` functions is the obvious next step.
-- **One dimension.** Grids and blocks are 1-D; 2-D and 3-D indexing is
-  unimplemented, not impossible.
+- **No recursion.** A kernel may call another Go function, but not one that
+  reaches itself. That is a deliberate refusal rather than a gap: device
+  stack depth is a launch-configuration problem, not a language one.
+- **No multiple assignment**, so no tuple-returning intrinsic: the axes are
+  read one accessor at a time. It is a limit of the emitter, not of the
+  device.
 - **No chained windowed operations** in the tile track: the halo of the outer
   window would need values the inner one does not have at those indices.
 - **Source-level, not IR-level.** Without a real backend there is no

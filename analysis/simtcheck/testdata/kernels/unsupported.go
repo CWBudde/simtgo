@@ -11,10 +11,17 @@ func Goroutine(ctx gpu.Ctx, a []float32) {
 	a[0] = 1
 }
 
-func helper(x float32) float32 { return x }
+// A kernel may call a Go function, but not one that reaches itself: there is
+// no stack depth on the device to spend on recursion.
+func down(x float32) float32 {
+	if x > 0 {
+		return down(x - 1) // want `down calls itself`
+	}
+	return x
+}
 
-func CallsAGoFunction(ctx gpu.Ctx, a []float32) {
-	a[0] = helper(a[1]) // want `device functions are not implemented`
+func CallsItself(ctx gpu.Ctx, a []float32) {
+	a[0] = down(a[1])
 }
 
 func RuntimeSharedSize(ctx gpu.Ctx, a []float32) {

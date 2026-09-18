@@ -21,29 +21,96 @@ import (
 	"sync"
 )
 
+// Dim is a grid or block extent, in threads or blocks per axis.
+//
+// It duplicates cuda.Dim3 on purpose. A kernel may import nothing but this
+// package, so the launch geometry a kernel can talk about cannot come from
+// the driver bindings; the two meet at the launch boundary instead.
+type Dim struct{ X, Y, Z int }
+
+// D1, D2 and D3 build an extent of the given rank, leaving the axes above it
+// at one, which is what CUDA treats an unused axis as.
+func D1(x int) Dim       { return Dim{X: x, Y: 1, Z: 1} }
+func D2(x, y int) Dim    { return Dim{X: x, Y: y, Z: 1} }
+func D3(x, y, z int) Dim { return Dim{X: x, Y: y, Z: z} }
+
+// count is how many threads (or blocks) the extent holds.
+func (d Dim) count() int { return d.X * d.Y * d.Z }
+
+// flat numbers a position within an extent, x fastest -- the inverse of
+// coord. Diagnostics use it so that a one-dimensional launch, which is most
+// of them, still reads as a plain thread number.
+func flat(pos, extent Dim) int {
+	return pos.X + extent.X*(pos.Y+extent.Y*pos.Z)
+}
+
+// coord maps a flat index back to a position, x fastest, as CUDA numbers
+// threads within a block.
+func (d Dim) coord(i int) Dim {
+	return Dim{X: i % d.X, Y: (i / d.X) % d.Y, Z: i / (d.X * d.Y)}
+}
+
 // Ctx carries a thread's position in the grid. On the GPU its methods become
 // the corresponding CUDA built-ins; on the CPU they are served by RunCPU.
+//
+// The unsuffixed methods are the x axis, which is the spelling CUDA itself
+// uses and what every one-dimensional kernel wants. GlobalID is the exception
+// that gains an explicit GlobalIDX alias: next to GlobalIDY, the bare name
+// reads like an oversight rather than an axis.
 type Ctx struct {
-	tid, bid   int
-	bdim, gdim int
+	tid, bid   Dim
+	bdim, gdim Dim
 	block      *blockState
 	thread     *threadState
 }
 
 // ThreadIdx is threadIdx.x.
-func (c Ctx) ThreadIdx() int { return c.tid }
+func (c Ctx) ThreadIdx() int { return c.tid.X }
+
+// ThreadIdxY is threadIdx.y.
+func (c Ctx) ThreadIdxY() int { return c.tid.Y }
+
+// ThreadIdxZ is threadIdx.z.
+func (c Ctx) ThreadIdxZ() int { return c.tid.Z }
 
 // BlockIdx is blockIdx.x.
-func (c Ctx) BlockIdx() int { return c.bid }
+func (c Ctx) BlockIdx() int { return c.bid.X }
+
+// BlockIdxY is blockIdx.y.
+func (c Ctx) BlockIdxY() int { return c.bid.Y }
+
+// BlockIdxZ is blockIdx.z.
+func (c Ctx) BlockIdxZ() int { return c.bid.Z }
 
 // BlockDim is blockDim.x.
-func (c Ctx) BlockDim() int { return c.bdim }
+func (c Ctx) BlockDim() int { return c.bdim.X }
+
+// BlockDimY is blockDim.y.
+func (c Ctx) BlockDimY() int { return c.bdim.Y }
+
+// BlockDimZ is blockDim.z.
+func (c Ctx) BlockDimZ() int { return c.bdim.Z }
 
 // GridDim is gridDim.x.
-func (c Ctx) GridDim() int { return c.gdim }
+func (c Ctx) GridDim() int { return c.gdim.X }
+
+// GridDimY is gridDim.y.
+func (c Ctx) GridDimY() int { return c.gdim.Y }
+
+// GridDimZ is gridDim.z.
+func (c Ctx) GridDimZ() int { return c.gdim.Z }
 
 // GlobalID is blockIdx.x*blockDim.x + threadIdx.x.
-func (c Ctx) GlobalID() int { return c.bid*c.bdim + c.tid }
+func (c Ctx) GlobalID() int { return c.bid.X*c.bdim.X + c.tid.X }
+
+// GlobalIDX is GlobalID, spelled so it reads as one axis of three.
+func (c Ctx) GlobalIDX() int { return c.bid.X*c.bdim.X + c.tid.X }
+
+// GlobalIDY is blockIdx.y*blockDim.y + threadIdx.y.
+func (c Ctx) GlobalIDY() int { return c.bid.Y*c.bdim.Y + c.tid.Y }
+
+// GlobalIDZ is blockIdx.z*blockDim.z + threadIdx.z.
+func (c Ctx) GlobalIDZ() int { return c.bid.Z*c.bdim.Z + c.tid.Z }
 
 // SyncThreads is __syncthreads(): a barrier across the threads of one block.
 func (c Ctx) SyncThreads() {
@@ -88,7 +155,7 @@ func (c Ctx) SharedF32(n int) []float32 {
 		c.block.reportLocked(fmt.Sprintf(
 			"gpu: SharedF32 size mismatch at call #%d of block %d: an earlier thread asked for %d element(s), thread %d asked for %d. "+
 				"Shared memory is sized once per block, so every thread of a block must pass the same (constant) size to the same SharedF32 call.",
-			i, c.bid, s.size, c.tid, n))
+			i, flat(c.bid, c.gdim), s.size, flat(c.tid, c.bdim), n))
 		// Return a private buffer of the size that was actually requested so
 		// the offending thread can run to completion without an out-of-range
 		// panic drowning out the diagnosis above. Its results are meaningless,
@@ -113,12 +180,16 @@ func (c Ctx) SharedF32(n int) []float32 {
 // exactly as SyncThreads is, so that a kernel body can still be called as a
 // plain function. On the device the transpiler emits nothing for it: the
 // declared size has already been consumed at compile time.
+//
+// What is counted is threads per block, across all three axes: a shared tile
+// is sized against how many threads fill it, not against how they are
+// arranged.
 func (c Ctx) AssumeBlockDim(n int) {
-	if c.block != nil && c.bdim != n {
+	if c.block != nil && c.bdim.count() != n {
 		c.block.report(fmt.Sprintf(
 			"gpu: block size mismatch: the kernel declares AssumeBlockDim(%d) but was launched with blockDim=%d. "+
 				"Launch it with %d threads per block, or rewrite the kernel so it works for any block size.",
-			n, c.bdim, n))
+			n, c.bdim.count(), n))
 	}
 }
 
@@ -191,12 +262,25 @@ func (s *blockState) reportLocked(msg string) {
 // recoverable and testable instead of terminating the process from a goroutine
 // nobody can recover on.
 func RunCPU(grid, block int, fn func(Ctx)) {
-	if grid <= 0 || block <= 0 {
+	RunCPUDim(D1(grid), D1(block), fn)
+}
+
+// RunCPUDim is RunCPU over a grid of any rank.
+//
+// Blocks are drained from a queue in flat order, x fastest, and the threads of
+// a block are one goroutine each, exactly as in the one-dimensional case: the
+// only thing that changes is how many there are and what coordinates they see.
+func RunCPUDim(grid, block Dim, fn func(Ctx)) {
+	if grid.X <= 0 || grid.Y <= 0 || grid.Z <= 0 {
 		return
 	}
-	workers := min(runtime.GOMAXPROCS(0), grid)
-	blocks := make(chan int, grid)
-	for b := range grid {
+	if block.X <= 0 || block.Y <= 0 || block.Z <= 0 {
+		return
+	}
+	n := grid.count()
+	workers := min(runtime.GOMAXPROCS(0), n)
+	blocks := make(chan int, n)
+	for b := range n {
 		blocks <- b
 	}
 	close(blocks)
@@ -242,20 +326,21 @@ func RunCPU(grid, block int, fn func(Ctx)) {
 // violation it observed, or "" if the block was well behaved. It returns the
 // diagnosis rather than panicking because it runs on one of RunCPU's worker
 // goroutines, which is no more recoverable than a thread goroutine is.
-func runBlock(bid, grid, block int, fn func(Ctx)) string {
-	st := &blockState{bar: newBarrier(block)}
+func runBlock(bid int, grid, block Dim, fn func(Ctx)) string {
+	n := block.count()
+	st := &blockState{bar: newBarrier(n)}
 
 	// The thread states outlive the goroutines that use them: after the block
 	// has finished, their seq counters say how many SharedF32 calls each
 	// thread made, and those counts must agree.
-	threads := make([]*threadState, block)
-	for t := range block {
+	threads := make([]*threadState, n)
+	for t := range n {
 		threads[t] = &threadState{}
 	}
 
 	var wg sync.WaitGroup
-	wg.Add(block)
-	for t := range block {
+	wg.Add(n)
+	for t := range n {
 		go func() {
 			defer wg.Done()
 			// A kernel that panics on a thread goroutine would otherwise kill
@@ -270,7 +355,7 @@ func runBlock(bid, grid, block int, fn func(Ctx)) string {
 				}
 			}()
 			fn(Ctx{
-				tid: t, bid: bid, bdim: block, gdim: grid,
+				tid: block.coord(t), bid: grid.coord(bid), bdim: block, gdim: grid,
 				block: st, thread: threads[t],
 			})
 		}()
