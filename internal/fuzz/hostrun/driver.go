@@ -51,6 +51,48 @@ static dim3 blockDim, gridDim;
 using std::min;
 using std::max;
 
+// fmin and fmax of two zeros of opposite signs are UNSPECIFIED, in C and in
+// IEEE 754 alike: minNum "returns either one". The host does not even answer
+// it stably -- the same expression gives -0 compiled at -O1 and +0 at -O0,
+// because the compiler picks a different instruction -- and the differential
+// fuzzer duly reported the difference as a mismatch.
+//
+// The device's answer is not open. gpu.Fmin returns -0 and gpu.Fmax returns
+// +0, which NUMERICS.md records and TestFminFmaxParity asserts against real
+// hardware. Pinning them here is what a shim is for: it supplies the device's
+// C where the host's is free to differ, so that a disagreement in a run means
+// a mistranslation rather than a tie-break nobody promised. Everything else,
+// the NaN rule included, is left to the real functions.
+static double gocuda_fmin(double a, double b)
+{
+	if (a == 0 && b == 0) { return (signbit(a) || signbit(b)) ? -0.0 : 0.0; }
+	return fmin(a, b);
+}
+
+static double gocuda_fmax(double a, double b)
+{
+	if (a == 0 && b == 0) { return (signbit(a) && signbit(b)) ? -0.0 : 0.0; }
+	return fmax(a, b);
+}
+
+static float gocuda_fminf(float a, float b)
+{
+	if (a == 0 && b == 0) { return (signbit(a) || signbit(b)) ? -0.0f : 0.0f; }
+	return fminf(a, b);
+}
+
+static float gocuda_fmaxf(float a, float b)
+{
+	if (a == 0 && b == 0) { return (signbit(a) && signbit(b)) ? -0.0f : 0.0f; }
+	return fmaxf(a, b);
+}
+
+// Defined after the wrappers, so that each one still reaches the real function.
+#define fmin gocuda_fmin
+#define fmax gocuda_fmax
+#define fminf gocuda_fminf
+#define fmaxf gocuda_fmaxf
+
 // A short read or write is the transport failing, not the kernel, and the two
 // must not be confusable: exit(2) with a word on stderr rather than a partial
 // answer on stdout that the caller would decode as numbers.

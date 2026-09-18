@@ -157,6 +157,13 @@ func readsIn(e Expr, reads map[*Var]bool) {
 	case *Index:
 		reads[e.Base] = true
 		readsIn(e.Idx, reads)
+	case *Field:
+		// A field read is an indexed read with a name on the end, and the
+		// index is where a local can hide: a variable used only as p[v].A is
+		// read, and a repair inserted for it would be a statement saying
+		// nothing.
+		reads[e.Base] = true
+		readsIn(e.Idx, reads)
 	case *Len:
 		reads[e.Base] = true
 	case *Binary:

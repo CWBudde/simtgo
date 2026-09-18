@@ -52,6 +52,53 @@ func (g *gen) pureExpr(k Kind, d int) Expr {
 }
 
 // leaf is an expression with no operator in it.
+// structField is the index of a field of kind k in the readable struct buffer,
+// or -1.
+//
+// Only the *non-narrow* fields answer here. A narrow one is storage: no
+// operator in the subset accepts it, so it can be read only through a
+// conversion, which is what fieldConv does.
+func (g *gen) structField(k Kind) int {
+	if g.structIn == nil || k.narrow() {
+		return -1
+	}
+	var found []int
+	for i, f := range g.structIn.Shape.Fields {
+		if f.Kind == k {
+			found = append(found, i)
+		}
+	}
+	if len(found) == 0 {
+		return -1
+	}
+	return pick(g.r, found)
+}
+
+// fieldRead is p[i].A, at an index folded into range like any other.
+func (g *gen) fieldRead(f int) Expr {
+	b := g.structIn
+	return &Field{Base: b, Idx: g.wrapIndex(g.indexSeed(), b), F: f}
+}
+
+// narrowField is the index of a narrow field, or -1: the ones that exist only
+// to be converted out of, and the reason a struct is where the ctype/ctypeElem
+// split is exercised rather than merely described.
+func (g *gen) narrowField() int {
+	if g.structIn == nil {
+		return -1
+	}
+	var found []int
+	for i, f := range g.structIn.Shape.Fields {
+		if f.Kind.narrow() {
+			found = append(found, i)
+		}
+	}
+	if len(found) == 0 {
+		return -1
+	}
+	return pick(g.r, found)
+}
+
 func (g *gen) leaf(k Kind) Expr {
 	var opts []func() Expr
 
@@ -64,6 +111,9 @@ func (g *gen) leaf(k Kind) Expr {
 			b := pick(g.r, bufs)
 			return &Index{Base: b, Idx: g.wrapIndex(g.indexSeed(), b)}
 		})
+	}
+	if f := g.structField(k); f >= 0 {
+		opts = append(opts, func() Expr { return g.fieldRead(f) })
 	}
 	if k == KInt && g.fn.Ctx {
 		opts = append(opts, func() Expr { return g.position() })
@@ -493,6 +543,9 @@ func (g *gen) conv(k Kind, d int) Expr {
 			if b.Kind.narrow() {
 				narrow = append(narrow, b)
 			}
+		}
+		if f := g.narrowField(); f >= 0 && g.r.IntN(2) == 0 {
+			return &Conv{To: k, X: g.fieldRead(f)}
 		}
 		if len(narrow) > 0 {
 			b := pick(g.r, narrow)
