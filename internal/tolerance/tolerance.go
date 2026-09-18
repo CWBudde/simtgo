@@ -22,6 +22,7 @@ package tolerance
 
 import (
 	"math"
+	"reflect"
 	"testing"
 )
 
@@ -75,4 +76,44 @@ func AssertEqual[T comparable](t testing.TB, name string, got, want []T) {
 			t.Fatalf("%s element %d: got %v, want %v", name, i, got[i], want[i])
 		}
 	}
+}
+
+// Agree is Close's front door for a value whose type is not known until run
+// time: one element of a generated kernel's output, where the element type is
+// whatever the generator chose.
+//
+// The order of the questions is the whole of it. Bit equality comes first, so
+// that is what an ordinary element is judged by and a bound is never consulted
+// for a result that is simply right. Then the values no tolerance relates to
+// anything: a NaN, which equals nothing including another NaN, so both sides
+// have to be one; an infinity against a finite number, where the relative
+// error is not a number either; and the two zeros, which a relative bound
+// cannot tell apart, because their difference is zero while their bits are
+// not. Only a pair of ordinary finite numbers reaches Close, which is all that
+// rule ever claimed to be about.
+//
+// Anything that is not a float32 is compared exactly. An integer or a bool
+// that disagrees is a bug rather than a rounding, which is the same line
+// AssertEqual draws.
+func Agree(got, want any, tol float64) bool {
+	g, ok := got.(float32)
+	if !ok {
+		return reflect.DeepEqual(got, want)
+	}
+	w, ok := want.(float32)
+	if !ok {
+		return false // two different types cannot agree about anything
+	}
+	gd, wd := float64(g), float64(w)
+	switch {
+	case math.Float32bits(g) == math.Float32bits(w):
+		return true
+	case math.IsNaN(gd) || math.IsNaN(wd):
+		return math.IsNaN(gd) && math.IsNaN(wd)
+	case math.IsInf(gd, 0) || math.IsInf(wd, 0), g == 0 && w == 0:
+		return false
+	case tol > 0:
+		return Close(g, w, tol)
+	}
+	return false
 }
