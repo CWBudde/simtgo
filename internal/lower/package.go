@@ -1,6 +1,7 @@
 package lower
 
 import (
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -89,7 +90,8 @@ func LoadPackage(fsys fs.FS) (*Package, []Diagnostic, error) {
 	conf := types.Config{
 		Importer: SynthImporter{GPU: GPUPackage()},
 		Error: func(err error) {
-			if te, ok := err.(types.Error); ok {
+			var te types.Error
+			if errors.As(err, &te) {
 				diags = append(diags, Diagnostic{Pos: te.Pos, Msg: te.Msg})
 				return
 			}
@@ -162,7 +164,7 @@ func (p *Package) Kernel(name string) (*Unit, []Diagnostic, error) {
 // Its own Error method reports only the first, plus a count of the rest.
 func parseDiagnostics(err error) []Diagnostic {
 	var list scanner.ErrorList
-	if !asErrorList(err, &list) {
+	if !errors.As(err, &list) {
 		return []Diagnostic{{Msg: err.Error()}}
 	}
 	out := make([]Diagnostic, 0, len(list))
@@ -170,12 +172,4 @@ func parseDiagnostics(err error) []Diagnostic {
 		out = append(out, Diagnostic{Msg: e.Pos.String() + ": " + e.Msg})
 	}
 	return out
-}
-
-func asErrorList(err error, out *scanner.ErrorList) bool {
-	if list, ok := err.(scanner.ErrorList); ok {
-		*out = list
-		return true
-	}
-	return false
 }

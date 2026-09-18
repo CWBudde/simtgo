@@ -1,6 +1,7 @@
 package simt
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/CWBudde/gocuda/cuda"
@@ -88,8 +89,8 @@ func TestCheckAliasing(t *testing.T) {
 				}
 				return
 			}
-			bad, ok := err.(*AliasError)
-			if !ok {
+			var bad *AliasError
+			if !errors.As(err, &bad) {
 				t.Fatalf("got %v, want an AliasError", err)
 			}
 			if bad.Write != tc.write || bad.Other != tc.with {

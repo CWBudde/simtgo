@@ -29,6 +29,11 @@ linters:
     - usestdlibvars
     - nilerr
     - nakedret
+    # Every error this repository hands back is meant to be matched rather than
+    # read: `cuda.Result`'s sentinels exist so that `errors.Is` works in a
+    # `!cuda` build too. A bare type assertion is the one shape that keeps
+    # working until somebody wraps the error once, and then stops.
+    - errorlint
 
   settings:
     errcheck:
