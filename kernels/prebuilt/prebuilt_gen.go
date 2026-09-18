@@ -32,6 +32,9 @@ const Magnitude Lowered = "Magnitude"
 // Scale reports that the kernel of that name lowered to CUDA C.
 const Scale Lowered = "Scale"
 
+// MagnitudeFast reports that the kernel of that name lowered to CUDA C.
+const MagnitudeFast Lowered = "MagnitudeFast"
+
 // Quantize reports that the kernel of that name lowered to CUDA C.
 const Quantize Lowered = "Quantize"
 
@@ -67,6 +70,9 @@ var ptxMagnitude []byte
 
 //go:embed Scale.compute_75.ptx
 var ptxScale []byte
+
+//go:embed MagnitudeFast.compute_75.ptx
+var ptxMagnitudeFast []byte
 
 //go:embed Quantize.compute_75.ptx
 var ptxQuantize []byte
@@ -131,6 +137,12 @@ func init() {
 		SourceSHA256: "7384053016639e4f63b1d2c022147b9d8597c5251f113b94f5318d184609d0a9",
 		Arch:         "compute_75",
 		PTX:          ptxScale,
+	})
+	simt.RegisterPrebuilt(simt.Prebuilt{
+		Name:         "MagnitudeFast",
+		SourceSHA256: "f43b66eb36351338f2090cc50cc5f885ba5688dee3e714d7d4aa637cdfc74e29",
+		Arch:         "compute_75",
+		PTX:          ptxMagnitudeFast,
 	})
 	simt.RegisterPrebuilt(simt.Prebuilt{
 		Name:         "Quantize",
