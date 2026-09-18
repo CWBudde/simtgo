@@ -28,6 +28,32 @@ import (
 func TestGeneratedCCompiles(t *testing.T) {
 	const arch = "compute_75"
 	cases := []struct{ name, body string }{{
+		// The float64 vocabulary is arithmetic and nothing else: gpu.Sqrt and
+		// friends are float32-only, so the interesting question is whether the
+		// builtins the emitter does reach have double overloads NVRTC can see
+		// with no headers included. min/max are the ones expr.go maps directly,
+		// and a comment claiming CUDA provides them is not a measurement.
+		name: "float64 arithmetic, min/max on doubles, and 64-bit literals",
+		body: "//gocuda:float64\n" +
+			"func K(ctx gpu.Ctx, out, a, b []float64) {\n" +
+			"\ti := ctx.GlobalID()\n" +
+			"\tif i < len(out) {\n" +
+			"\t\tlo := min(a[i], b[i])\n" +
+			"\t\thi := max(a[i], b[i])\n" +
+			"\t\tvar n int64 = 9007199254740993\n" +
+			"\t\tout[i] = lo*2.5 + hi + float64(n%7)\n" +
+			"\t}\n}",
+	}, {
+		name: "unsigned and 64-bit integer arithmetic",
+		body: "func K(ctx gpu.Ctx, out []int64, x []int32, seed uint32) {\n" +
+			"\ti := ctx.GlobalID()\n" +
+			"\tif i < len(out) {\n" +
+			"\t\th := seed ^ uint32(x[i])\n" +
+			"\t\th = h*2654435761 + 1\n" +
+			"\t\tv := int64(x[i])\n" +
+			"\t\tout[i] = v*v + int64(h%16)\n" +
+			"\t}\n}",
+	}, {
 		name: "a labelled continue past a later declaration",
 		body: "func K(ctx gpu.Ctx, y []float32, n int32) {\n" +
 			"outer:\n" +

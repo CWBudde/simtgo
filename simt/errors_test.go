@@ -24,9 +24,36 @@ func TestUnsupported(t *testing.T) {
 		body: "func K(ctx gpu.Ctx, a []float32) float32 { return a[0] }",
 		want: "must not return values",
 	}, {
-		name: "float64",
+		name: "float64 without the directive",
 		body: "func K(ctx gpu.Ctx, a []float64) { a[0] = 1 }",
-		want: "float32/int32 only",
+		want: "float64 needs //gocuda:float64 on kernel K",
+	}, {
+		name: "//gocuda:float64 on a device function",
+		body: "//gocuda:float64\nfunc half(x float32) float32 { return x / 2 }\n\nfunc K(ctx gpu.Ctx, a []float32) { a[0] = half(a[1]) }",
+		want: "belongs on the kernel, not on device function half",
+	}, {
+		name: "int8",
+		body: "func K(ctx gpu.Ctx, a []int8) { a[0] = 1 }",
+		want: "C promotes it to int, so the two would disagree",
+	}, {
+		name: "uint16",
+		body: "func K(ctx gpu.Ctx, a []uint16) { a[0] = 1 }",
+		want: "C promotes it to int, so the two would disagree",
+	}, {
+		name: "uint",
+		body: "func K(ctx gpu.Ctx, n uint, a []float32) { a[0] = float32(n) }",
+		want: "use uint32 or uint64",
+	}, {
+		// The one that was lowering cleanly and returning wrong numbers: Go's
+		// int is 8 bytes, the emitted C int is 4, and cuda.Upload copies the
+		// Go layout, so the kernel strode half the buffer.
+		name: "[]int",
+		body: "func K(ctx gpu.Ctx, a []int) { a[0] = 1 }",
+		want: "cannot cross to the device",
+	}, {
+		name: "int(x) from int64",
+		body: "func K(ctx gpu.Ctx, a []float32, n int64) { a[int(n)] = 1 }",
+		want: "truncates on the device",
 	}, {
 		name: "non-constant shared memory",
 		body: "func K(ctx gpu.Ctx, a []float32) { s := ctx.SharedF32(len(a)); s[0] = 1 }",

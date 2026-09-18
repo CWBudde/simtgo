@@ -16,6 +16,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"runtime"
 	"sort"
 	"strings"
 )
@@ -68,7 +69,7 @@ type Diagnostic struct {
 // A Unit is returned only when nothing was refused; a kernel that produced any
 // diagnostic yields (nil, diags), so half-lowered CUDA can never escape.
 func Kernel(fset *token.FileSet, info *types.Info, files []*ast.File, fd *ast.FuncDecl) (*Unit, []Diagnostic) {
-	t := &transpiler{fset: fset, info: info, files: files, lens: map[types.Object]string{}}
+	t := &transpiler{fset: fset, info: info, files: files, lens: map[types.Object]string{}, sizes: goSizes()}
 	t.kernel(fd)
 	if len(t.diags) > 0 {
 		return nil, tidy(t.diags)
@@ -81,6 +82,21 @@ func Kernel(fset *token.FileSet, info *types.Info, files []*ast.File, fd *ast.Fu
 		SharedBytes:   t.sharedBytes,
 		SourceHash:    SourceHash(src),
 	}, nil
+}
+
+// goSizes is the layout the Go compiler uses on this machine.
+//
+// The generator and the analyzer both run on the host that builds the kernel,
+// so both get the same answer; an artifact is keyed on the hash of the C it
+// produced, which carries these numbers, so one generated elsewhere is simply
+// not found rather than trusted.
+func goSizes() types.Sizes {
+	if s := types.SizesFor("gc", runtime.GOARCH); s != nil {
+		return s
+	}
+	// Every host CUDA runs on is 64-bit with the same scalar layout, so this
+	// only matters if Go gains an architecture gc has no entry for.
+	return types.SizesFor("gc", "amd64")
 }
 
 // tidy puts diagnostics in source order and drops exact duplicates, which a
@@ -104,6 +120,16 @@ type transpiler struct {
 	info *types.Info
 	buf  strings.Builder
 	ind  int
+	// sizes is what Go believes about layout: widths, alignments and field
+	// offsets. It is asked rather than assumed so that a message about a type
+	// too wide for the device can name the width, and so that the struct
+	// definitions this emits can state Go's offsets for the C++ compiler to
+	// check against its own.
+	sizes types.Sizes
+	// allowFloat64 is set from the kernel's //gocuda:float64 directive, and
+	// kernelName is whose directive it would have been, for the message.
+	allowFloat64 bool
+	kernelName   string
 	// lens maps a slice-valued object to the C expression giving its length.
 	// The key is the checked object rather than its name, so a declaration
 	// shadowing a slice parameter cannot be mistaken for it.
@@ -218,6 +244,17 @@ func (t *transpiler) line(format string, args ...any) {
 // kernel emits the __global__ entry point for fd.
 func (t *transpiler) kernel(fd *ast.FuncDecl) {
 	t.names = collectNames(fd)
+	// The permission is the kernel's, and it covers every device function
+	// lowered into the same translation unit. What is being opted into is the
+	// cost of a launch, and the kernel is what gets launched -- the same
+	// reasoning that keeps SharedF32 and AssumeBlockDim out of a device
+	// function. A helper may therefore lower as float in one kernel and double
+	// in another, which is fine: each kernel is its own translation unit.
+	t.allowFloat64 = Float64Enabled(fd.Doc)
+	if f := t.fileOf(fd.Pos()); f != nil && Float64Enabled(f.Doc) {
+		t.allowFloat64 = true
+	}
+	t.kernelName = fd.Name.Name
 	if fd.Recv != nil {
 		t.fail(fd.Pos(), "a kernel must be a plain function, not a method")
 		return
@@ -248,7 +285,7 @@ func (t *transpiler) kernel(fd *ast.FuncDecl) {
 		name := cname(p.name)
 		switch typ := p.typ.(type) {
 		case *types.Slice:
-			elem := t.ctype(typ.Elem(), p.pos)
+			elem := t.ctypeElem(typ.Elem(), p.pos)
 			// A Go slice carries its length; C does not, so every slice
 			// parameter lowers to a pointer plus an explicit length.
 			decls = append(decls, fmt.Sprintf("%s* %s", elem, name), fmt.Sprintf("int %s_len", name))
@@ -315,6 +352,15 @@ func (t *transpiler) deviceFunc(pos token.Pos, obj *types.Func) (string, bool) {
 	}
 	if fd.Type.TypeParams != nil {
 		t.fail(pos, "%s is generic; a device function must not be generic", obj.Name())
+		return "", false
+	}
+	if Float64Enabled(fd.Doc) {
+		// The same reasoning that keeps SharedF32 and AssumeBlockDim out of a
+		// device function: the directive is a statement about what a launch
+		// costs, and a helper has no launch. Letting one carry its own opt-in
+		// would also let a kernel without the directive inherit double
+		// precision through a call, which is the one thing it exists to stop.
+		t.fail(fd.Pos(), "%s belongs on the kernel, not on device function %s: it is a promise about what a launch costs", Float64Directive, obj.Name())
 		return "", false
 	}
 	sig, ok := obj.Type().(*types.Signature)
@@ -412,16 +458,21 @@ func (t *transpiler) declOf(obj *types.Func) *ast.FuncDecl {
 // isKernelDecl reports whether fd would be generated as a kernel, which is
 // IsKernelDecl plus the file-wide opt-out that Package.Names also honours.
 func (t *transpiler) isKernelDecl(fd *ast.FuncDecl) bool {
-	for _, f := range t.files {
-		if fd.Pos() < f.Pos() || fd.Pos() > f.End() {
-			continue
-		}
-		if Ignored(f.Doc) {
-			return false
-		}
-		break
+	if f := t.fileOf(fd.Pos()); f != nil && Ignored(f.Doc) {
+		return false
 	}
 	return IsKernelDecl(t.info, fd)
+}
+
+// fileOf finds the file a position falls in, which is where a file-wide
+// directive is written.
+func (t *transpiler) fileOf(pos token.Pos) *ast.File {
+	for _, f := range t.files {
+		if pos >= f.Pos() && pos <= f.End() {
+			return f
+		}
+	}
+	return nil
 }
 
 // signature renders a C parameter list: a leading gpu.Ctx is dropped, because
@@ -435,7 +486,7 @@ func (t *transpiler) signature(fd *ast.FuncDecl) string {
 		name := cname(p.name)
 		switch typ := p.typ.(type) {
 		case *types.Slice:
-			elem := t.ctype(typ.Elem(), p.pos)
+			elem := t.ctypeElem(typ.Elem(), p.pos)
 			decls = append(decls, fmt.Sprintf("%s* %s", elem, name), fmt.Sprintf("int %s_len", name))
 			t.lens[p.obj] = name + "_len"
 		default:
@@ -536,8 +587,15 @@ func (t *transpiler) cdecl(typ types.Type, name string, pos token.Pos) string {
 // ctype maps a Go type to its device counterpart.
 //
 // Go's int is 64-bit while CUDA's int is 32-bit. Kernel indices are bounded by
-// the grid, so the narrowing is safe here and keeps generated code idiomatic;
-// it is the one deliberate infidelity in the mapping.
+// the grid, so the narrowing is safe for a value passed by itself, and it keeps
+// generated code idiomatic; it is the one deliberate infidelity in the mapping.
+// It is only safe there, though -- see ctypeElem, which is what every position
+// that has a memory layout to agree about goes through instead.
+//
+// The 64-bit types are spelled "long long" and never "long", because C's long
+// is 8 bytes on Linux and 4 on Windows. Windows support is still open in the
+// plan, and a type whose width depends on a host nobody has tried yet is a bug
+// waiting for the machine that would find it.
 func (t *transpiler) ctype(typ types.Type, pos token.Pos) string {
 	basic, ok := typ.Underlying().(*types.Basic)
 	if !ok {
@@ -551,13 +609,61 @@ func (t *transpiler) ctype(typ types.Type, pos token.Pos) string {
 	switch basic.Kind() {
 	case types.Float32, types.UntypedFloat:
 		return "float"
+	case types.Float64:
+		if !t.allowFloat64 {
+			t.fail(pos, "float64 needs %s on kernel %s, or on its file's package comment: the device runs double at a fraction of the float32 rate, so it is opt-in", Float64Directive, t.kernelName)
+			return "void"
+		}
+		return "double"
 	case types.Int, types.Int32, types.UntypedInt:
 		return "int"
+	case types.Int64:
+		return "long long"
 	case types.Uint32:
 		return "unsigned int"
+	case types.Uint64:
+		return "unsigned long long"
 	case types.Bool, types.UntypedBool:
 		return "bool"
 	}
-	t.fail(pos, "unsupported type %s on the device (kernels are float32/int32 only)", typ)
+	switch basic.Kind() {
+	case types.Int8, types.Int16, types.Uint8, types.Uint16:
+		// Not refused because the widths disagree -- they match exactly -- but
+		// because the arithmetic does. Go computes int8*int8 in 8 bits and
+		// wraps; C promotes both to int, computes in 32, and truncates only at
+		// the assignment. `a, b := int8(100), int8(3); a*b/2` is 22 in Go and
+		// -106 in C. That is a different answer from code that compiled, which
+		// is the one thing this transpiler must never produce, so the narrow
+		// widths wait for a lowering that truncates at every step.
+		t.fail(pos, "unsupported type %s on the device: Go computes %s arithmetic in %d bits and C promotes it to int, so the two would disagree; use int32", typ, typ, 8*t.sizes.Sizeof(basic))
+		return "void"
+	case types.Uint, types.Uintptr:
+		// int gets the narrowing because an index is bounded by the grid.
+		// Nothing indexes with uint, so there is no such argument here.
+		t.fail(pos, "unsupported type %s on the device; use uint32 or uint64, which have a width the device shares", typ)
+		return "void"
+	}
+	t.fail(pos, "unsupported type %s on the device (kernels are float32/float64, int32/int64, uint32/uint64 and bool)", typ)
 	return "void"
+}
+
+// ctypeElem maps a Go type that will be laid out in memory -- a slice element,
+// an array element, a struct field -- rather than passed as a value.
+//
+// The difference is int. As a parameter it is narrowed to C's 32-bit int and
+// the loss is the documented infidelity above: BuildArgs passes it as an int32
+// and the value is bounded by the grid anyway. As an *element* the narrowing is
+// not a lost high word, it is a different stride: cuda.Upload copies 8 bytes
+// per int and the kernel reads 4, so a []int lowers cleanly, compiles cleanly,
+// launches cleanly and returns the wrong numbers. This was live until the
+// commit that added this function.
+func (t *transpiler) ctypeElem(typ types.Type, pos token.Pos) string {
+	if basic, ok := typ.Underlying().(*types.Basic); ok {
+		switch basic.Kind() {
+		case types.Int, types.Uint, types.Uintptr:
+			t.fail(pos, "%s cannot cross to the device: Go's %s is %d bytes and CUDA's int is 4, so the elements would not line up; use int32 or int64", typ, typ, t.sizes.Sizeof(basic))
+			return "void"
+		}
+	}
+	return t.ctype(typ, pos)
 }

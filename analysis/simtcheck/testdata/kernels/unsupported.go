@@ -2,7 +2,26 @@ package kernels
 
 import "github.com/CWBudde/gocuda/gpu"
 
-func Float64Slice(ctx gpu.Ctx, a []float64) { // want `unsupported type float64 on the device`
+func Float64Slice(ctx gpu.Ctx, a []float64) { // want `float64 needs //gocuda:float64`
+	a[0] = 1
+}
+
+// Float64Allowed is the other half, and the more important one: the analyzer
+// and the transpiler have to agree that the directive works, not just that its
+// absence is refused. Nothing else makes them.
+//
+//gocuda:float64
+func Float64Allowed(ctx gpu.Ctx, a []float64) {
+	a[0] = a[1] * 2
+}
+
+// IntSlice lowered cleanly and returned wrong numbers until the type work of
+// Phase 2: Go's int is 8 bytes and the emitted C int is 4.
+func IntSlice(ctx gpu.Ctx, a []int) { // want `cannot cross to the device`
+	a[0] = 1
+}
+
+func Int8Slice(ctx gpu.Ctx, a []int8) { // want `C promotes it to int`
 	a[0] = 1
 }
 
