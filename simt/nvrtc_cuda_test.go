@@ -188,9 +188,39 @@ func TestGeneratedCCompiles(t *testing.T) {
 			"func K(ctx gpu.Ctx, y, x []float32) { y[0] = outer(x[0]) + inner(x[1]) }",
 	}, {
 		name: "a device function taking a slice, and gpu.Ctx",
-		body: "//gocuda:ignore\nfunc where(ctx gpu.Ctx) int { return ctx.GlobalID() }\n\n" +
+		body: "//gocuda:device\nfunc where(ctx gpu.Ctx) int { return ctx.GlobalID() }\n\n" +
 			"func total(xs []float32) float32 { s := float32(0)\n\tfor _, v := range xs { s += v }\n\treturn s }\n\n" +
 			"func K(ctx gpu.Ctx, y, x []float32) { i := where(ctx); if i < len(y) { y[i] = total(x) } }",
+	}, {
+		// A parallel assignment is the one construct that emits declarations
+		// the author did not write, in the middle of a scope they did. Two of
+		// them in one block must not declare the same temporary twice, and the
+		// index lifted out of `i, y[i] = ...` has to be declared before it is
+		// used -- both of which are questions for the compiler rather than for
+		// a golden file.
+		name: "parallel assignment, twice in one scope and with a lifted index",
+		body: "type P struct{ X, Y float32 }\n\n" +
+			"func K(ctx gpu.Ctx, y []float32, ps []P) {\n" +
+			"\ta, b := y[0], y[1]\n" +
+			"\ta, b = b, a\n" +
+			"\ta, b = b, a\n" +
+			"\ti := 0\n" +
+			"\ti, y[i] = 1, a+b\n" +
+			"\tps[0].X, ps[0].Y = ps[0].Y, ps[0].X\n" +
+			"\tj := len(y) - 1\n" +
+			"\tfor i < j {\n\t\ty[i], y[j] = y[j], y[i]\n\t\ti, j = i+1, j-1\n\t}\n}",
+	}, {
+		// The pointer qualifiers, which every signature now carries. const is
+		// only sound if nothing writes through the parameter, and a __device__
+		// function taking `const T* __restrict__` has to be callable with the
+		// kernel's own pointer -- both of which are questions for the compiler
+		// and for nobody else.
+		name: "const and __restrict__ across a device function and an atomic",
+		body: "func total(xs []float32) float32 { s := float32(0)\n\tfor _, v := range xs { s += v }\n\treturn s }\n\n" +
+			"func fill(ys []float32, v float32) { for i := range ys { ys[i] = v } }\n\n" +
+			"func K(ctx gpu.Ctx, y []float32, x []float32, h []int32) {\n" +
+			"\tfill(y, total(x))\n" +
+			"\tgpu.AtomicAddI32(h, 0, 1)\n}",
 	}, {
 		name: "every axis of the grid",
 		body: "func K(ctx gpu.Ctx, y []float32) {\n" +

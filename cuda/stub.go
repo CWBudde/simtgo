@@ -100,5 +100,8 @@ func (s *Slice[T]) Arg() Arg { return Arg{} }
 // KernelArgs expands the slice into a pointer and length pair.
 func (s *Slice[T]) KernelArgs() []Arg { return nil }
 
+// DeviceRange reports the memory the buffer occupies.
+func (s *Slice[T]) DeviceRange() (DevPtr, int) { return 0, 0 }
+
 // Free releases the buffer.
 func (s *Slice[T]) Free() {}

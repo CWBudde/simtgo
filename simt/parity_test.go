@@ -956,3 +956,104 @@ func ArrayFieldProbe(ctx gpu.Ctx, out []float32, ts []Taps) {
 	}
 	assertEqual(t, "fields", got, []float32{3, 1, 10, 100, 1000, 5, 7, 200, 2000, 9})
 }
+
+// TestAliasedLaunchIsRefused is the other half of __restrict__.
+//
+// The generated C promises that a kernel's pointer parameters do not overlap,
+// and the Go source cannot make that promise: VecAdd(ctx, c, a, b) is three
+// parameters and one buffer may fill all three. So the promise is checked
+// where the buffers are known, and a launch that breaks it is refused with an
+// error instead of producing whatever that architecture's scheduler made of
+// the reordering it was told it could do.
+//
+// The accepted half is here too, and it is the half that keeps the check
+// honest: two parameters the kernel only reads may share memory, because
+// __restrict__ only forbids reaching a *modified* object through another
+// pointer. A check that refused every repeat would forbid `dot(x, x)`.
+func TestAliasedLaunchIsRefused(t *testing.T) {
+	ctx := device(t)
+	k, err := simt.Build(ctx, gocuda.Kernels(), "VecAdd")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	const n, block = 1024, 256
+	d1, _ := cuda.Upload(ctx, randomSignal(n))
+	d2, _ := cuda.Upload(ctx, randomSignal(n))
+	defer d1.Free()
+	defer d2.Free()
+
+	// c and a are the same buffer, and VecAdd writes c.
+	err = k.LaunchN(n, block, d1, d1, d2)
+	var bad *simt.AliasError
+	if !errors.As(err, &bad) {
+		t.Fatalf("launching with c and a aliased gave %v, want an AliasError", err)
+	}
+	if bad.Write != "c" || bad.Other != "a" {
+		t.Errorf("AliasError names %s and %s, want c and a", bad.Write, bad.Other)
+	}
+
+	// The two read-only parameters may be the same buffer: nothing is
+	// modified through either, so there is nothing for restrict to forbid.
+	if err := k.LaunchN(n, block, d1, d2, d2); err != nil {
+		t.Errorf("two read-only parameters sharing a buffer were refused: %v", err)
+	}
+}
+
+// TestParallelAssignmentParity runs the two-phase assignment on the device.
+//
+// It is a probe rather than a committed kernel for the reason the struct
+// round-trip is: it tests a lowering rule, not a kernel anyone would launch.
+// The expectations are written out rather than taken from RunCPU, because both
+// cases exist to catch a device doing something Go does not -- and the second
+// one would still be wrong if the emulator and the emitter made the same
+// mistake.
+//
+// The reversal is the readable half. The lifted index is the half that would
+// fail: Go evaluates the subscript in `i, y[i] = 2, 7` against the old i, so
+// the 7 lands in y[0], while a C lowering that assigned in order would put it
+// in y[2] -- code that compiles and computes something else.
+func TestParallelAssignmentParity(t *testing.T) {
+	ctx := device(t)
+
+	const probe = "package kernels\n\n" +
+		"import \"github.com/CWBudde/gocuda/gpu\"\n\n" +
+		"func ReverseProbe(ctx gpu.Ctx, y []float32) {\n" +
+		"\tif ctx.GlobalID() != 0 {\n\t\treturn\n\t}\n" +
+		"\ti := 0\n\tj := len(y) - 1\n" +
+		"\tfor i < j {\n\t\ty[i], y[j] = y[j], y[i]\n\t\ti, j = i+1, j-1\n\t}\n}\n\n" +
+		"func IndexProbe(ctx gpu.Ctx, y []float32) {\n" +
+		"\tif ctx.GlobalID() != 0 {\n\t\treturn\n\t}\n" +
+		"\ti := 0\n\ti, y[i] = 2, 7\n\ty[1] = float32(i)\n}\n"
+
+	src := fstest.MapFS{"probe.go": &fstest.MapFile{Data: []byte(probe)}}
+
+	rev, err := simt.Build(ctx, src, "ReverseProbe")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	dy, _ := cuda.Upload(ctx, []float32{1, 2, 3, 4, 5, 6, 7})
+	defer dy.Free()
+	if err := rev.Launch(1, 32, dy); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	got, err := dy.Download()
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	assertEqual(t, "reversed", got, []float32{7, 6, 5, 4, 3, 2, 1})
+
+	idx, err := simt.Build(ctx, src, "IndexProbe")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	dz, _ := cuda.Upload(ctx, []float32{0, 0, 0})
+	defer dz.Free()
+	if err := idx.Launch(1, 32, dz); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	got, err = dz.Download()
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	assertEqual(t, "lifted index", got, []float32{7, 2, 0})
+}

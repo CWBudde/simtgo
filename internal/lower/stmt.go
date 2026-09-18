@@ -68,8 +68,21 @@ func (t *transpiler) stmt(s ast.Stmt) {
 }
 
 func (t *transpiler) assign(s *ast.AssignStmt) {
-	if len(s.Lhs) != 1 || len(s.Rhs) != 1 {
-		t.fail(s.Pos(), "multiple assignment is not supported in kernels")
+	if len(s.Lhs) > 1 {
+		if len(s.Rhs) != len(s.Lhs) {
+			// Go allows exactly two shapes, and only one of them is a
+			// question about the emitter: `a, b = c, d` pairs off, while
+			// `a, b := f()` needs something to return a pair.
+			t.failTupleAssign(s)
+			return
+		}
+		t.parallelAssign(s)
+		return
+	}
+	if len(s.Rhs) != 1 {
+		// go/types has already refused this; the guard keeps the indexing
+		// below honest rather than describing anything.
+		t.fail(s.Pos(), "unsupported assignment")
 		return
 	}
 	lhs, rhs := s.Lhs[0], s.Rhs[0]
@@ -114,14 +127,223 @@ func (t *transpiler) define(id *ast.Ident, rhs ast.Expr) string {
 		t.poison(obj)
 		return ""
 	}
+	decl, ok := t.declare(id)
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("%s = %s", decl, t.expr(rhs).s)
+}
+
+// declare renders `T name` for the variable id introduces, and reports whether
+// that variable has a device type at all.
+//
+// It is define's first half, split out because a parallel assignment declares
+// its variables in the second phase and initialises each from a temporary
+// rather than from the expression it was written with.
+func (t *transpiler) declare(id *ast.Ident) (string, bool) {
+	obj := t.info.Defs[id]
+	if obj == nil {
+		t.fail(id.Pos(), "%s has no resolved type", id.Name)
+		return "", false
+	}
 	before := len(t.diags)
 	decl := t.cdecl(obj.Type(), cname(id.Name), id.Pos())
 	if len(t.diags) > before {
 		// The variable exists but has no device type. Every later use of it
 		// would be a fresh complaint about the same declaration.
 		t.poison(obj)
+		return "", false
 	}
-	return fmt.Sprintf("%s = %s", decl, t.expr(rhs).s)
+	return decl, true
+}
+
+// failTupleAssign refuses `a, b := f()`.
+//
+// This is the half of multiple assignment that is not a statement problem but
+// an ABI one. A device function lowers to a C function with one return type,
+// and a pair would have to come back through out-parameters -- which the
+// subset cannot even spell, having no address-of: `&x` is something only the
+// emitter writes. Nothing else in Go produces two values here either: maps,
+// channels and type assertions are all outside the subset already.
+func (t *transpiler) failTupleAssign(s *ast.AssignStmt) {
+	t.fail(s.Pos(), "assigning %d values from one expression is not supported in kernels: "+
+		"a device function lowers to one C return value, and returning a pair would need out-parameters, "+
+		"which the subset has no address-of to spell", len(s.Lhs))
+}
+
+// parallelAssign lowers `a, b = c, d` and `a, b := c, d`.
+//
+// Go assigns in two phases: the operands of the index expressions on the left
+// and all of the expressions on the right are evaluated first, and only then
+// is anything assigned. C has no statement that does this, so the phases are
+// written out -- one temporary per value, then the assignments. That is what
+// makes `a, b = b, a` a swap instead of two copies of b.
+//
+// The temporaries are unconditional rather than emitted only where the two
+// orders would differ. Proving that they coincide means proving that no
+// right-hand side reads anything an earlier target writes, through calls that
+// may write slices of their own, and being wrong about it is a kernel that
+// compiles and computes something else. A C++ compiler deletes a temporary
+// nobody needed; nothing recovers a swap that turned into a copy.
+func (t *transpiler) parallelAssign(s *ast.AssignStmt) {
+	if s.Tok != token.ASSIGN && s.Tok != token.DEFINE {
+		// Go has no `a, b += c, d`, so this only guards a malformed AST.
+		t.fail(s.Pos(), "unsupported assignment %s", s.Tok)
+		return
+	}
+
+	// Which objects this statement writes, which is what decides whether an
+	// index expression on the left can still be read in the second phase.
+	assigned := map[types.Object]bool{}
+	for _, lhs := range s.Lhs {
+		if id, ok := unparen(lhs).(*ast.Ident); ok {
+			if obj := t.objectOf(id); obj != nil {
+				assigned[obj] = true
+			}
+		}
+	}
+
+	// targets holds the rendered left-hand sides. An entry stays empty where
+	// the statement declares the variable instead, since the declaration is
+	// written in the second phase and there is nothing to evaluate first.
+	targets := make([]string, len(s.Lhs))
+	declares := make([]bool, len(s.Lhs))
+	for i, lhs := range s.Lhs {
+		id, isIdent := unparen(lhs).(*ast.Ident)
+		if isIdent && id.Name == "_" {
+			// The same refusal the single-assignment path gives, stated here
+			// because nothing would go on to render the identifier.
+			t.fail(id.Pos(), "the blank identifier is not supported in kernels")
+			continue
+		}
+		if s.Tok == token.DEFINE && isIdent && t.info.Defs[id] != nil {
+			declares[i] = true
+			continue
+		}
+		// A whole-array assignment is refused below, against the target's
+		// type, rather than here: refuseArrayValue reads the expression's
+		// recorded type, and the left-hand side of an assignment has none.
+		targets[i] = t.assignTarget(lhs, assigned)
+	}
+
+	// The values, in source order. Every one is evaluated before any of them
+	// is stored, which is the whole of what this statement means.
+	temps := make([]string, len(s.Rhs))
+	for i, rhs := range s.Rhs {
+		typ := t.assignedType(s, i)
+		if typ == nil {
+			continue
+		}
+		if isArray(typ) {
+			t.refuseArrayValue(rhs, s.Pos())
+			if declares[i] {
+				t.poison(t.info.Defs[unparen(s.Lhs[i]).(*ast.Ident)])
+			}
+			continue
+		}
+		// The generated name is deliberately never given back: two parallel
+		// assignments in one C scope would otherwise declare the same
+		// temporary twice, which C++ refuses.
+		temps[i] = t.reserve(baseName(s.Lhs[i]) + "_tmp")
+		t.line("%s = %s;", t.cdecl(typ, temps[i], rhs.Pos()), t.expr(rhs).s)
+	}
+
+	for i := range s.Lhs {
+		if temps[i] == "" {
+			continue
+		}
+		if declares[i] {
+			decl, ok := t.declare(unparen(s.Lhs[i]).(*ast.Ident))
+			if !ok {
+				continue
+			}
+			t.line("%s = %s;", decl, temps[i])
+			continue
+		}
+		if targets[i] == "" {
+			continue
+		}
+		t.line("%s = %s;", targets[i], temps[i])
+	}
+}
+
+// assignTarget renders one left-hand side of a parallel assignment, lifting an
+// index out into a temporary where the second phase could no longer read it.
+//
+// `i, a[i] = 1, 2` is the case: Go evaluates the subscript against the old i
+// and C would assign i first and then index with the new one. The temporary is
+// only taken where the subscript could actually change, so the ordinary
+// `a[i], a[j] = a[j], a[i]` stays legible.
+func (t *transpiler) assignTarget(lhs ast.Expr, assigned map[types.Object]bool) string {
+	idx, ok := unparen(lhs).(*ast.IndexExpr)
+	if !ok || t.stableIndex(idx.Index, assigned) {
+		return t.expr(lhs).s
+	}
+	typ := t.typeOf(idx.Index)
+	if typ == nil {
+		return ""
+	}
+	name := t.reserve(baseName(lhs) + "_idx")
+	t.line("%s = %s;", t.cdecl(typ, name, idx.Index.Pos()), t.expr(idx.Index).s)
+	return fmt.Sprintf("%s[%s]", t.expr(idx.X).at(precPostfix), name)
+}
+
+// stableIndex reports whether an index expression reads the same thing in both
+// phases of an assignment: a constant, or a variable this statement leaves
+// alone. Anything else -- arithmetic, another subscript, a call -- is treated
+// as unstable, because a right-hand side may write through a slice and the
+// cost of being wrong is silent.
+func (t *transpiler) stableIndex(e ast.Expr, assigned map[types.Object]bool) bool {
+	e = unparen(e)
+	if tv, ok := t.info.Types[e]; ok && tv.Value != nil {
+		return true
+	}
+	id, ok := e.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	obj := t.objectOf(id)
+	return obj != nil && !assigned[obj]
+}
+
+// assignedType is the type the i-th value of an assignment is stored as: the
+// target's, not the expression's, because that is what the temporary holds. An
+// untyped constant on the right has already been converted to it by go/types,
+// and a typed value is assignable to it.
+//
+// A target that is an identifier is resolved through its object rather than
+// through Types, which records expressions: the left-hand side of an
+// assignment is a use or a definition, and `a, b := x, a` -- a mixed `:=`,
+// where a already exists and b does not -- has no entry there at all.
+func (t *transpiler) assignedType(s *ast.AssignStmt, i int) types.Type {
+	if id, ok := unparen(s.Lhs[i]).(*ast.Ident); ok {
+		if obj := t.objectOf(id); obj != nil {
+			return obj.Type()
+		}
+	}
+	return t.typeOf(s.Lhs[i])
+}
+
+// baseName is the identifier a generated name for this target is derived from,
+// so that the temporaries read as belonging to what they hold.
+func baseName(e ast.Expr) string {
+	switch e := unparen(e).(type) {
+	case *ast.Ident:
+		return cname(e.Name)
+	case *ast.IndexExpr:
+		return baseName(e.X)
+	case *ast.SelectorExpr:
+		return cname(e.Sel.Name)
+	}
+	return "tmp"
+}
+
+// objectOf resolves an identifier to the object it uses or defines.
+func (t *transpiler) objectOf(id *ast.Ident) types.Object {
+	if obj := t.info.Uses[id]; obj != nil {
+		return obj
+	}
+	return t.info.Defs[id]
 }
 
 // returnStmt lowers a return. A kernel writes through its parameters and has
@@ -343,6 +565,12 @@ func (t *transpiler) refuseArrayValue(e ast.Expr, pos token.Pos) bool {
 // simple renders an assignment or increment inline, without a terminator, so
 // it can also serve as a for-loop clause.
 func (t *transpiler) simple(s ast.Stmt) string {
+	if t.failed() {
+		// A for statement renders three clauses in one call, so without this
+		// a loop whose init and post are both refused for the same reason
+		// says so twice. One statement, one diagnostic, as everywhere else.
+		return ""
+	}
 	switch s := s.(type) {
 	case nil:
 		return ""
@@ -354,8 +582,26 @@ func (t *transpiler) simple(s ast.Stmt) string {
 		}
 		return fmt.Sprintf("%s%s", t.expr(s.X).s, s.Tok)
 	case *ast.AssignStmt:
-		if len(s.Lhs) != 1 || len(s.Rhs) != 1 {
-			t.fail(s.Pos(), "multiple assignment is not supported in kernels")
+		if len(s.Lhs) > 1 {
+			if len(s.Rhs) != len(s.Lhs) {
+				t.failTupleAssign(s)
+				return ""
+			}
+			// A parallel assignment is a sequence of statements: Go evaluates
+			// every value before storing any of them, and the temporaries that
+			// takes are declarations. A for clause is one expression, and C's
+			// comma operator carries assignments but not declarations --
+			// `i = j, j = i` is not the swap it looks like. So it is refused
+			// here and supported everywhere else, rather than lowered to
+			// something that means a different thing in the one place it would
+			// be most tempting to write.
+			t.fail(s.Pos(), "multiple assignment is not supported in a for clause: "+
+				"Go evaluates every value before assigning any, which needs temporaries a clause has nowhere to put; "+
+				"write it in the loop body")
+			return ""
+		}
+		if len(s.Rhs) != 1 {
+			t.fail(s.Pos(), "unsupported assignment")
 			return ""
 		}
 		if s.Tok == token.DEFINE {

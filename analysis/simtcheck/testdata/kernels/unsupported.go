@@ -109,3 +109,18 @@ func Float64Tile(ctx gpu.Ctx, y []float32) {
 func NegativeLane(ctx gpu.Ctx, y []float32) {
 	y[0] = ctx.ShuffleUpF32(y[1], -1) // want `takes a lane offset and -1 is negative`
 }
+
+// Marked is decoration: it takes no gpu.Ctx, so nothing about it would have
+// been a kernel to begin with. Nothing calls it either, which is the point --
+// the check is package-wide, not part of the lowering.
+//
+//gocuda:device
+func Marked(x float32) float32 { return x } // want `//gocuda:device does nothing on Marked`
+
+// blend writes through one of its two buffers, so passing it the same one
+// twice makes two __restrict__ pointers alias inside the generated C.
+func blend(out, a []float32) { out[0] = a[0] * 2 }
+
+func AliasedCall(ctx gpu.Ctx, y []float32) {
+	blend(y, y) // want `passed the same buffer as both out and a`
+}

@@ -102,6 +102,16 @@ func LoadPackage(fsys fs.FS) (*Package, []Diagnostic, error) {
 		}
 		return &Package{Fset: fset, Files: files}, tidy(diags), nil
 	}
+	// A pointless //gocuda:device is a property of the package rather than of
+	// any one kernel, exactly as an offending import is: the function carrying
+	// it may be one nothing lowers, and it is still a marker that does not do
+	// what it says.
+	for _, f := range files {
+		diags = append(diags, CheckDeviceMarkers(info, f)...)
+	}
+	if len(diags) > 0 {
+		return &Package{Fset: fset, Files: files}, tidy(diags), nil
+	}
 	return &Package{Fset: fset, Info: info, Files: files}, nil, nil
 }
 

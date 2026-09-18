@@ -17,7 +17,7 @@ __device__ float softclip(float v, float threshold)
 	return shaped;
 }
 
-extern "C" __global__ void Softclip(float* y, int y_len, float* x, int x_len, float threshold)
+extern "C" __global__ void Softclip(float* __restrict__ y, int y_len, const float* __restrict__ x, int x_len, float threshold)
 {
 	int i = (int)(blockIdx.x * blockDim.x + threadIdx.x);
 	if (i < y_len)

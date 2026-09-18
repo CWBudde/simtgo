@@ -38,12 +38,29 @@ type Unit struct {
 	// the host needs exactly this much: whether to size the dynamic block at
 	// all, and what to multiply the caller's element count by.
 	DynSharedWidth int
+	// Params describes the kernel's parameters after the gpu.Ctx, in the order
+	// a launch supplies them. It travels with the unit for the same reason
+	// RequiredBlock does: what the source says about a parameter is discovered
+	// here, and a launch is where it has to be honoured.
+	Params []Param
 	// SourceHash identifies Source, and is what an ahead-of-time artifact is
 	// filed under. Hashing the generated CUDA C rather than the Go source
 	// means a change to the emitter invalidates a prebuilt just as a change to
 	// the kernel does, and that comments and formatting in the Go source,
 	// which cannot affect the output, do not.
 	SourceHash string
+}
+
+// A Param is one of a kernel's parameters, as the generated C declares it.
+//
+// ReadOnly is what the launch-time aliasing check reads: every pointer in the
+// generated signature is __restrict__, which promises the parameters do not
+// overlap, and that promise can only be broken by a buffer something writes.
+// It is meaningful only for a slice -- a scalar is a copy.
+type Param struct {
+	Name     string
+	Slice    bool
+	ReadOnly bool
 }
 
 // SourceHash is the identity of a piece of generated CUDA C. It is the whole
@@ -87,6 +104,7 @@ func Kernel(fset *token.FileSet, info *types.Info, files []*ast.File, fd *ast.Fu
 		RequiredBlock:  t.requiredBlock,
 		SharedBytes:    t.sharedBytes,
 		DynSharedWidth: t.dynSharedWidth,
+		Params:         t.paramInfo,
 		SourceHash:     SourceHash(src),
 	}, nil
 }
@@ -141,8 +159,8 @@ type transpiler struct {
 	// The key is the checked object rather than its name, so a declaration
 	// shadowing a slice parameter cannot be mistaken for it.
 	lens map[types.Object]string
-	// requiredBlock and sharedBytes accumulate what the kernel demands of its
-	// launch; see Unit.
+	// requiredBlock, sharedBytes and paramInfo accumulate what the kernel
+	// demands of its launch; see Unit.
 	requiredBlock int
 	sharedBytes   int
 	// dynShared is the Go name of the kernel's dynamically sized tile, empty
@@ -157,7 +175,12 @@ type transpiler struct {
 	// the parameters and the lengths generated for its slices. A dynamic
 	// tile's generated length has to be checked against it, and unlike the
 	// parameters it is only discovered while the body is lowered.
-	sigNames map[string]string
+	sigNames  map[string]string
+	paramInfo []Param
+	// written memoises the read-only analysis, and analysing is its cycle
+	// guard; see readonly.go.
+	written   map[*ast.FuncDecl]map[types.Object]bool
+	analysing map[*ast.FuncDecl]bool
 	// diags collects every construct this kernel was refused for.
 	diags []Diagnostic
 	// mark is len(diags) when the current statement began. Refusals are
@@ -308,19 +331,23 @@ func (t *transpiler) kernel(fd *ast.FuncDecl) {
 	// same run. Nothing is emitted while any diagnostic stands.
 	t.checkLengthNames(params[1:])
 
+	written := t.writtenParams(fd)
 	var decls []string
 	for _, p := range params[1:] {
 		name := cname(p.name)
 		switch typ := p.typ.(type) {
 		case *types.Slice:
 			elem := t.ctypeElem(typ.Elem(), p.pos)
+			readOnly := !written[p.obj]
 			// A Go slice carries its length; C does not, so every slice
 			// parameter lowers to a pointer plus an explicit length.
-			decls = append(decls, fmt.Sprintf("%s* %s", elem, name), fmt.Sprintf("int %s_len", name))
+			decls = append(decls, pointerDecl(elem, name, readOnly), fmt.Sprintf("int %s_len", name))
 			t.lens[p.obj] = name + "_len"
+			t.paramInfo = append(t.paramInfo, Param{Name: p.name, Slice: true, ReadOnly: readOnly})
 		default:
 			t.checkParamType(p.typ, p.pos)
 			decls = append(decls, t.cdecl(p.typ, name, p.pos))
+			t.paramInfo = append(t.paramInfo, Param{Name: p.name})
 		}
 	}
 
@@ -382,7 +409,7 @@ func (t *transpiler) deviceFunc(pos token.Pos, obj *types.Func) (string, bool) {
 	}
 	if t.isKernelDecl(fd) {
 		t.fail(pos, "%s is a kernel; a kernel cannot be called from a kernel. "+
-			"Mark it //gocuda:ignore to make it a device function instead", obj.Name())
+			"Mark it %s to make it a device function instead", obj.Name(), DeviceDirective)
 		return "", false
 	}
 	if fd.Recv != nil {
@@ -529,13 +556,14 @@ func (t *transpiler) fileOf(pos token.Pos) *ast.File {
 func (t *transpiler) signature(fd *ast.FuncDecl) string {
 	params := t.deviceParams(fd)
 	t.checkLengthNames(params)
+	written := t.writtenParams(fd)
 	decls := make([]string, 0, len(params))
 	for _, p := range params {
 		name := cname(p.name)
 		switch typ := p.typ.(type) {
 		case *types.Slice:
 			elem := t.ctypeElem(typ.Elem(), p.pos)
-			decls = append(decls, fmt.Sprintf("%s* %s", elem, name), fmt.Sprintf("int %s_len", name))
+			decls = append(decls, pointerDecl(elem, name, !written[p.obj]), fmt.Sprintf("int %s_len", name))
 			t.lens[p.obj] = name + "_len"
 		default:
 			t.checkParamType(p.typ, p.pos)
@@ -543,6 +571,24 @@ func (t *transpiler) signature(fd *ast.FuncDecl) string {
 		}
 	}
 	return strings.Join(decls, ", ")
+}
+
+// pointerDecl declares the pointer half of a slice parameter.
+//
+// Both qualifiers are claims about the whole kernel rather than decoration.
+// const says this pointer is never written through, on any path the parameter
+// reaches, which readonly.go proves conservatively. __restrict__ says no other
+// pointer parameter reaches the same memory, which the Go source cannot
+// promise at all -- VecAdd(ctx, c, a, b) may be handed one buffer three times
+// -- so Kernel.Launch checks it against the buffers actually bound and refuses
+// an overlap, and calls inside the translation unit are checked where they are
+// lowered. An unchecked __restrict__ would be undefined behaviour dressed as a
+// speed-up.
+func pointerDecl(elem, name string, readOnly bool) string {
+	if readOnly {
+		return fmt.Sprintf("const %s* __restrict__ %s", elem, name)
+	}
+	return fmt.Sprintf("%s* __restrict__ %s", elem, name)
 }
 
 // deviceParams is fd's parameters without a leading gpu.Ctx.

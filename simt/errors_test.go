@@ -281,12 +281,46 @@ func TestUnsupported(t *testing.T) {
 		body: "func K(ctx gpu.Ctx, y []float32) { if ctx.ThreadIdx() == 0 { s := ctx.SharedF32(4); y[0] = s[0] } }",
 		want: "top level of the function",
 	}, {
-		// Without the opt-out the helper is a kernel in its own right, and
+		// Without a marker the helper is a kernel in its own right, and
 		// calling a kernel is what the previous case refuses.
-		name: "a gpu.Ctx helper that did not opt out of being a kernel",
+		name: "a gpu.Ctx helper that did not say it was a device function",
 		body: "func where(ctx gpu.Ctx) int { return ctx.GlobalID() }\n\n" +
 			"func K(ctx gpu.Ctx, a []float32) { a[0] = float32(where(ctx)) }",
 		want: "where is a kernel",
+	}, {
+		// And the refusal points at the marker that says what the helper is,
+		// not at the one that says what it is not.
+		name: "the refusal names the device marker",
+		body: "func where(ctx gpu.Ctx) int { return ctx.GlobalID() }\n\n" +
+			"func K(ctx gpu.Ctx, a []float32) { a[0] = float32(where(ctx)) }",
+		want: "Mark it //gocuda:device",
+	}, {
+		// The marker only means anything where the signature rule would
+		// otherwise make a kernel. Anywhere else it is decoration, and a
+		// marker that is decoration half the time is read as decoration.
+		name: "//gocuda:device on a function that takes no gpu.Ctx",
+		body: "//gocuda:device\nfunc half(x float32) float32 { return x / 2 }\n\n" +
+			"func K(ctx gpu.Ctx, a []float32) { a[0] = half(a[1]) }",
+		want: "//gocuda:device does nothing on half, which takes no gpu.Ctx",
+	}, {
+		// Refused even though nothing reaches it: the mistake is easiest to
+		// make on a function no kernel calls, so a check that only ran along
+		// the lowering paths would pass over exactly that case.
+		name: "//gocuda:device on a function nothing calls",
+		body: "//gocuda:device\nfunc unused(x float32) float32 { return x }\n\n" +
+			"func K(ctx gpu.Ctx, a []float32) { a[0] = 1 }",
+		want: "//gocuda:device does nothing on unused",
+	}, {
+		// A static tile in a helper is fine -- it is block-scoped storage the
+		// compiler allocates once per function, and its bytes are accounted
+		// onto the kernel that reaches it. The dynamic tile is the one that
+		// cannot go there, because its length arrives as a parameter of the
+		// kernel, which a helper has no way to be handed. The marker changes
+		// neither answer: what a helper lacks is a launch, not a name.
+		name: "a dynamic shared tile inside a marked device function",
+		body: "//gocuda:device\nfunc stage(ctx gpu.Ctx) float32 { s := ctx.SharedDynF32()\nreturn s[0] }\n\n" +
+			"func K(ctx gpu.Ctx, a []float32) { a[0] = stage(ctx) }",
+		want: "device function",
 	}, {
 		// The refusal that lives in ctype cannot see this one: no float64 is
 		// written down anywhere. The argument is an untyped constant and the
@@ -316,9 +350,41 @@ func TestUnsupported(t *testing.T) {
 		body: "var g []int32\n\nfunc K(ctx gpu.Ctx, y []float32) { gpu.AtomicAddI32(g, 0, 1); y[0] = 1 }",
 		want: "declared outside the kernel",
 	}, {
-		name: "multiple assignment",
-		body: "func K(ctx gpu.Ctx, a []float32) { i, j := 0, 1; a[i] = a[j] }",
-		want: "multiple assignment",
+		// The half of multiple assignment that is an ABI question rather than
+		// a statement one: C returns one value, and a pair would have to come
+		// back through out-parameters the subset cannot spell.
+		name: "assigning from a two-valued call",
+		body: "func two(x float32) (float32, float32) { return x, x }\n\n" +
+			"func K(ctx gpu.Ctx, a []float32) { p, q := two(a[0]); a[0] = p + q }",
+		want: "assigning 2 values from one expression is not supported",
+	}, {
+		// A for clause is one C expression and the temporaries the two phases
+		// need are declarations, so the parallel form is refused there and
+		// supported everywhere else.
+		name: "a parallel assignment in a for clause",
+		body: "func K(ctx gpu.Ctx, a []float32, n int32) { for i, j := 0, int(n); i < j; i, j = i+1, j-1 { a[i] = a[j] } }",
+		want: "multiple assignment is not supported in a for clause",
+	}, {
+		name: "the blank identifier in a parallel assignment",
+		body: "func K(ctx gpu.Ctx, a []float32) { v, _ := a[0], a[1]; a[0] = v }",
+		want: "the blank identifier is not supported in kernels",
+	}, {
+		// The whole-array refusal has to survive the new path: it is stated
+		// against the target's type there, because the left-hand side of an
+		// assignment has no recorded expression type to read.
+		name: "two whole arrays swapped",
+		body: "func K(ctx gpu.Ctx, y []float32) { var p, q [2]float32; p, q = q, p; y[0] = p[0] }",
+		want: "cannot be assigned",
+	}, {
+		// Every pointer in the generated C is __restrict__, and a launch
+		// checks that against the buffers it was given. A call inside the
+		// kernel has no launch to check it, so it is refused where it is
+		// lowered -- one Go call with nothing wrong with it, and two aliased
+		// restrict pointers in C.
+		name: "one buffer passed as two parameters of a helper that writes",
+		body: "func blend(out, a []float32) { out[0] = a[0] * 2 }\n\n" +
+			"func K(ctx gpu.Ctx, y []float32) { blend(y, y) }",
+		want: "blend is passed the same buffer as both out and a",
 	}, {
 		name: "map",
 		body: "func K(ctx gpu.Ctx, a []float32) { m := map[int]int{}; a[0] = float32(m[1]) }",

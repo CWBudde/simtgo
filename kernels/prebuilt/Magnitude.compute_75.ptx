@@ -43,9 +43,9 @@
 	add.s64 	%rd6, %rd4, %rd5;
 	cvta.to.global.u64 	%rd7, %rd3;
 	add.s64 	%rd8, %rd7, %rd5;
-	ld.global.f32 	%f1, [%rd6];
+	ld.global.nc.f32 	%f1, [%rd6];
 	abs.f32 	%f2, %f1;
-	ld.global.f32 	%f3, [%rd8];
+	ld.global.nc.f32 	%f3, [%rd8];
 	abs.f32 	%f4, %f3;
 	mov.b32 	%r6, %f4;
 	mov.b32 	%r7, %f2;

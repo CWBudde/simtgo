@@ -145,3 +145,18 @@ func WarpSum(ctx gpu.Ctx, out, x []float32) {
 		out[i/gpu.WarpSize] = v
 	}
 }
+
+// Position is the helper the //gocuda:device marker exists for: it takes a
+// gpu.Ctx because it wants the thread's index, and it is not a kernel. The
+// analyzer has to agree with the transpiler about that, or vet reports a
+// kernel the generator never emits.
+//
+//gocuda:device
+func Position(ctx gpu.Ctx, xs []float32) int {
+	return ctx.GlobalID() % len(xs)
+}
+
+// UsesPosition reaches it, which is what turns it into a __device__ function.
+func UsesPosition(ctx gpu.Ctx, y, x []float32) {
+	y[Position(ctx, y)] = x[0]
+}

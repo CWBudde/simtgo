@@ -16,7 +16,7 @@ struct Shape
 static_assert(sizeof(Shape) == 16, "gocuda: Shape is a different size in CUDA than in Go");
 static_assert(alignof(Shape) == 8, "gocuda: Shape is differently aligned in CUDA than in Go");
 
-extern "C" __global__ void BandGain(float* y, int y_len, float* x, int x_len, Band* bands, int bands_len, Shape cfg)
+extern "C" __global__ void BandGain(float* __restrict__ y, int y_len, const float* __restrict__ x, int x_len, const Band* __restrict__ bands, int bands_len, Shape cfg)
 {
 	int i = (int)(blockIdx.x * blockDim.x + threadIdx.x);
 	if (i >= y_len)
