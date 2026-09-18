@@ -250,11 +250,18 @@ func (t *transpiler) call(c *ast.CallExpr) cexpr {
 		}
 		if sel := t.info.Selections[f]; sel != nil && sel.Kind() == types.MethodVal && IsCtx(sel.Recv()) {
 			name := sel.Obj().Name()
-			switch name {
-			case "SharedF32":
-				t.fail(c.Pos(), "SharedF32 must be assigned to a variable, e.g. `s := ctx.SharedF32(256)`")
+			if _, ok := sharedElems[name]; ok {
+				// A tile is a declaration, not a value: it reaches the C as
+				// the name of a __shared__ array, so there is nothing to
+				// render at a call site that does not name one.
+				t.fail(c.Pos(), "%s must be assigned to a variable, e.g. `s := ctx.%s(256)`", name, name)
 				return atom("")
-			case "AssumeBlockDim":
+			}
+			if _, ok := sharedDynElems[name]; ok {
+				t.fail(c.Pos(), "%s must be assigned to a variable, e.g. `s := ctx.%s()`", name, name)
+				return atom("")
+			}
+			if name == "AssumeBlockDim" {
 				return t.assumeBlockDim(c)
 			}
 			builtin, ok := ctxBuiltins[name]

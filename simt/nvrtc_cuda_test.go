@@ -194,6 +194,65 @@ func TestGeneratedCCompiles(t *testing.T) {
 		// not a global one. Whether NVRTC accepts that overload at all is the
 		// question; the hardware resolving it back to a shared atomic is what
 		// the parity test measures.
+		// One tile per element type, in one kernel. The spellings are derived
+		// rather than written down, so whether "unsigned long long s[8]" is
+		// something CUDA has at all is a measurement and not a claim.
+		name: "a shared tile of every element type",
+		body: "//gocuda:float64\n" +
+			"func K(ctx gpu.Ctx, y []float64) {\n" +
+			"\ta := ctx.SharedF32(8)\n" +
+			"\tb := ctx.SharedF64(8)\n" +
+			"\tc := ctx.SharedI32(8)\n" +
+			"\td := ctx.SharedI64(8)\n" +
+			"\te := ctx.SharedU32(8)\n" +
+			"\tf := ctx.SharedU64(8)\n" +
+			"\ti := ctx.ThreadIdx() % 8\n" +
+			"\ta[i] = 1\n\tb[i] = 1\n\tc[i] = 1\n\td[i] = 1\n\te[i] = 1\n\tf[i] = 1\n" +
+			"\tctx.SyncThreads()\n" +
+			"\ty[0] = float64(a[0]) + b[0] + float64(c[0]) + float64(d[0]) + float64(e[0]) + float64(f[0])\n}",
+	}, {
+		// atomicAdd on an int32 tile is the pair the Histogram kernel is
+		// built out of, and the overload NVRTC has to resolve with no headers.
+		name: "an atomic on an int32 shared tile",
+		body: "func K(ctx gpu.Ctx, bins, x []int32) {\n" +
+			"\ttile := ctx.SharedI32(256)\n" +
+			"\tfor k := ctx.ThreadIdx(); k < 256; k += ctx.BlockDim() {\n\t\ttile[k] = 0\n\t}\n" +
+			"\tctx.SyncThreads()\n" +
+			"\tgpu.AtomicAddI32(tile, ctx.GlobalID()%256, 1)\n" +
+			"\tctx.SyncThreads()\n" +
+			"\tgpu.AtomicAddI32(bins, 0, tile[0])\n" +
+			"\tx[0] = 1\n}",
+	}, {
+		// The dynamic block: `extern __shared__` inside the kernel, with the
+		// length arriving as the generated trailing parameter.
+		name: "a dynamically sized shared tile, beside a static one",
+		body: "func K(ctx gpu.Ctx, y []float32) {\n" +
+			"\tfixed := ctx.SharedF32(32)\n" +
+			"\ts := ctx.SharedDynF32()\n" +
+			"\tfor i := ctx.ThreadIdx(); i < len(s); i += ctx.BlockDim() {\n\t\ts[i] = 1\n\t}\n" +
+			"\tfixed[ctx.ThreadIdx()%32] = 1\n" +
+			"\tctx.SyncThreads()\n" +
+			"\ty[0] = s[0] + fixed[0]\n}",
+	}, {
+		name: "a dynamically sized tile of a 64-bit element",
+		body: "func K(ctx gpu.Ctx, y []int64) {\n" +
+			"\ts := ctx.SharedDynI64()\n" +
+			"\tif ctx.ThreadIdx() < len(s) {\n\t\ts[ctx.ThreadIdx()] = int64(ctx.GlobalID())\n\t}\n" +
+			"\tctx.SyncThreads()\n" +
+			"\ty[0] = s[0]\n}",
+	}, {
+		// __shared__ inside a __device__ function. It is block-scoped storage
+		// that CUDA allocates once for the function, and the only thing that
+		// settles whether NVRTC accepts it is NVRTC.
+		name: "a shared tile inside a device function",
+		body: "//gocuda:ignore\n" +
+			"func stage(ctx gpu.Ctx, x []float32) float32 {\n" +
+			"\ttile := ctx.SharedF32(256)\n" +
+			"\ttile[ctx.ThreadIdx()%256] = x[0]\n" +
+			"\tctx.SyncThreads()\n" +
+			"\treturn tile[0]\n}\n\n" +
+			"func K(ctx gpu.Ctx, y, x []float32) { y[0] = stage(ctx, x) + stage(ctx, x) }",
+	}, {
 		name: "an atomic on a shared tile, and one across a device function",
 		body: "//gocuda:ignore\n" +
 			"func bump(h []int32, i int) { gpu.AtomicAddI32(h, i, 1) }\n\n" +

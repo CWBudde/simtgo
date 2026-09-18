@@ -12,6 +12,14 @@
 // That function compiles, runs and can be tested as plain Go via RunCPU, and
 // the transpiler in package simt lowers the very same source to CUDA C. One
 // source, two backends.
+//
+// The vocabulary has gaps, and they are worth naming so their absence reads as
+// a decision rather than an oversight. The atomics' are the hardware's and are
+// listed in atomic.go. The shared tiles' is bool: there is a Shared tile per
+// scalar type the device has except that one, for the reason shared.go gives
+// -- nothing here reads or writes a bool atomically, so such a tile could only
+// be filled under a barrier, which the int32 tile already does and the atomics
+// can also work on.
 package gpu
 
 import (
@@ -119,52 +127,6 @@ func (c Ctx) SyncThreads() {
 	}
 }
 
-// SharedF32 returns this block's shared scratch buffer of n float32 values,
-// lowered to a __shared__ array on the GPU. All threads of a block see the
-// same buffer, so n must be a constant expression the transpiler can fold.
-//
-// Calls are matched between threads by their order of execution, exactly as
-// __shared__ declarations are: every thread of a block must reach every
-// SharedF32 call, and every thread must ask for the same n at the same call.
-// A __shared__ declaration on the device is a property of the compiled kernel,
-// not of the thread that executes it, so a kernel whose threads disagree about
-// how much shared memory exists is not a kernel the GPU could run at all. The
-// emulator therefore does not try to give such a kernel a plausible answer: it
-// records the disagreement and RunCPU turns it into a panic (see blockState
-// for why the panic is deferred to RunCPU's caller).
-func (c Ctx) SharedF32(n int) []float32 {
-	if c.block == nil {
-		// A zero-value Ctx is not part of a launch, so there is nobody to
-		// share with and nothing to cross-check: hand out a private buffer.
-		return make([]float32, n)
-	}
-	i := c.thread.seq
-	c.thread.seq++
-
-	c.block.mu.Lock()
-	defer c.block.mu.Unlock()
-	for len(c.block.slabs) <= i {
-		c.block.slabs = append(c.block.slabs, slab{})
-	}
-	s := &c.block.slabs[i]
-	if !s.alloc {
-		s.alloc, s.size, s.buf = true, n, make([]float32, n)
-		return s.buf
-	}
-	if s.size != n {
-		c.block.reportLocked(fmt.Sprintf(
-			"gpu: SharedF32 size mismatch at call #%d of block %d: an earlier thread asked for %d element(s), thread %d asked for %d. "+
-				"Shared memory is sized once per block, so every thread of a block must pass the same (constant) size to the same SharedF32 call.",
-			i, flat(c.bid, c.gdim), s.size, flat(c.tid, c.bdim), n))
-		// Return a private buffer of the size that was actually requested so
-		// the offending thread can run to completion without an out-of-range
-		// panic drowning out the diagnosis above. Its results are meaningless,
-		// but nobody will get to read them: RunCPU panics.
-		return make([]float32, n)
-	}
-	return s.buf
-}
-
 // AssumeBlockDim declares the block size this kernel was written for.
 //
 // Kernels routinely size their shared memory against a block size baked into
@@ -194,22 +156,10 @@ func (c Ctx) AssumeBlockDim(n int) {
 }
 
 // threadState is the per-thread bookkeeping the emulator needs. seq is the
-// number of SharedF32 calls this thread has made so far, which doubles as the
-// index of its next call; comparing the final values across a block is how
+// number of shared-tile calls this thread has made so far, which doubles as
+// the index of its next call; comparing the final values across a block is how
 // divergent shared-memory usage is detected.
 type threadState struct{ seq int }
-
-// slab is one shared buffer of a block together with the size it was created
-// with. Keeping the size is what allows a later thread that asks for a
-// different size at the same call index to be diagnosed rather than silently
-// handed a buffer of the wrong length. alloc is tracked separately because a
-// legitimately empty slab (n == 0) is indistinguishable from an unused one by
-// looking at buf alone.
-type slab struct {
-	buf   []float32
-	size  int
-	alloc bool
-}
 
 // blockState is the state the threads of one block share.
 //
@@ -222,11 +172,18 @@ type slab struct {
 // block runs to completion, and RunCPU re-raises the first recorded diagnosis
 // as a panic on its own caller's goroutine — loud, and catchable by both the
 // kernel author's recover and a test's.
+//
+// dyn is how many elements the launch sized the dynamic tile for, and dynSized
+// says that it sized one at all. The two are separate because zero is a size a
+// launch may legitimately give, while "this launch never mentioned a dynamic
+// tile" is the contract violation dynamicTile reports.
 type blockState struct {
-	bar   *barrier
-	mu    sync.Mutex
-	slabs []slab
-	fail  string
+	bar      *barrier
+	mu       sync.Mutex
+	slabs    []slab
+	dyn      int
+	dynSized bool
+	fail     string
 }
 
 // report records a contract violation. The first one wins: later violations
@@ -249,14 +206,14 @@ func (s *blockState) reportLocked(msg string) {
 // Blocks run concurrently and in no particular order, which is what CUDA
 // guarantees too, so `go test -race` reports genuine inter-block races.
 // Threads within a block are goroutines sharing a real barrier, so
-// SyncThreads and SharedF32 behave as they do on the device.
+// SyncThreads and the shared tiles behave as they do on the device.
 //
 // This is a debugging and correctness tool, not a fast CPU backend: a
 // goroutine per thread is nothing like a warp. Benchmarks should compare
 // against an ordinary Go loop instead.
 //
 // RunCPU panics if the kernel violates the block-level contract the emulator
-// can check (see SharedF32 and AssumeBlockDim) or if the kernel itself panics
+// can check (see sharedTile and AssumeBlockDim) or if the kernel itself panics
 // on one of its thread goroutines. The panic is raised here, on RunCPU's own
 // caller's goroutine, rather than where the problem was found, so that it is
 // recoverable and testable instead of terminating the process from a goroutine
@@ -271,6 +228,39 @@ func RunCPU(grid, block int, fn func(Ctx)) {
 // a block are one goroutine each, exactly as in the one-dimensional case: the
 // only thing that changes is how many there are and what coordinates they see.
 func RunCPUDim(grid, block Dim, fn func(Ctx)) {
+	runCPU(grid, block, dynSize{}, fn)
+}
+
+// RunCPUShared is RunCPU for a kernel that declares a dynamic shared tile,
+// giving that tile a length of n elements.
+//
+// n is an element count, not a byte count, exactly as in Kernel.LaunchShared:
+// how wide an element is belongs to the emitter on one backend and to the Go
+// type on this one, and neither is the caller's business.
+func RunCPUShared(grid, block, n int, fn func(Ctx)) {
+	RunCPUSharedDim(D1(grid), D1(block), n, fn)
+}
+
+// RunCPUSharedDim is RunCPUShared over a grid of any rank.
+func RunCPUSharedDim(grid, block Dim, n int, fn func(Ctx)) {
+	runCPU(grid, block, dynSize{n: n, given: true}, fn)
+}
+
+// dynSize is the dynamic tile's length as the launch gave it, if it gave one.
+// It travels as a value rather than as two parameters so that runCPU cannot be
+// called with a size nobody asked for.
+type dynSize struct {
+	n     int
+	given bool
+}
+
+func runCPU(grid, block Dim, dyn dynSize, fn func(Ctx)) {
+	if dyn.given && dyn.n < 0 {
+		// Raised here rather than recorded, because this one is the caller's
+		// mistake rather than a thread's, and this is already the caller's
+		// goroutine. Kernel.LaunchShared refuses the same thing.
+		panic(fmt.Sprintf("gpu: RunCPUShared was given %d elements for the dynamic tile, which is not a size", dyn.n))
+	}
 	if grid.X <= 0 || grid.Y <= 0 || grid.Z <= 0 {
 		return
 	}
@@ -304,7 +294,7 @@ func RunCPUDim(grid, block Dim, fn func(Ctx)) {
 				if stop {
 					continue
 				}
-				if msg := runBlock(b, grid, block, fn); msg != "" {
+				if msg := runBlock(b, grid, block, dyn, fn); msg != "" {
 					failMu.Lock()
 					if fail == "" {
 						fail = msg
@@ -326,12 +316,12 @@ func RunCPUDim(grid, block Dim, fn func(Ctx)) {
 // violation it observed, or "" if the block was well behaved. It returns the
 // diagnosis rather than panicking because it runs on one of RunCPU's worker
 // goroutines, which is no more recoverable than a thread goroutine is.
-func runBlock(bid int, grid, block Dim, fn func(Ctx)) string {
+func runBlock(bid int, grid, block Dim, dyn dynSize, fn func(Ctx)) string {
 	n := block.count()
-	st := &blockState{bar: newBarrier(n)}
+	st := &blockState{bar: newBarrier(n), dyn: dyn.n, dynSized: dyn.given}
 
 	// The thread states outlive the goroutines that use them: after the block
-	// has finished, their seq counters say how many SharedF32 calls each
+	// has finished, their seq counters say how many shared-tile calls each
 	// thread made, and those counts must agree.
 	threads := make([]*threadState, n)
 	for t := range n {
@@ -369,7 +359,7 @@ func runBlock(bid int, grid, block Dim, fn func(Ctx)) string {
 }
 
 // divergence reports whether the threads of a finished block disagreed about
-// how many SharedF32 calls to make. Since calls are matched by execution
+// how many shared-tile calls to make. Since calls are matched by execution
 // order, a thread that skipped one shares the wrong buffer with everybody from
 // that point on, which is a wrong answer rather than a crash — hence the
 // check.
@@ -381,8 +371,8 @@ func divergence(bid int, threads []*threadState) string {
 	for t, ts := range threads {
 		if ts.seq != want {
 			return fmt.Sprintf(
-				"gpu: divergent SharedF32 usage in block %d: thread 0 made %d SharedF32 call(s), thread %d made %d. "+
-					"Shared buffers are matched across threads by call order, so every thread of a block must reach every SharedF32 call; "+
+				"gpu: divergent shared tile usage in block %d: thread 0 made %d shared tile call(s), thread %d made %d. "+
+					"Shared buffers are matched across threads by call order, so every thread of a block must reach every one; "+
 					"hoist the call out of the conditional that threads disagree about.",
 				bid, want, t, ts.seq)
 		}

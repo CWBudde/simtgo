@@ -15,13 +15,14 @@ import (
 // kernel, registered from the generated file's init so that Build can load it
 // instead of calling NVRTC.
 type Prebuilt struct {
-	Name          string // the kernel's Go function name, for diagnostics only
-	SourceSHA256  string // lower.SourceHash of the generated CUDA C; the registry key
-	Arch          string // the virtual arch NVRTC targeted, e.g. "compute_75"
-	PTX           []byte
-	RequiredBlock int
-	SharedBytes   int
-	Log           string // NVRTC's log at generate time; usually empty
+	Name           string // the kernel's Go function name, for diagnostics only
+	SourceSHA256   string // lower.SourceHash of the generated CUDA C; the registry key
+	Arch           string // the virtual arch NVRTC targeted, e.g. "compute_75"
+	PTX            []byte
+	RequiredBlock  int
+	SharedBytes    int
+	DynSharedWidth int
+	Log            string // NVRTC's log at generate time; usually empty
 }
 
 // The registry is keyed on the source hash alone, and the kernel's name is

@@ -80,9 +80,9 @@ func (t *transpiler) assign(s *ast.AssignStmt) {
 			t.fail(s.Pos(), "unsupported declaration target %T", lhs)
 			return
 		}
-		if n, isShared, ok := t.sharedSize(rhs); isShared {
+		if req, isShared, ok := t.sharedCall(rhs); isShared {
 			if ok {
-				t.shared(id, n, s.Pos())
+				t.shared(id, req, s.Pos())
 			} else {
 				t.poison(t.info.Defs[id])
 			}
@@ -146,18 +146,59 @@ func (t *transpiler) returnStmt(s *ast.ReturnStmt) {
 	t.line("return %s;", t.expr(s.Results[0]).s)
 }
 
-// shared declares a block's __shared__ tile of n float32 values.
-func (t *transpiler) shared(id *ast.Ident, n int, pos token.Pos) {
-	if t.inDevice {
-		// A tile belongs to the block, and both its size and the block size it
-		// implies are accounted on the kernel -- which is what Build and
-		// Launch enforce. A device function has no launch to make promises
-		// about.
-		t.fail(pos, "shared memory may only be declared in a kernel, not in a device function")
-		return
-	}
+// sharedElems is package gpu's shared-tile vocabulary: the constructor's name,
+// and the Go element type of the tile it hands back.
+//
+// Everything else about a tile is derived from that one entry -- the C element
+// type through ctypeElem, the width through the same types.Sizes the rest of
+// the emitter measures with -- so a new element type is a row here and nothing
+// else. That is also what makes SharedF64 need //gocuda:float64 without a rule
+// of its own: ctypeElem refuses float64 on a kernel that did not opt in,
+// wherever the type came from, so membership of the double-precision
+// vocabulary is what demands the permission rather than a second list that a
+// later name could be left off.
+var sharedElems = map[string]types.BasicKind{
+	"SharedF32": types.Float32,
+	"SharedF64": types.Float64,
+	"SharedI32": types.Int32,
+	"SharedI64": types.Int64,
+	"SharedU32": types.Uint32,
+	"SharedU64": types.Uint64,
+}
+
+// sharedDynElems is the same vocabulary for the tile CUDA sizes at the launch.
+var sharedDynElems = map[string]types.BasicKind{
+	"SharedDynF32": types.Float32,
+	"SharedDynF64": types.Float64,
+	"SharedDynI32": types.Int32,
+	"SharedDynI64": types.Int64,
+	"SharedDynU32": types.Uint32,
+	"SharedDynU64": types.Uint64,
+}
+
+// sharedReq is one recognised shared-tile call: which constructor, what the
+// tile holds, how long it is, and whether the launch is what says so.
+type sharedReq struct {
+	name    string
+	elem    types.BasicKind
+	n       int // the element count, and meaningless when dynamic
+	dynamic bool
+}
+
+// shared declares a block's __shared__ tile.
+//
+// It is allowed in a device function as well as in a kernel. __shared__ inside
+// a __device__ function is block-scoped storage that CUDA allocates once for
+// the function, not once per call, and the accounting below follows suit
+// because deviceFunc emits each function exactly once however many calls reach
+// it. AssumeBlockDim stays refused there, because that one is a promise about
+// a launch rather than a piece of storage.
+func (t *transpiler) shared(id *ast.Ident, req sharedReq, pos token.Pos) {
 	if t.ind != 1 {
-		t.fail(pos, "shared memory must be declared at the top level of the kernel")
+		// The top level of the enclosing function, which is the kernel's body
+		// or a device function's: a tile declared inside a conditional is one
+		// the threads of a block could disagree about.
+		t.fail(pos, "shared memory must be declared at the top level of the function")
 		return
 	}
 	obj := t.info.Defs[id]
@@ -165,47 +206,119 @@ func (t *transpiler) shared(id *ast.Ident, n int, pos token.Pos) {
 		t.fail(id.Pos(), "%s has no resolved type", id.Name)
 		return
 	}
-	t.line("__shared__ float %s[%d];", cname(id.Name), n)
-	t.lens[obj] = strconv.Itoa(n)
+	elem := types.Typ[req.elem]
+	// ctypeElem rather than ctype: a tile is memory with a stride, so it goes
+	// through the same gate a slice element does -- which is also where
+	// float64 without the directive is refused.
+	ctype := t.ctypeElem(elem, pos)
+	if t.failed() {
+		t.poison(obj)
+		return
+	}
+	name := cname(id.Name)
+	width := int(t.sizes.Sizeof(elem))
+
+	if req.dynamic {
+		t.dynamicShared(obj, name, ctype, width, pos)
+		return
+	}
+	t.line("__shared__ %s %s[%d];", ctype, name, req.n)
+	t.lens[obj] = strconv.Itoa(req.n)
 	// Every block gets its own copy of the tile, so the running total is what
-	// each block will ask the device for. SharedF32 is float32-only, hence the
-	// fixed element size.
-	t.sharedBytes += 4 * n
+	// each block will ask the device for.
+	t.sharedBytes += width * req.n
 }
 
-// sharedSize reports whether e is a ctx.SharedF32(n) call, and if so whether n
-// folded to a constant.
+// dynamicShared declares the tile CUDA sizes at the launch, and records what
+// the host has to be told in order to size it.
+//
+// The length cannot be a constant the way a static tile's is, so it becomes an
+// `int name_len` parameter of the kernel -- the convention a slice parameter
+// already uses -- which Kernel.LaunchShared fills from the element count it
+// was given. Everything downstream, len() included, then reads a tile exactly
+// as it reads a slice.
+func (t *transpiler) dynamicShared(obj types.Object, name, ctype string, width int, pos token.Pos) {
+	if t.inDevice {
+		// A static tile is fine in a device function; this one is not, and the
+		// difference is worth stating rather than leaving as a C identifier
+		// that was never declared. The length is a parameter of the kernel,
+		// and a device function cannot see it.
+		t.fail(pos, "a dynamically sized shared tile may only be declared in a kernel: its length is a launch parameter, which a device function cannot see")
+		return
+	}
+	if t.dynShared != "" {
+		// NVRTC accepts a second `extern __shared__` declaration without a
+		// word -- of a different element type as readily as of the same one --
+		// and every one of them names the same block of memory. Two names that
+		// silently alias is exactly the mistranslation this emitter exists to
+		// refuse, so it is refused here, where there is still a position to
+		// report it against.
+		t.fail(pos, "a kernel may declare at most one dynamically sized shared tile, and %s is already one: CUDA has a single dynamic __shared__ block per launch, so a second name would be another view of the same bytes", t.dynShared)
+		return
+	}
+	lenName := name + "_len"
+	if who, taken := t.sigNames[lenName]; taken {
+		t.fail(pos, "the length generated for dynamic shared tile %s collides with %s; rename one of them", name, who)
+		return
+	}
+	t.line("extern __shared__ %s %s[];", ctype, name)
+	t.lens[obj] = lenName
+	t.dynShared, t.dynSharedLen, t.dynSharedWidth = name, lenName, width
+}
+
+// sharedCall reports whether e is one of package gpu's shared-tile
+// constructors, and if so whether the call was well formed.
 //
 // The two answers have to be separate. "Not a shared buffer" sends the caller
-// down the ordinary declaration path; "a shared buffer whose size I have
-// already complained about" must not, because that path would go on to reject
-// the []float32 it declares as a type the device has no answer for -- a second
+// down the ordinary declaration path; "a shared buffer I have already
+// complained about" must not, because that path would go on to reject the
+// []float32 it declares as a type the device has no answer for -- a second
 // diagnostic, about a different thing, for one mistake.
-func (t *transpiler) sharedSize(e ast.Expr) (n int, isShared, ok bool) {
+func (t *transpiler) sharedCall(e ast.Expr) (req sharedReq, isShared, ok bool) {
 	call, callOK := unparen(e).(*ast.CallExpr)
 	if !callOK {
-		return 0, false, false
+		return req, false, false
 	}
 	sel, selOK := unparen(call.Fun).(*ast.SelectorExpr)
 	if !selOK {
-		return 0, false, false
+		return req, false, false
 	}
 	s := t.info.Selections[sel]
-	if s == nil || s.Kind() != types.MethodVal || !IsCtx(s.Recv()) || s.Obj().Name() != "SharedF32" {
-		return 0, false, false
+	if s == nil || s.Kind() != types.MethodVal || !IsCtx(s.Recv()) {
+		return req, false, false
+	}
+	name := s.Obj().Name()
+	if elem, isDyn := sharedDynElems[name]; isDyn {
+		if len(call.Args) != 0 {
+			t.fail(call.Pos(), "%s takes no arguments; the launch is what gives its length", name)
+			return req, true, false
+		}
+		return sharedReq{name: name, elem: elem, dynamic: true}, true, true
+	}
+	elem, isStatic := sharedElems[name]
+	if !isStatic {
+		return req, false, false
 	}
 	if len(call.Args) != 1 {
-		t.fail(call.Pos(), "SharedF32 takes one argument")
-		return 0, true, false
+		t.fail(call.Pos(), "%s takes one argument", name)
+		return req, true, false
 	}
 	n, constOK := t.constInt(call.Args[0])
 	if !constOK {
 		// A __shared__ array needs a compile-time extent, so this has to be
-		// reported rather than silently mistranslated.
-		t.fail(call.Pos(), "SharedF32 needs a constant size (got a runtime value)")
-		return 0, true, false
+		// reported rather than silently mistranslated. A length only the host
+		// knows is what the SharedDyn constructors are for, and saying so is
+		// more use than naming the rule alone.
+		t.fail(call.Pos(), "%s needs a constant size (got a runtime value); use %s, whose length the launch gives", name, dynSpelling(name))
+		return req, true, false
 	}
-	return n, true, true
+	return sharedReq{name: name, elem: elem, n: n}, true, true
+}
+
+// dynSpelling names the launch-sized constructor of the same element type, so
+// that refusing a runtime size can also say what to write instead.
+func dynSpelling(static string) string {
+	return "SharedDyn" + strings.TrimPrefix(static, "Shared")
 }
 
 // refuseArrayValue reports, and refuses, an expression whose type is an array

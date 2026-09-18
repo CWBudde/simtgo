@@ -27,10 +27,17 @@ type Kernel struct {
 	// answers the same question: what this PTX targets.
 	Arch string
 
-	// RequiredBlock and SharedBytes are what the kernel's source demands of a
-	// launch; see Unit.
-	RequiredBlock int
-	SharedBytes   int
+	// RequiredBlock, SharedBytes and DynSharedWidth are what the kernel's
+	// source demands of a launch; see Unit.
+	RequiredBlock  int
+	SharedBytes    int
+	DynSharedWidth int
+
+	// maxShared is what the device this kernel was built for offers per block,
+	// or 0 when there was nobody to ask. It is kept because a dynamic tile is
+	// sized at the launch rather than at Build, so that is the only place the
+	// total can be checked against the limit at all.
+	maxShared int
 
 	fn *cuda.Function
 }
@@ -110,15 +117,17 @@ func Build(dev *cuda.Context, fsys fs.FS, name string, opts ...BuildOption) (*Ke
 		return nil, err
 	}
 	k := &Kernel{
-		Name:          name,
-		Source:        u.Source,
-		PTX:           res.PTX,
-		Log:           res.Log,
-		Prebuilt:      res.Prebuilt,
-		Arch:          res.Arch,
-		RequiredBlock: u.RequiredBlock,
-		SharedBytes:   u.SharedBytes,
-		fn:            res.Func,
+		Name:           name,
+		Source:         u.Source,
+		PTX:            res.PTX,
+		Log:            res.Log,
+		Prebuilt:       res.Prebuilt,
+		Arch:           res.Arch,
+		RequiredBlock:  u.RequiredBlock,
+		SharedBytes:    u.SharedBytes,
+		DynSharedWidth: u.DynSharedWidth,
+		maxShared:      dev.MaxSharedMemPerBlock(),
+		fn:             res.Func,
 	}
 	if res.Prebuilt {
 		// Log is documented as NVRTC's compiler log, so on this path it holds
@@ -155,6 +164,27 @@ func (e *BlockSizeError) Error() string {
 	return fmt.Sprintf("simt: %s requires block == %d, got %d", e.Kernel, e.Want, e.Got)
 }
 
+// DynamicSharedError is a launch whose spelling does not match how the kernel
+// declares its shared memory.
+//
+// The two are separate calls rather than one with an optional size because the
+// mismatch is silent either way round: a kernel with a dynamic tile launched
+// through Launch gets zero bytes of it and reads off the end of nothing, and a
+// kernel without one launched through LaunchShared is handed a size for a tile
+// it does not have, plus an argument its signature has no parameter for. Both
+// are refused here, where the kernel's own answer is at hand.
+type DynamicSharedError struct {
+	Kernel  string
+	Dynamic bool // whether the kernel declares a dynamic tile
+}
+
+func (e *DynamicSharedError) Error() string {
+	if e.Dynamic {
+		return fmt.Sprintf("simt: %s declares a dynamically sized shared tile; launch it with LaunchShared, which sizes it", e.Kernel)
+	}
+	return fmt.Sprintf("simt: %s declares no dynamically sized shared tile; launch it with Launch", e.Kernel)
+}
+
 // Launch runs the kernel over grid blocks of block threads. Arguments are
 // given as Go values -- device slices, float32, int32 -- in the same order as
 // the Go kernel's parameters, minus the gpu.Ctx.
@@ -173,6 +203,58 @@ func (k *Kernel) Launch(grid, block int, args ...any) error {
 // AssumeBlockDim says how many threads fill a shared tile, not how they are
 // arranged, so a 16x16 block satisfies AssumeBlockDim(256).
 func (k *Kernel) LaunchDim(grid, block cuda.Dim3, args ...any) error {
+	if k.DynSharedWidth != 0 {
+		return &DynamicSharedError{Kernel: k.Name, Dynamic: true}
+	}
+	return k.launch(grid, block, 0, args)
+}
+
+// LaunchN runs the kernel over enough blocks to cover n threads. Kernels guard
+// against the ragged tail themselves, exactly as in CUDA C.
+func (k *Kernel) LaunchN(n, block int, args ...any) error {
+	return k.Launch((n+block-1)/block, block, args...)
+}
+
+// LaunchShared runs a kernel that declares a dynamically sized shared tile,
+// giving that tile n elements.
+//
+// n is an element count and not a byte count on purpose. How wide an element
+// is was decided when the kernel was lowered -- it is the thing the emitter
+// knows and the caller would have to look up -- so the multiplication happens
+// here, against the width the Unit carries, rather than at every launch site.
+// The same count reaches the kernel as the length its len() reads, which is
+// why the two can never disagree.
+func (k *Kernel) LaunchShared(grid, block, n int, args ...any) error {
+	return k.LaunchSharedDim(cuda.D1(grid), cuda.D1(block), n, args...)
+}
+
+// LaunchSharedDim is LaunchShared over a grid of any rank.
+func (k *Kernel) LaunchSharedDim(grid, block cuda.Dim3, n int, args ...any) error {
+	if k.DynSharedWidth == 0 {
+		return &DynamicSharedError{Kernel: k.Name}
+	}
+	if n < 0 {
+		return fmt.Errorf("simt: %s: a shared tile of %d elements is not a size", k.Name, n)
+	}
+	dynBytes := n * k.DynSharedWidth
+	// The same check Build makes, and it has to be made again: this is the
+	// first moment the dynamic half of the total exists. cuLaunchKernel would
+	// refuse it too, with a generic error code and neither number in it.
+	if total := k.SharedBytes + dynBytes; k.maxShared > 0 && total > k.maxShared {
+		return &SharedMemoryError{Kernel: k.Name, Bytes: total, Limit: k.maxShared}
+	}
+	// The length is the last parameter of the generated signature, which is
+	// where the emitter appends it, so it goes last here too. Into a slice of
+	// its own, because appending to args would write into the caller's backing
+	// array whenever they passed one with room to spare.
+	full := make([]any, 0, len(args)+1)
+	full = append(append(full, args...), int32(n))
+	return k.launch(grid, block, dynBytes, full)
+}
+
+// launch is the half both spellings share: the block-size contract, the
+// argument marshalling, and the launch itself.
+func (k *Kernel) launch(grid, block cuda.Dim3, dynBytes int, args []any) error {
 	threads := int(block.X) * int(block.Y) * int(block.Z)
 	if k.RequiredBlock != 0 && threads != k.RequiredBlock {
 		return &BlockSizeError{Kernel: k.Name, Want: k.RequiredBlock, Got: threads}
@@ -181,11 +263,5 @@ func (k *Kernel) LaunchDim(grid, block cuda.Dim3, args ...any) error {
 	if err != nil {
 		return err
 	}
-	return k.fn.LaunchSync(grid, block, 0, flat...)
-}
-
-// LaunchN runs the kernel over enough blocks to cover n threads. Kernels guard
-// against the ragged tail themselves, exactly as in CUDA C.
-func (k *Kernel) LaunchN(n, block int, args ...any) error {
-	return k.Launch((n+block-1)/block, block, args...)
+	return k.fn.LaunchSync(grid, block, dynBytes, flat...)
 }

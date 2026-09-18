@@ -65,3 +65,31 @@ func AtomicOnAnExpression(ctx gpu.Ctx, h []int32) {
 func Float64MathWithoutTheDirective(ctx gpu.Ctx, a []float32) {
 	a[0] = float32(gpu.Sqrt64(2)) // want `is double precision and needs //gocuda:float64`
 }
+
+// A kernel has one dynamic __shared__ block, so a second name for it would be
+// another view of the same bytes -- which NVRTC accepts without a word.
+func TwoDynamicTiles(ctx gpu.Ctx, y []float32) {
+	a := ctx.SharedDynF32()
+	b := ctx.SharedDynI32() // want `at most one dynamically sized shared tile`
+	y[0] = a[0] + float32(b[0])
+}
+
+// The dynamic tile's length is a parameter of the kernel, which a device
+// function cannot see. A statically sized tile there is fine.
+//
+//gocuda:ignore
+func dynStage(ctx gpu.Ctx) float32 {
+	s := ctx.SharedDynF32() // want `may only be declared in a kernel`
+	return s[0]
+}
+
+func DynamicTileInADeviceFunction(ctx gpu.Ctx, y []float32) {
+	y[0] = dynStage(ctx)
+}
+
+// A tile of doubles is double-precision vocabulary like any other, so it needs
+// the directive even though the kernel writes no float64 down.
+func Float64Tile(ctx gpu.Ctx, y []float32) {
+	s := ctx.SharedF64(4) // want `float64 needs //gocuda:float64`
+	y[0] = float32(s[0])
+}

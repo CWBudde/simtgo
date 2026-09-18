@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -55,7 +56,23 @@ func GPUPackage() *types.Package {
 		method(name, nil, ret(intT))
 	}
 	method("SyncThreads", nil, nil)
-	method("SharedF32", []*types.Var{types.NewVar(token.NoPos, pkg, "n", intT)}, ret(f32Slice))
+
+	// The shared tiles are declared straight from the tables the emitter
+	// lowers them with, rather than listed again here. A name in one and not
+	// the other is a kernel that type-checks and cannot be transpiled, or a
+	// lowering for a method nothing can call, and spelling the set twice is
+	// how that would eventually happen. The keys are sorted only so that the
+	// synthetic package is built the same way twice.
+	for _, name := range sortedKeys(sharedElems) {
+		slice := types.NewSlice(types.Typ[sharedElems[name]])
+		method(name, []*types.Var{types.NewVar(token.NoPos, pkg, "n", intT)}, ret(slice))
+	}
+	// The dynamic ones take no argument: their length comes from the launch,
+	// which is also why a kernel may declare at most one of them.
+	for _, name := range sortedKeys(sharedDynElems) {
+		slice := types.NewSlice(types.Typ[sharedDynElems[name]])
+		method(name, nil, ret(slice))
+	}
 	// AssumeBlockDim yields nothing on either backend: on the CPU it is a
 	// check, on the device it lowers to no code at all. It is declared here
 	// all the same, because the transpiler has to see the call to learn which
@@ -132,6 +149,17 @@ func GPUPackage() *types.Package {
 
 	pkg.MarkComplete()
 	return pkg
+}
+
+// sortedKeys is map iteration made repeatable, so that building the synthetic
+// package twice produces the same thing twice.
+func sortedKeys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // SynthImporter serves package gpu from memory and refuses everything else,

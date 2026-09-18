@@ -169,9 +169,9 @@ func TestDivergentSharedF32(t *testing.T) {
 		})
 	})
 	wantContains(t, msg,
-		"divergent SharedF32 usage",
+		"divergent shared tile usage",
 		"block 0",
-		"thread 0 made 2 SharedF32 call(s), thread 1 made 1")
+		"thread 0 made 2 shared tile call(s), thread 1 made 1")
 }
 
 // TestAssumeBlockDimMismatch proves that a kernel written for a fixed block
