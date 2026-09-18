@@ -24,7 +24,7 @@ GOCUDA_UPDATE=1 go test -run TestGolden ./simt/   # refresh simt/testdata/*.cu g
 
 go run ./cmd/gocuda vet ./kernels    # refuse kernels that cannot be lowered
 go vet -vettool=$(which gocuda) ./...
-go run ./cmd/gocuda generate -check  # are the committed artifacts current? (CI check)
+go run ./cmd/gocuda generate -check  # is the committed CUDA C current? (CI check)
 go generate ./...                    # regenerate kernels/prebuilt (needs NVRTC)
 go run ./cmd/gocuda generate -pkg ./kernels -out ./kernels/prebuilt -no-ptx   # no toolkit
 
@@ -91,8 +91,10 @@ analyzer — put it in `lower` and both get it.
   compares it against the real package: **adding anything to `gpu` means
   adding it to `gpupkg.go` too**, or kernels can call it in Go and fail to
   transpile.
-- A kernel is any function whose first parameter is `gpu.Ctx`. `//gocuda:ignore`
-  in a doc comment (or a file's package comment) opts out.
+- A kernel is any function whose first parameter is `gpu.Ctx`. `//gocuda:device`
+  in a doc comment says it is a helper rather than a kernel, and is refused on a
+  function taking no `gpu.Ctx`; `//gocuda:ignore`, in a doc comment or a file's
+  package comment, opts out entirely.
 - `Unit.SourceHash` hashes the _generated CUDA C_, not the Go source. That is
   the whole staleness story: a prebuilt is filed under it, so an artifact built
   from anything else is simply not found and `Build` falls back to NVRTC.
@@ -143,7 +145,7 @@ reference, so a shared misunderstanding cannot pass as agreement.
   emitted into the same translation unit as a `__device__` function. That is
   why `lower.Kernel` takes the package's files and not just the entry point.
   Recursion is refused, and so is calling a kernel — a function taking a
-  `gpu.Ctx` is one, unless it carries `//gocuda:ignore`.
+  `gpu.Ctx` is one, unless it carries `//gocuda:device` or `//gocuda:ignore`.
 - Kernel packages may import **only** `github.com/CWBudde/gocuda/gpu`. The
   device types are `float32`, `float64` (opt-in), `int32`, `int64`, `uint32`,
   `uint64` and `bool`, plus named structs and fixed-size arrays of those.
@@ -176,8 +178,12 @@ reference, so a shared misunderstanding cannot pass as agreement.
 4. `go generate ./...` (or `gocuda generate -no-ptx` without a toolkit).
 5. Add it to the list in `simt/transpile_test.go`'s `TestGolden` and run with
    `GOCUDA_UPDATE=1` to create `simt/testdata/<Name>.cu`.
-6. Add a CPU/GPU parity test in `simt/parity_test.go` with an independent Go
+6. Add it to the list in `simt/nvrtc_cuda_test.go`'s `TestGeneratedCCompiles`.
+7. Add a CPU/GPU parity test in `simt/parity_test.go` with an independent Go
    reference.
+
+The kernel's name is spelled in **four** places (the gate plus steps 3, 5 and 6) and they are the usual thing to get wrong — and the usual conflict when two
+branches each add a kernel.
 
 Changing the emitter changes every `SourceHash`, so goldens _and_
 `kernels/prebuilt/` both need regenerating.

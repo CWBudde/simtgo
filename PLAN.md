@@ -15,15 +15,20 @@ version, one OS, one Go version**.
 
 What the PoC is not:
 
-|              | Current                                                    | Needed                                       |
-| ------------ | ---------------------------------------------------------- | -------------------------------------------- |
-| Driver API   | 18 calls, fully synchronous                                | streams, events, async copies, pinned memory |
-| Grids        | ~~1-D only~~ 1-D/2-D/3-D                                   | —                                            |
-| Types        | ~~`float32`, `int32`/`int`~~ scalars, structs, arrays      | narrow integers                              |
-| Kernel calls | ~~none~~ `__device__` functions, recursion refused         | —                                            |
-| Errors       | surface at **run time**, inside `main()`                   | at **build time**                            |
-| Toolchain    | ~~hard-coded `/usr/local/cuda`~~ run-time `dlopen`, no cgo | Windows                                      |
-| Tile ops     | 7, one windowed, no reductions                             | reductions, 2-D, fusion planning             |
+|              | Current                                                                    | Needed                                       |
+| ------------ | -------------------------------------------------------------------------- | -------------------------------------------- |
+| Driver API   | 18 calls, fully synchronous                                                | streams, events, async copies, pinned memory |
+| Grids        | ~~1-D only~~ 1-D/2-D/3-D                                                   | —                                            |
+| Types        | ~~`float32`, `int32`/`int`~~ scalars, structs, arrays, ~~narrow integers~~ | —                                            |
+| Kernel calls | ~~none~~ `__device__` functions, recursion refused                         | —                                            |
+| Errors       | surface at **run time**, inside `main()`                                   | at **build time**                            |
+| Toolchain    | ~~hard-coded `/usr/local/cuda`~~ run-time `dlopen`, no cgo                 | Windows                                      |
+| Tile ops     | 7, one windowed, no reductions                                             | reductions, 2-D, fusion planning             |
+
+Phase 2 is closed but for fast math and the tuple ABI: shared memory is typed
+and dynamically sized, the warp vocabulary is in, pointers carry `const` and
+`__restrict__` with the aliasing promise checked rather than assumed, and the
+narrow integers are storage. Thirteen kernels now, up from nine.
 
 ## The decision that gates everything else
 
@@ -367,16 +372,64 @@ Phase 3, so pulling it forward would be doing that item, not this one.
             what the device is asked to execute, so the check belongs on the
             call. Membership of `gpuFuncs64` is what requires the directive,
             which keeps a name added later from quietly escaping it.
-      - [ ] **Narrow integer storage** — `[]uint8` image buffers and the like.
-            The widths already agree; the arithmetic does not, because C
-            promotes to `int` and Go does not. The honest design is a
-            storage-only type that forces a conversion to `int32` before any
-            operator, which is a feature rather than a line in a switch.
-      - [ ] **Array-typed struct fields.** Refused today because `sizeof` and
-            `alignof` cannot say where inside the struct the array begins.
-            Lifting it belongs with offset checking, not with the field rule.
+      - [x] **Narrow integer storage** — `[]uint8` image buffers and the like.
+            (2026-09-18) — built as the line above describes: the four types
+            are accepted in `ctypeElem` and nowhere else, so they may be a
+            slice element, an array element or a struct field and never a
+            variable, a parameter or a result, and every operator on one is
+            refused. `kernels.Gray` is the motivating case made real, 8-bit RGB
+            to 8-bit luma with the arithmetic at `int32`.
 
-- [ ] **Shared memory.** Typed (`SharedI32`, …) and dynamically sized at launch.
+            Some of those operators do agree — compound assignment and `++`
+            truncate at the store in both languages, as do comparisons, `/` and
+            `%`. They are refused anyway, and the messages say which ones agree
+            rather than claiming a disagreement a reader could not reproduce.
+            A rule that holds for every operator is one somebody can keep in
+            their head, and relaxing a refusal later costs a line where
+            retracting an acceptance costs a release.
+      - [x] **Array-typed struct fields.** (2026-09-18) — and the field rule
+            was indeed not the work: offset checking was. Every hole Go leaves
+            is now declared as a `gocuda_padN` member, the trailing one
+            included, which is what makes the existing `sizeof` assertion
+            _imply_ the offsets instead of merely agreeing with them. With
+            every hole spelled out the members account for exactly Go's size,
+            and C++ lays each member at or after the end of the one before it,
+            so the size can only match if nothing further was inserted. The
+            trailing member is load-bearing rather than tidy: without it a byte
+            inserted earlier could hide in the end slack.
+
+            What the measurement settled, against expectation: this fixes no
+            disagreement anybody could observe. NVRTC inserts exactly the holes
+            Go does, so the assertions passed before the padding existed, and a
+            struct that would fail without it does not exist on a conforming
+            C++ ABI. The mechanism is shown to have teeth the other way round —
+            one byte too _much_ padding is rejected. `offsetof`,
+            `__builtin_offsetof` and `#include <cstddef>` were re-measured
+            against 12.9 and are all still unavailable, so the repository's
+            standing claim about NVRTC holds.
+
+- [x] **Shared memory.** Typed (`SharedI32`, …) and dynamically sized at
+      launch. (2026-09-18) — six constructors, one per scalar the device has
+      except `bool`, driven by one table and sized through `types.Sizes` so no
+      width is written down twice; `SharedF64` inherits the `//gocuda:float64`
+      permission structurally, through `ctypeElem`, rather than by a second
+      list somebody would have to remember. A dynamic tile is spelled without a
+      size, lowers to `extern __shared__`, and carries its length as a
+      generated parameter the launch fills — the same convention a slice
+      already uses. `Kernel.LaunchShared` takes an element count, because bytes
+      are the emitter's business; `gpu.RunCPUShared` is the emulator's half.
+      `kernels.Histogram` is the demonstration, and it is also the proof that
+      atomics work on a tile, which fell out of `t.lens` membership rather than
+      needing anything new.
+
+      One measurement changed a design: **NVRTC accepts a second
+      `extern __shared__` declaration without a word**, of a different element
+      type as readily as of the same one, and every one of them names the same
+      bytes. Two names that silently alias is exactly what this emitter exists
+      to refuse, so "at most one dynamic tile" is enforced here, with a
+      position — and the comment says NVRTC is not the backstop, because it
+      will not object.
+
 - [x] **Atomics.** `atomicAdd`/`Min`/`Max`/`CAS`, with a Go-side vocabulary
       that the emulator implements faithfully. (2026-09-18) — `AtomicAddF32`,
       `AtomicAddI32`, `AtomicMinI32`, `AtomicMaxI32`, `AtomicExchI32` and
@@ -413,8 +466,35 @@ Phase 3, so pulling it forward would be doing that item, not this one.
       makes `TestAtomicPanicDoesNotStrandTheLock` hang until the test timeout,
       which is the only way that bug ever announces itself.
 
-- [ ] **Warp-level primitives.** Shuffle, ballot, `__activemask`, warp
-      reductions — the basis of every fast reduction.
+- [x] **Warp-level primitives.** Shuffle, ballot, `__activemask`.
+      (2026-09-18) — the shuffles in four directions for `float32` and `int32`,
+      `Ballot`, `Any`, `All`, `ActiveMask`, `SyncWarp`, `LaneID`, and
+      `gpu.WarpSize`. **NVRTC declares every one of them with no header
+      included**, measured one spelling at a time rather than assumed, so the
+      vocabulary did not have to shrink. "Warp reductions" in the library sense
+      is _not_ done: `kernels.WarpReduceSum` is a kernel, and the Phase 6
+      reductions item now has the pieces it needs.
+
+      They are `Ctx` methods rather than package functions, and that is forced
+      rather than stylistic: a warp primitive is defined by *which* thread
+      calls it, and a package-level Go function cannot learn which goroutine is
+      calling. The atomics can be package-level precisely because they are
+      handed the memory they work on.
+
+      No mask argument, for the reason the atomics take a buffer and an index:
+      it keeps one Go name mapping to one built-in and gives the contract
+      something checkable. The cost is stated rather than hidden — in a block
+      that is not a multiple of 32 the emitted `0xffffffff` names lanes that do
+      not exist, which CUDA leaves undefined, so a kernel that depends on whole
+      warps should say so with `AssumeBlockDim`.
+
+      The emulator has no warps to borrow and builds one: a per-warp rendezvous
+      between goroutines that releases when every live participant has either
+      arrived or returned, with a deadline behind it so a thread that never
+      arrives is a diagnosis rather than a hang. It reports two things the
+      device cannot, and its `ActiveMask` is an arrival mask, which is not what
+      the device would answer. Both are named in `gpu`'s package comment.
+
 - [x] **Missing statements.** `switch`, labelled `break`/`continue`,
       `for i, v := range`. (2026-09-17) — `switch` has two lowerings, because
       C's switch and Go's are not the same statement: all-constant cases over
@@ -424,8 +504,25 @@ Phase 3, so pulling it forward would be doing that item, not this one.
       inside that chain is refused, because in C it would leave the enclosing
       loop. Labelled branches lower to a `goto`. `for i, v := range` binds the
       value as the copy Go makes it.
-- [ ] **`const` / `__restrict__`.** Mark non-aliased read-only slice
-      parameters; it is both a correctness contract and a real speed-up.
+- [x] **`const` / `__restrict__`.** (2026-09-18) — every pointer is
+      `__restrict__` and one the kernel never writes through is `const` too,
+      proved across the call graph and conservatively: anything unreadable — an
+      unresolvable call, a cycle, an unnamed parameter — counts as a write,
+      because marking a written parameter `const` is a compile error at best
+      and a wrong answer at worst.
+
+      The contract is **checked rather than asserted**, which is the half that
+      makes the qualifier honest. `Kernel.Launch` compares the device ranges it
+      was handed and refuses an overlap with an `*AliasError`; and the case a
+      launch cannot see — `blend(y, y)`, one Go call becoming two aliased
+      restrict pointers in C — is refused where it is lowered. Two _read-only_
+      parameters may share a buffer deliberately, since `restrict` forbids
+      reaching a *modified* object through another pointer, so `dot(x, x)` is
+      sound and refusing it would cost something for nothing. The CPU emulator
+      cannot check either: it never sees the caller's slices, which arrive
+      through a closure, and there a kernel is ordinary Go where aliasing is
+      defined. That gap is named in `RunCPU`'s doc comment.
+
 - [ ] **Opt-in fast math** and `#pragma unroll` hints for tap-style loops.
 
 Three items done, and one of them started as a bug rather than a feature.
@@ -454,30 +551,117 @@ generated C something a compiler accepts?
 
 What these three left behind, as items rather than as prose:
 
-- [ ] **Multiple assignment**, and with it the tuple-returning
-      `ctx.GlobalID2()` / `ctx.ThreadIdx3()` this phase chose not to build.
-      It is one feature, not two: the emitter needs `a, b := f()` before any
-      intrinsic can return a pair.
-- [ ] **A `//gocuda:device` marker.** A helper that takes a `gpu.Ctx` is a
-      kernel by the signature rule, so calling one needs `//gocuda:ignore` —
-      which says what it is not, rather than what it is.
-- [ ] **Shared memory in a device function.** Refused today, because the size
-      and the block size it implies are accounted on the kernel and enforced
-      at its launch. Lifting that means propagating the accounting through the
-      call graph.
+- [x] **Multiple assignment**, in its parallel form. (2026-09-18) —
+      `a, b = b, a` and `a, b := x, y` lower through one temporary per value,
+      unconditionally: proving the two orders coincide would mean proving no
+      right-hand side reads what an earlier target writes, through calls that
+      may write slices, and C++ deletes a temporary nobody needed while nothing
+      recovers a swap that quietly became a copy. In a `for` clause it stays
+      refused — `simple` yields one C expression, and the temporaries the
+      semantics require are declarations, which C's comma operator cannot
+      carry.
+
+      **The claim this line used to make was wrong in both directions**, and
+      the correction is the useful part. Multiple assignment is *not necessary*
+      for `ctx.GlobalID2()`: `assign` sees the statement before `expr` is ever
+      called, so a pair-returning intrinsic could be destructured there, in the
+      same place `ctx.SharedF32(n)` is already special-cased. And it is *not
+      sufficient*: what a **user** function returning two values needs is
+      out-parameters, which is ABI work this touches nowhere. Implementing the
+      parallel form brought `GlobalID2` no closer, and the two remain separate
+      items rather than one.
+
+      What the work found on its own is the better finding: Go's first phase
+      also evaluates **the index expressions on the left**. `i, y[i] = 2, 7`
+      stores into the old `i`'s element, and assigning in order stores into the
+      new one's — code that compiles and computes something else. An index the
+      statement itself writes is lifted into its own temporary; a stable one is
+      not, so `y[i], y[j] = y[j], y[i]` stays free of them.
+
+- [ ] **Tuple assignment from a call** — `a, b := f()`, which needs
+      out-parameters in the generated C, and separately a destructuring special
+      case if a pair-returning intrinsic is ever wanted.
+- [x] **A `//gocuda:device` marker.** (2026-09-18) — read exactly as the other
+      two directives are, and consulted in `IsKernelDecl` beside `Ignored`, so
+      every caller that decides what a kernel is agrees. `//gocuda:ignore`
+      still works and still means "not a kernel". The marker carries a check
+      the negative spelling could not: on a function taking no `gpu.Ctx` it is
+      refused, so it cannot become decoration. A marked function nothing calls
+      draws no diagnostic, deliberately — an unreached helper is never lowered
+      at all, and the package compiles for the host too.
+- [x] **Shared memory in a device function.** (2026-09-18) — and the
+      accounting needed no propagation after all: `deviceFunc` memoises on the
+      function, so each one is emitted once and its tiles counted once.
+      `__shared__` inside a `__device__` function is block-scoped storage that
+      CUDA allocates per function, confirmed against NVRTC rather than
+      reasoned. `AssumeBlockDim` stays refused there, because it is a promise
+      about a launch; so does the _dynamic_ tile, whose length arrives as a
+      parameter of the kernel that a helper has no way to be handed.
+
+This round found two defects of its own, and the first is the kind this phase
+exists to remove.
+
+**The emitter wrote generated names into the kernel's own namespace and checked
+only one of them.** A slice lowers to a pointer plus an `x_len`, and a C++
+keyword is spelled with a trailing underscore; neither name appears in the Go
+source. Only the first was checked, and only against the _other parameters_, so
+a local reached neither check. A kernel with a slice `y` and a local `y_len`
+compiled and read 3 wherever it said `len(y)`; one with a parameter named `int`
+and a local named `int_` compiled and read the local twice. Both were confirmed
+through NVRTC before being fixed, and the fix is the Phase 0 parameter-collision
+check widened from the parameter list to every variable the function declares.
+It asks `types.Info` for variables that are not fields rather than reusing
+`collectNames`, whose bluntness is right for choosing a fresh generated name and
+would here refuse a kernel over a struct field that collides with nothing.
+
+**A new emulator test raced on its own shared tile**, having all eight threads
+of a block write `b[0]`, and `go test -race` reported it in about one run in
+ten. The emulator was right: it serialises atomics on one lock precisely so
+that a plain write racing another is still reported, because on the device that
+is a race too. A test whose subject is the barrier must not smuggle one in to
+prove it.
 
 One caveat on the evidence, and it is now two caveats. Everything through the
 type work is verified on **one** GPU — a T550, `sm_75`, CUDA 12.8; the parity
 tests do not need CI to run, but they need CI to have run anywhere else.
 
-The atomics and the `float64` helpers are weaker than that: they were written
-where there is no device **and no toolkit**, so their parity tests and their
-NVRTC cases have never run anywhere. What is verified is the lowering, the
-refusals, the drift test, the analyzer and the emulator under `-race`; the
-generated C was read, not compiled. Whether NVRTC declares `atomicAdd` and the
-unsuffixed `sqrt` with no headers included is a measurement
-`simt/nvrtc_cuda_test.go` is written to make and nothing here could make. The
-first run on real hardware is the one that settles it.
+The atomics and the `float64` helpers were weaker than that: they were written
+where there was no device **and no toolkit**, so the generated C had been read
+and not compiled, and whether NVRTC declares `atomicAdd` and the unsuffixed
+`sqrt` with no headers included was left as a measurement nothing in that round
+could make.
+
+**It has now been made, and it holds.** `libnvrtc` needs neither a driver nor a
+device, and `cuda/library.go` already honours `GOCUDA_LIBNVRTC` outright — a
+Phase 1.2 decision that paid off somewhere it was not designed for. With it in
+place `TestGeneratedCCompiles` ran for the first time anywhere and passed on
+every case, so `atomicAdd`, the unsuffixed `sqrt`, and since this round every
+warp built-in and `extern __shared__` are all declared with no header included.
+The whole committed kernel set compiles as well as lowers.
+
+What that does **not** settle is anything about execution. NVRTC compiles; it
+does not run. So the 2026-09-18 round carries the same shape of caveat one step
+further on: its lowering, refusals, drift test, analyzer, emulator under
+`-race` and generated C are all verified, and **every parity test it adds is
+written and unrun**, along with the atomics' and the `float64` helpers'. A
+device is still what settles those, and there has not been one since the type
+work.
+
+One artefact of working without one is worth recording, because it would
+otherwise look like carelessness: the only NVRTC available here was 12.9, while
+the committed PTX was built by 12.8. Regenerating with it would have emitted
+`.version 8.8` images that a 12.8 driver refuses — recoverable, since
+`internal/jit` falls back to NVRTC on a rejected image, but it would silently
+have cost the ahead-of-time saving on the one machine this project's
+measurements come from. So 12.8 was fetched and used, and all twelve artifacts
+stay at `.version 8.7`.
+
+A second one is a gap in the gate rather than in the artifacts.
+`gocuda generate -check` compares the lowered CUDA C and **not** the compiled
+PTX: a deliberately corrupted `.ptx` passes it, while a tampered `.cu` fails.
+That is the right check for source staleness and a weaker claim than "are the
+committed artifacts current?" — `CLAUDE.md` said the stronger thing and now
+says the true one.
 
 ## Phase 3 — Correctness at scale (L)
 
@@ -491,7 +675,13 @@ A transpiler is trusted through evidence, not review.
 - [ ] **Barrier-divergence analysis.** A `__syncthreads()` that only some
       threads of a block reach is undefined behaviour. Reject it statically.
 - [ ] **Aliasing.** Detect, or explicitly document, two slice parameters bound
-      to the same device buffer.
+      to the same device buffer. Largely done for the SIMT track by the
+      `const`/`__restrict__` work in Phase 2: `Kernel.Launch` compares device
+      ranges and refuses an overlap where the kernel writes through one of
+      them, and the intra-kernel case is refused at lowering. What is still
+      uncovered is the **tile track**, which has its own code generator, emits
+      no qualifiers and does no launch-time check, and the **CPU emulator**,
+      which never sees the caller's slices.
 - [ ] **Debug mode.** Emit bounds checks, device `printf` and a trap, behind a
       flag — the closest thing to a panic the device can offer.
 - [ ] **Numerical policy.** Write down `float32` semantics, FMA contraction and
@@ -561,17 +751,22 @@ Seven operations, 1-D, `float32`, one windowed op, no reductions.
 
 ## Phase 7 — Release engineering (S–M)
 
-- [ ] LICENSE; confirm the redistribution position (`libnvrtc` is dynamically
-      linked, not shipped — keep it that way).
+- [x] LICENSE; confirm the redistribution position (`libnvrtc` is dynamically
+      linked, not shipped — keep it that way). (2026-09-18) — MIT. The
+      redistribution position is unchanged and now written down where it
+      matters: `libnvrtc` is `dlopen`'d at run time and never shipped, so the
+      license covers only what the repository contains. MIT rather than
+      Apache-2.0 because there is nothing here to attach a patent grant to and
+      no NOTICE to propagate.
 - [ ] Semantic versioning, a v1 API freeze and a deprecation policy.
 - [ ] `golangci-lint` + `gofumpt` as a CI gate.
 - [ ] Godoc with runnable `Example` functions; the subset spec as the reference.
 - [ ] CHANGELOG and release automation.
 - [ ] A published support matrix: CUDA versions, architectures, OSes, Go
       versions.
-- [ ] Repository scaffolding that is simply missing. **There is no LICENSE**,
-      which is the one that blocks everything else here. `.golangci.yml`,
-      `treefmt.toml` and CI landed on 2026-09-18.
+- [x] Repository scaffolding that is simply missing. `.golangci.yml`,
+      `treefmt.toml` and CI landed on 2026-09-18, and the LICENSE that blocked
+      everything else here landed the same day.
 
       The earlier version of this bullet described a `.trunk/trunk.yaml`
       pinning `go@1.21.0` and `gofmt@1.20.4` against a `go 1.26` module. That

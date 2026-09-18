@@ -98,7 +98,8 @@ keep a shared misunderstanding from passing as agreement.
 ### The supported subset
 
 Slices lower to a pointer plus a length, so `len()` works. `:=`, `=`, compound
-assignment, `if`/`else`, three-clause `for`, `for i := range`,
+assignment, parallel assignment (`a, b = b, a`), `if`/`else`, three-clause
+`for`, `for i := range`,
 `for i, v := range`, `switch`, `break`, `continue`, their labelled forms,
 arithmetic, comparisons, indexing and conversions all translate.
 `gpu.Sqrt`, `gpu.Hypot` and friends become `sqrtf`, `hypotf`; `ctx.GlobalID()`
@@ -109,8 +110,11 @@ Grids and blocks have three axes. The unsuffixed accessors are `x`, which is
 CUDA's own spelling, and `ThreadIdxY`, `BlockIdxZ`, `GlobalIDY` and the rest
 are the other two; `GlobalID` also answers to `GlobalIDX`, because next to
 `GlobalIDY` the bare name reads like an oversight. Each is one built-in rather
-than a tuple — `x, y := ctx.GlobalID2()` would need multiple assignment, which
-the subset does not have. The host side matches: `Kernel.LaunchDim` and
+than a tuple. `x, y := ctx.GlobalID2()` is the _tuple_ form, which is still
+refused: a device function lowers to one C return type, and returning two
+would need out-parameters. Parallel assignment, which the subset now has, is a
+different feature and does not bring it closer — an intrinsic returning a pair
+would be destructured before any of that machinery ran. The host side matches: `Kernel.LaunchDim` and
 `gpu.RunCPUDim` take a three-axis extent, `Launch` and `RunCPU` stay the
 one-dimensional spelling, and `AssumeBlockDim` counts threads per block across
 all three axes, so a 16×16 block satisfies `AssumeBlockDim(256)`.
@@ -146,6 +150,19 @@ than left to a compiler that will not object. The host side is
 `AssumeBlockDim`, since the tile can be sized to the block instead of the block
 to the tile.
 
+Every pointer the emitter writes is `__restrict__`, and one the kernel never
+writes through is `const` as well — proved across the call graph, so a slice
+handed to a helper that writes it is not marked. `__restrict__` promises
+something Go cannot: `VecAdd(ctx, c, a, b)` may be given one buffer three
+times. So the promise is checked rather than assumed. `Kernel.Launch` compares
+the device ranges it was given and refuses an overlap with an `*AliasError`,
+and passing one slice twice to a helper that writes it is refused where it is
+lowered. Two _read-only_ parameters may share a buffer, deliberately: what
+`__restrict__` forbids is reaching a modified object through another pointer,
+so `dot(x, x)` is sound. The CPU emulator cannot check any of this — it never
+sees the caller's slices, because they arrive through a closure — and there a
+kernel is ordinary Go, where aliasing is defined.
+
 A kernel that sizes shared memory against a fixed block size says so with
 `ctx.AssumeBlockDim(n)`. It emits no code; it records the requirement, so that
 `Kernel.Launch` and the CPU emulator both refuse a mismatched launch instead of
@@ -171,6 +188,27 @@ is atomic enough to be faithful and deliberately not enough to hide a plain
 write racing an atomic — `go test -race` still reports that, because on the
 device it is a race too.
 
+`ctx.ShuffleF32`, `ShuffleXorI32`, `ShuffleDownF32` and the rest become
+`__shfl_sync`, `__shfl_xor_sync`, `__shfl_down_sync`; `ctx.Ballot`,
+`ctx.Any`, `ctx.All`, `ctx.ActiveMask`, `ctx.SyncWarp` and `ctx.LaneID`
+complete the warp vocabulary, and `gpu.WarpSize` is 32. NVRTC declares every
+one of them with no header included, which was measured rather than assumed.
+
+**None of them takes a participation mask.** CUDA's `_sync` forms do; the
+emitter writes `0xffffffff` and the Go-level contract is that every thread of
+the warp reaches the call — the same trade the atomics made by taking a buffer
+and an index instead of a pointer. The cost is real and worth stating: in a
+block that is not a multiple of 32 that mask names lanes which do not exist,
+which CUDA leaves undefined. Launch whole warps, and say so with
+`AssumeBlockDim` if the kernel depends on it.
+
+The emulator has no warps to borrow, so it builds one: a per-warp rendezvous
+between goroutines, with the same report-rather-than-panic discipline the
+shared tiles use. It diagnoses two things the device cannot — a call some
+threads never reach, and lanes meeting in different warp calls — and its
+`ActiveMask` is the arrival mask, which is not what the device would answer.
+A thread that has returned is not diagnosed, because CUDA permits exactly that.
+
 A kernel may call another function in its package, which is emitted as a
 `__device__` function alongside it: a prototype for each one the kernel
 reaches, then the definitions, then the entry point. Slice parameters split
@@ -178,9 +216,11 @@ into a pointer and a length there too, so the call passes both. Recursion is
 refused — there is no stack depth on the device to spend on it — and so are
 methods, generics, variadics, more than one result, and a _named_ result,
 which would be a local the body assigns to and a bare return that carries it.
-A function taking a `gpu.Ctx` **is** a kernel by the rule above, so calling
-one is refused unless it carries `//gocuda:ignore`, which already means
-"not a kernel"; the `Ctx` then vanishes from the C signature as the kernel's
+A function taking a `gpu.Ctx` **is** a kernel by the rule above, so calling one
+is refused unless it says otherwise. `//gocuda:device` is the spelling to
+reach for: it says what the helper _is_, and it is checked — on a function
+taking no `gpu.Ctx` it is refused, so it cannot become decoration.
+`//gocuda:ignore` still works and still means "not a kernel"; the `Ctx` then vanishes from the C signature as the kernel's
 own does. A device function may declare a shared tile of its own — that is
 block-scoped storage, which CUDA allocates once per function, and the bytes are
 accounted onto the kernel that reaches it. `AssumeBlockDim` stays refused
@@ -291,8 +331,8 @@ of reason: Go compares field by field and C++ gives a plain aggregate no
 operator at all.
 
 Everything else is **refused with a file and line**, never mistranslated:
-allocation, interfaces, goroutines, multiple assignment, methods, embedded
-fields, and any import other than package `gpu`. `simt/errors_test.go` pins
+allocation, interfaces, goroutines, tuple assignment from a call, methods,
+embedded fields, and any import other than package `gpu`. `simt/errors_test.go` pins
 that boundary.
 
 ### Errors before `main()`
@@ -309,13 +349,14 @@ gocuda vet ./kernels                   # or: go vet -vettool=$(which gocuda) ./.
 kernels/bad.go:4:2: kernels may not import math (only github.com/CWBudde/gocuda/gpu is available on the device)
 kernels/bad.go:10:23: float64 needs //gocuda:float64 on kernel Bad, or on its file's package comment: the device runs double at a fraction of the float32 rate, so it is opt-in
 kernels/bad.go:10:38: []int cannot cross to the device: Go's int is 8 bytes and CUDA's int is 4, so the elements would not line up; use int32 or int64
-kernels/bad.go:11:2: multiple assignment is not supported in kernels
+kernels/bad.go:11:2: a, b := f() is not supported in kernels: a device function lowers to one C return type
 ```
 
 The analyzer runs the **same lowering** the transpiler does, rather than a
 second opinion about it, so what it accepts and what `simt.Build` accepts
 cannot drift apart. A function whose first parameter is a `gpu.Ctx` is a
-kernel; `//gocuda:ignore` in its doc comment opts one out.
+kernel; `//gocuda:device` in its doc comment says it is a helper instead, and
+`//gocuda:ignore` opts it out entirely.
 
 `go generate` writes `kernels/prebuilt/`: the generated CUDA C, its PTX, and one
 constant per kernel that lowered. A hand-written `gate.go` lists the constants
@@ -436,9 +477,10 @@ Honest limits, not papered over:
 - **No recursion.** A kernel may call another Go function, but not one that
   reaches itself. That is a deliberate refusal rather than a gap: device
   stack depth is a launch-configuration problem, not a language one.
-- **No multiple assignment**, so no tuple-returning intrinsic: the axes are
-  read one accessor at a time. It is a limit of the emitter, not of the
-  device.
+- **No tuple assignment from a call**, so no tuple-returning intrinsic: the
+  axes are read one accessor at a time. Parallel assignment works; what is
+  missing is the C ABI for a function with two results, which would be
+  out-parameters. It is a limit of the emitter, not of the device.
 - **No chained windowed operations** in the tile track: the halo of the outer
   window would need values the inner one does not have at those indices.
 - **Source-level, not IR-level.** Without a real backend there is no
