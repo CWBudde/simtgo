@@ -42,7 +42,9 @@ func (g *gen) stmt() []Stmt {
 	for range 8 {
 		g.pending = nil
 		if s := g.tryStmt(); s != nil {
-			out := append(g.pending, s)
+			out := make([]Stmt, 0, len(g.pending)+1)
+			out = append(out, g.pending...)
+			out = append(out, s)
 			g.pending = nil
 			return out
 		}

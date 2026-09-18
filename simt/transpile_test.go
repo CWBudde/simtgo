@@ -1111,7 +1111,11 @@ func TestChainSwitchBindsTheTagOnce(t *testing.T) {
 		"case int32(len(y)):\n\ty[0] = 1\n"+
 		"case int32(len(x)):\n\ty[0] = 2\n"+
 		"default:\n\ty[0] = 3\n} }")
-	entry := u.Source[strings.Index(u.Source, "__global__"):]
+	at := strings.Index(u.Source, "__global__")
+	if at < 0 {
+		t.Fatalf("no entry point in the generated source:\n%s", u.Source)
+	}
+	entry := u.Source[at:]
 	if n := strings.Count(entry, "bump("); n != 1 {
 		t.Errorf("the tag is evaluated %d times in the entry point, want 1:\n%s", n, u.Source)
 	}
@@ -1135,9 +1139,12 @@ func TestGeneratedCScopes(t *testing.T) {
 		// The declaration has to sit inside a scope the goto leaves, so the
 		// target must follow that scope's closing brace.
 		decl := strings.Index(got, "float v = 1.0f;")
-		closing := strings.Index(got[decl:], "}")
 		target := strings.Index(got, "outer_continue: ;")
-		if decl < 0 || target < 0 || target < decl+closing {
+		if decl < 0 || target < 0 {
+			t.Fatalf("the declaration or the continue target is missing:\n%s", got)
+		}
+		closing := strings.Index(got[decl:], "}")
+		if target < decl+closing {
 			t.Errorf("the continue target does not follow the body's own scope:\n%s", got)
 		}
 	})

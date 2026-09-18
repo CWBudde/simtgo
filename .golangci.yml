@@ -43,6 +43,10 @@ linters:
     # a value has, a variable that looks like `any` is worse than merely
     # confusing.
     - predeclared
+    # Worth it for one check alone: offBy1 found a test that sliced at
+    # strings.Index's result without testing it for -1, two lines above a guard
+    # the author had already written for exactly that case.
+    - gocritic
 
   settings:
     errcheck:
@@ -60,6 +64,18 @@ linters:
       # Written by `gocuda generate`; its shape is the generator's business.
       - kernels/prebuilt/prebuilt_gen\.go
     rules:
+      # gocritic's ifElseChain is a style rule, and kernel sources are the one
+      # place where style is not free: `kernels/` is input to the emitter, so
+      # rewriting an if/else chain as a tagless switch -- which SPEC.md says
+      # lowers back to an if/else chain anyway -- would change the generated
+      # CUDA C, every SourceHash with it, and so every file under
+      # simt/testdata/ and kernels/prebuilt/. Regenerating the whole artifact
+      # set to satisfy a cosmetic rule is the wrong trade; the rule is scoped
+      # out here rather than the finding being silenced in the file.
+      - path: ^kernels/
+        linters:
+          - gocritic
+        text: ifElseChain
       # A deferred Close on a CUDA context in an example or a test has nowhere
       # to report to: the process is on its way out and the device teardown is
       # not what the example or the test is demonstrating.
