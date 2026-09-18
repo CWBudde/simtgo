@@ -67,6 +67,26 @@ func TestUnsupported(t *testing.T) {
 		body: "type P struct{ X, Y float32 }\n\nfunc K(ctx gpu.Ctx, y []float32, a, b []P) { if a[0] == b[0] { y[0] = 1 } }",
 		want: "field by field in Go, which C cannot do",
 	}, {
+		name: "an int field in a struct",
+		body: "type P struct{ N int }\n\nfunc K(ctx gpu.Ctx, y []float32, ps []P) { y[0] = float32(ps[0].N) }",
+		want: "cannot cross to the device",
+	}, {
+		name: "an array field in a struct",
+		body: "type P struct{ Taps [4]float32 }\n\nfunc K(ctx gpu.Ctx, y []float32, ps []P) { y[0] = ps[0].Taps[0] }",
+		want: "a device struct holds scalars",
+	}, {
+		name: "an embedded field",
+		body: "type Inner struct{ X float32 }\ntype Outer struct{ Inner }\n\nfunc K(ctx gpu.Ctx, y []float32, os []Outer) { y[0] = os[0].X }",
+		want: "embedded field",
+	}, {
+		name: "an anonymous struct type",
+		body: "func K(ctx gpu.Ctx, y []float32) { p := struct{ X float32 }{1}; y[0] = p.X }",
+		want: "unsupported type struct{X float32} on the device",
+	}, {
+		name: "a method call",
+		body: "type P struct{ X float32 }\n\nfunc (p P) Twice() float32 { return p.X * 2 }\n\nfunc K(ctx gpu.Ctx, y []float32, ps []P) { y[0] = ps[0].Twice() }",
+		want: "methods are not supported in kernels",
+	}, {
 		name: "int(x) from int64",
 		body: "func K(ctx gpu.Ctx, a []float32, n int64) { a[int(n)] = 1 }",
 		want: "truncates on the device",

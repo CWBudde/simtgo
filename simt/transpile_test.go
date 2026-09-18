@@ -563,3 +563,59 @@ func TestFloat64Directive(t *testing.T) {
 		t.Errorf("file-wide directive had no effect:\n%s", u.Source)
 	}
 }
+
+// TestStructLayoutIsAsserted is the layout guarantee in the only form NVRTC
+// can carry it.
+//
+// The emitter never models the C ABI. It states what Go believes about the type
+// and lets the C++ compiler check that against what it believes, so the promise
+// holds on whatever architecture and CUDA version the kernel is built for
+// rather than on the one it was written on. Offsets are missing from the
+// assertions because NVRTC compiles a string with no include path and so has no
+// offsetof; TestStructRoundTrip in the parity tests pins those instead.
+func TestStructLayoutIsAsserted(t *testing.T) {
+	u := transpile(t, "type Shape struct {\n\tFloor float32\n\tCount int32\n\tBias  float64\n}\n\n"+
+		"//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float32, cfg Shape) { y[0] = cfg.Floor }")
+	for _, want := range []string{
+		"struct Shape\n{\n\tfloat Floor;\n\tint Count;\n\tdouble Bias;\n};",
+		// 4 + 4 of Count, four bytes of padding, then Bias at 8: the padded
+		// case is the one where Go and C could part company.
+		`static_assert(sizeof(Shape) == 16,`,
+		`static_assert(alignof(Shape) == 8,`,
+		"y[0] = cfg.Floor;",
+	} {
+		if !strings.Contains(u.Source, want) {
+			t.Errorf("missing %q in:\n%s", want, u.Source)
+		}
+	}
+	// The definition has to precede the entry point that names it.
+	if strings.Index(u.Source, "struct Shape") > strings.Index(u.Source, "__global__") {
+		t.Errorf("struct defined after the kernel that uses it:\n%s", u.Source)
+	}
+}
+
+// TestStructLiteralIsPositional pins the spelling rather than the values.
+//
+// Designated initialisers are C++20 and NVRTC defaults to C++17, so a keyed Go
+// literal has to come out positionally -- with the fields left off written as
+// their zero value rather than left to C++ to fill in.
+func TestStructLiteralIsPositional(t *testing.T) {
+	u := transpile(t, "type P struct{ X, Y, Z float32 }\n\n"+
+		"func K(ctx gpu.Ctx, y []float32) { p := P{Y: 2}; y[0] = p.X + p.Y + p.Z }")
+	if !strings.Contains(u.Source, "P p = P{0, 2.0f, 0};") {
+		t.Errorf("literal not rendered positionally:\n%s", u.Source)
+	}
+	if strings.Contains(u.Source, ".Y =") {
+		t.Errorf("designated initialiser emitted, which NVRTC's dialect has no answer for:\n%s", u.Source)
+	}
+}
+
+// TestStructDefinedOnce covers a type reached by two paths -- a slice element
+// and a by-value parameter -- which must not be defined twice.
+func TestStructDefinedOnce(t *testing.T) {
+	u := transpile(t, "type P struct{ X, Y float32 }\n\n"+
+		"func K(ctx gpu.Ctx, y []float32, ps []P, one P) { y[0] = ps[0].X + one.Y }")
+	if n := strings.Count(u.Source, "struct P\n"); n != 1 {
+		t.Errorf("struct P defined %d times:\n%s", n, u.Source)
+	}
+}

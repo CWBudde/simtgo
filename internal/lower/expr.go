@@ -162,6 +162,10 @@ func (t *transpiler) expr(e ast.Expr) cexpr {
 		// The subscript itself is delimited by the brackets, so it needs no
 		// precedence of its own; what is indexed does.
 		return cexpr{fmt.Sprintf("%s[%s]", t.expr(e.X).at(precPostfix), t.expr(e.Index).s), precPostfix}
+	case *ast.SelectorExpr:
+		return t.selector(e)
+	case *ast.CompositeLit:
+		return t.composite(e)
 	case *ast.CallExpr:
 		return t.call(e)
 	}
@@ -235,6 +239,14 @@ func (t *transpiler) call(c *ast.CallExpr) cexpr {
 		return atom("")
 
 	case *ast.SelectorExpr:
+		if sel := t.info.Selections[f]; sel != nil && sel.Kind() == types.MethodVal && !IsCtx(sel.Recv()) {
+			// Reported here rather than left to the catch-all below, which
+			// would say "unsupported call" and nothing about why. gpu.Ctx is
+			// the one receiver with device meaning; every other method would
+			// need a C++ member function, and the subset has no objects.
+			t.fail(c.Pos(), "methods are not supported in kernels; %s cannot be called on the device", f.Sel.Name)
+			return atom("")
+		}
 		if sel := t.info.Selections[f]; sel != nil && sel.Kind() == types.MethodVal && IsCtx(sel.Recv()) {
 			name := sel.Obj().Name()
 			switch name {
