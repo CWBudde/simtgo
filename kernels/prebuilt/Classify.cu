@@ -10,7 +10,7 @@ extern "C" __global__ void Classify(float* __restrict__ out, int out_len, const 
 	int band = edges_len;
 	for (int base = 0; base < edges_len; base += 4)
 	{
-		for (int j = base; j < base + 4; j++)
+		for (int j = base; j < (int)((unsigned int)(base) + 4u); j++)
 		{
 			if (j >= edges_len)
 			{

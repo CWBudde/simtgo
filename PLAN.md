@@ -814,13 +814,27 @@ A transpiler is trusted through evidence, not review.
       `fuzz.Generate(-279)` with inputs `205` reproduces it, and the host and
       the emulator disagreed by whole powers of two on every element.
 
-      Only the shift is fixed so far, by emitting it through the unsigned type
-      of the same width, which is the standard spelling of a defined wrapping
-      shift and cost no golden or artifact churn. The same technique covers
-      the rest, and applying it to `+`, `-`, `*` and unary `-` would change
-      the look of every generated kernel — which is a decision about what the
-      emitted C is for, not a bug fix, and is why it is recorded here rather
-      than done.
+      **Fixed** (2026-09-18), by the decision that the generated C should mean
+      what the Go means: `+`, `-`, `*`, unary `-` and `<<` on a signed integer
+      are emitted through the unsigned type of the same width. The conversion
+      is once per *region* of arithmetic rather than once per operator, or the
+      source would vanish under casts — `a + b*c` is one cast back and three
+      operands converted in, not a nest four deep. `/`, `%` and `>>` end a
+      region, meaning something different unsigned; `&`, `|`, `^` are left
+      outside too, so the rule has no exception.
+
+      It is not free in readability and that was the accepted cost: an index
+      expression `h[i+1]` becomes `h[(int)((unsigned int)(i) + 1u)]`. It is
+      very nearly free in everything else. Six of the twelve kernels changed,
+      and of their PTX **three are byte-identical** — FIR, Quantize, Transpose
+      — Gray is the same size, BandGain grows 28 bytes, and **Classify shrinks
+      by 483**. Removing an assumption the optimiser was entitled to make did
+      not cost instructions; in one case it saved them.
+
+      Two limits remain, and `SPEC.md` states both rather than leaving them to
+      be found: this makes the C *defined*, not *equal to Go*, for Go's `int`,
+      which wraps at 64 bits where the device wraps at 32; and `MinInt / -1` is
+      still undefined on the device, which routing through unsigned cannot fix.
 
       **Seven defects in all, in roughly half an hour of searching**, five of
       them in the emitter and two in the oracle. That ratio is worth

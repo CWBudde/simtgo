@@ -41,9 +41,9 @@
 	setp.ge.s32 	%p2, %r8, %r3;
 	@%p2 bra 	$L__BB0_3;
 
-	cvt.s64.s32 	%rd3, %r2;
-	cvta.to.global.u64 	%rd4, %rd2;
-	add.s64 	%rd5, %rd4, %rd3;
+	cvta.to.global.u64 	%rd3, %rd2;
+	cvt.s64.s32 	%rd4, %r2;
+	add.s64 	%rd5, %rd3, %rd4;
 	ld.global.nc.u8 	%rs1, [%rd5+1];
 	cvt.u32.u16 	%r9, %rs1;
 	ld.global.nc.u8 	%rs2, [%rd5];

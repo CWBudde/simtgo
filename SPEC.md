@@ -370,6 +370,35 @@ run time — Go defines that as zero and C leaves it undefined — and telling
 `x << (k & 31)`, which is how one writes it safely, from `x << k` needs a
 range analysis the lowering does not have.
 
+## 3a. Signed overflow wraps, as Go says it does
+
+**Go defines signed integer overflow as wrapping**; C leaves it _undefined_,
+which is not a wrong number but a licence for the compiler to assume it cannot
+happen. So `+`, `-`, `*`, unary `-` and `<<` on a signed integer are emitted
+through the **unsigned type of the same width** and converted back, which is
+the only spelling of modular arithmetic C defines.
+
+The conversion happens once per _region_, not once per operator, or the source
+would disappear under casts:
+
+```c
+int y = (int)((unsigned int)(a) + (unsigned int)(b) * (unsigned int)(c));
+```
+
+`/`, `%` and `>>` end a region rather than joining it, because they mean
+something different on unsigned operands; `&`, `|` and `^` would be safe either
+way and are left outside too, so that the rule has no exception to remember.
+
+Two things this does **not** do:
+
+- **It does not make Go's `int` equal to C's.** Go wraps at 64 bits and the
+  device at 32, which is the narrowing above. Wrapping makes the C _defined_,
+  not _equal_.
+- **`MinInt / -1` is still undefined on the device.** It is `MinInt` in Go, and
+  routing it through unsigned cannot help — unsigned division is a different
+  operation. Nothing refuses it, because the values are not known until the
+  kernel runs.
+
 ### Types that cannot cross
 
 - uint — diagnostic: `use uint32 or uint64`

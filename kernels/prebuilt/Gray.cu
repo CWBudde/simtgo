@@ -6,14 +6,14 @@ extern "C" __global__ void Gray(unsigned char* __restrict__ out, int out_len, co
 	{
 		return;
 	}
-	int j = i * 3;
-	if (j + 2 >= rgb_len)
+	int j = (int)((unsigned int)(i) * 3u);
+	if ((int)((unsigned int)(j) + 2u) >= rgb_len)
 	{
 		return;
 	}
 	int r = (int)(rgb[j]);
-	int g = (int)(rgb[j + 1]);
-	int b = (int)(rgb[j + 2]);
-	int y = 77 * r + 150 * g + 29 * b + 128 >> 8;
+	int g = (int)(rgb[(int)((unsigned int)(j) + 1u)]);
+	int b = (int)(rgb[(int)((unsigned int)(j) + 2u)]);
+	int y = (int)(77u * (unsigned int)(r) + 150u * (unsigned int)(g) + 29u * (unsigned int)(b) + 128u) >> 8;
 	out[i] = (unsigned char)(y);
 }

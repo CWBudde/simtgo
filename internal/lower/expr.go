@@ -121,6 +121,14 @@ func (t *transpiler) expr(e ast.Expr) cexpr {
 	if t.failed() {
 		return atom("")
 	}
+	// Inside an open unsigned domain, anything that is not itself part of the
+	// wrapping arithmetic is a boundary: it is computed as it always was and
+	// converted into the domain here. That this is the only place the
+	// conversion is written is what keeps it to one per operand rather than
+	// one per operator -- see wrapDomain.
+	if t.wrapUnsigned != "" && !t.inWrapDomain(e) {
+		return t.enterWrapAs(e)
+	}
 	// Anything go/types folded to a constant is emitted as a literal, which
 	// covers literals, named constants and constant arithmetic alike.
 	if tv, ok := t.info.Types[e]; ok && tv.Value != nil {
@@ -145,8 +153,10 @@ func (t *transpiler) expr(e ast.Expr) cexpr {
 		}
 		switch e.Op {
 		case token.SUB, token.ADD, token.NOT:
-			x := t.expr(e.X).at(precPrefix)
-			return cexpr{e.Op.String() + unarySep(e.Op, x) + x, precPrefix}
+			if s, u, ok := t.wrapTypeOf(e); ok && t.wrapUnsigned == "" {
+				return t.openWrap(s, u, func() cexpr { return t.unaryPlain(e) })
+			}
+			return t.unaryPlain(e)
 		case token.XOR:
 			return cexpr{"~" + t.expr(e.X).at(precPrefix), precPrefix}
 		}
@@ -188,43 +198,136 @@ var unsignedOf = map[string]string{
 	"long long": "unsigned long long",
 }
 
-// signedShiftLeft emits a signed `<<` through its unsigned counterpart, which
-// is the only spelling of it C defines.
+// wrapDomain is how the emitter keeps Go's arithmetic meaning what it says.
 //
-// Go says a left shift of a signed integer wraps: int64(1) << 63 is
-// MinInt64, and every bit shifted off the top is simply gone. C says a signed
-// left shift whose result is not representable is *undefined*, which is not a
-// wrong number but a licence for the compiler to assume it cannot happen. The
-// two therefore differ on exactly the values Go defines and C does not, and
-// the difference is invisible: the generated code compiles, and what it does
-// depends on the optimiser.
+// Go defines signed integer overflow as wrapping: int32(1<<30) * 4 is 0, and
+// every bit shifted or carried off the top is simply gone. C leaves the same
+// arithmetic *undefined*, which is not a wrong number but a licence for the
+// compiler to assume it cannot happen -- so the generated kernel had no defined
+// meaning on exactly the values the Go source did define, it compiled without a
+// word, and what it did depended on the optimiser. The differential fuzzer
+// found it on `11 - (x << 63)`, where the shift is MinInt64 and the subtraction
+// overflows; the host run and the emulator then disagreed by whole powers of
+// two on every element of the buffer.
 //
-// The differential fuzzer found it, on `(p ^ b*8) << 63` -- the host and the
-// emulator disagreed on every element of the buffer, by whole powers of two.
+// Unsigned arithmetic is modular by definition in C, so the fix is to compute
+// there and convert back. The conversion back is defined as the two's
+// complement reinterpretation from C++20 on and implementation-defined before
+// it, in the way every target this emitter has runs.
 //
-// Casting to the unsigned type of the same width, shifting there and casting
-// back is the standard way to write a defined wrapping shift, and it is what
-// Go's semantics are: the conversion back is implementation-defined in C89 and
-// defined as the two's-complement reinterpretation from C++20 on, which is
-// what every target this emitter has runs. The right shift needs none of this,
-// because it cannot overflow -- and neither do the unsigned kinds, which wrap
-// by definition and are left spelled as they were.
-func (t *transpiler) signedShiftLeft(e *ast.BinaryExpr) (cexpr, bool) {
-	tv, ok := t.info.Types[e.X]
-	if !ok || tv.Type == nil {
-		return cexpr{}, false
+// The whole difficulty is doing it without burying the source. Converting at
+// every operator turns `a + b*c` into
+//
+//	(int)((unsigned int)(a) + (unsigned int)((int)((unsigned int)(b) * (unsigned int)(c))))
+//
+// so instead a *region* of wrapping arithmetic is converted once at its
+// boundary:
+//
+//	(int)((unsigned int)(a) + (unsigned int)(b) * (unsigned int)(c))
+//
+// wrapUnsigned names the open region's type, or is empty. Inside one, + - *
+// and << of that same signed type emit plainly, because the arithmetic already
+// is unsigned; everything else is a boundary and is converted in by expr.
+//
+// Two operators stay outside deliberately. `/`, `%` and `>>` *mean* something
+// different on unsigned operands, so they end the region and their operands are
+// computed signed. `&`, `|` and `^` would be safe either way -- they are
+// bit-identical at the same width -- and are left outside too, because one rule
+// is easier to hold than a rule with an exception, and they are not where
+// overflow lives.
+//
+// What this does NOT fix, and SPEC.md says so: Go's int is 64 bits and the
+// device's is 32, so wrapping makes the C *defined* without making it *equal*
+// to Go. And `MinInt / -1` is MinInt in Go and undefined in C, which routing
+// through unsigned cannot fix, unsigned division being a different operation.
+
+// wrapTypeOf reports the signed and unsigned C types of an expression that is
+// wrapping arithmetic, and whether it is any.
+func (t *transpiler) wrapTypeOf(e ast.Expr) (signed, unsigned string, ok bool) {
+	switch e := e.(type) {
+	case *ast.BinaryExpr:
+		switch e.Op {
+		case token.ADD, token.SUB, token.MUL, token.SHL:
+		default:
+			return "", "", false
+		}
+	case *ast.UnaryExpr:
+		// Unary plus is the identity and cannot overflow; unary minus can, on
+		// the most negative value of its type.
+		if e.Op != token.SUB {
+			return "", "", false
+		}
+	default:
+		return "", "", false
 	}
-	basic, ok := tv.Type.Underlying().(*types.Basic)
-	if !ok || basic.Info()&types.IsInteger == 0 || basic.Info()&types.IsUnsigned != 0 {
-		return cexpr{}, false
+	tv, okT := t.info.Types[e]
+	if !okT || tv.Type == nil || tv.Value != nil {
+		// A folded constant is a literal, not arithmetic: go/types already did
+		// the sum, at arbitrary precision, and checked that it fits.
+		return "", "", false
 	}
-	signed := t.ctype(tv.Type, e.Pos())
-	unsigned, ok := unsignedOf[signed]
+	basic, okB := tv.Type.Underlying().(*types.Basic)
+	if !okB || basic.Info()&types.IsInteger == 0 || basic.Info()&types.IsUnsigned != 0 {
+		return "", "", false
+	}
+	signed = t.ctype(tv.Type, e.Pos())
+	unsigned, ok = unsignedOf[signed]
 	if !ok {
-		return cexpr{}, false
+		return "", "", false
 	}
-	return cexpr{fmt.Sprintf("(%s)((%s)(%s) << %s)",
-		signed, unsigned, t.expr(e.X).s, t.expr(e.Y).at(cBinaryPrec[token.SHL]+1)), precPrefix}, true
+	return signed, unsigned, true
+}
+
+// inWrapDomain reports whether e belongs to the region already open, rather
+// than being a boundary that has to be converted into it.
+func (t *transpiler) inWrapDomain(e ast.Expr) bool {
+	_, u, ok := t.wrapTypeOf(unparen(e))
+	return ok && u == t.wrapUnsigned
+}
+
+// openWrap renders a region and converts its result back to the signed type.
+func (t *transpiler) openWrap(signed, unsigned string, render func() cexpr) cexpr {
+	savedS, savedU := t.wrapSigned, t.wrapUnsigned
+	t.wrapSigned, t.wrapUnsigned = signed, unsigned
+	inner := render()
+	t.wrapSigned, t.wrapUnsigned = savedS, savedU
+	return cexpr{fmt.Sprintf("(%s)(%s)", signed, inner.s), precPrefix}
+}
+
+// outsideWrap renders e with no region open, and converts nothing. It is for
+// the operands that are not terms of the arithmetic -- a shift count.
+func (t *transpiler) outsideWrap(e ast.Expr) cexpr {
+	savedS, savedU := t.wrapSigned, t.wrapUnsigned
+	t.wrapSigned, t.wrapUnsigned = "", ""
+	c := t.expr(e)
+	t.wrapSigned, t.wrapUnsigned = savedS, savedU
+	return c
+}
+
+// enterWrapAs renders a boundary expression and converts it into the open
+// region.
+//
+// A non-negative integer constant takes the unsigned suffix instead of a cast,
+// because `5u` is the same value as `(unsigned int)(5)` and reads as what the
+// author wrote. A negative one keeps the cast: the modular representative of
+// -5 is 4294967291, and writing that would hide the source.
+func (t *transpiler) enterWrapAs(e ast.Expr) cexpr {
+	unsigned := t.wrapUnsigned
+	if tv, ok := t.info.Types[e]; ok && tv.Value != nil {
+		if v, exact := constant.Uint64Val(constant.ToInt(tv.Value)); exact {
+			return number(strconv.FormatUint(v, 10) + unsignedSuffix(unsigned))
+		}
+	}
+	return cexpr{fmt.Sprintf("(%s)(%s)", unsigned, t.outsideWrap(e).s), precPrefix}
+}
+
+// unsignedSuffix is the literal suffix that gives a constant the region's type,
+// so that a small one is not an int in a long long expression.
+func unsignedSuffix(unsigned string) string {
+	if unsigned == "unsigned long long" {
+		return "ull"
+	}
+	return "u"
 }
 
 // unarySep is the space that keeps a unary operator from fusing with its
@@ -282,12 +385,23 @@ func (t *transpiler) binary(e *ast.BinaryExpr) cexpr {
 			}
 		}
 	}
-	if e.Op == token.SHL {
-		if c, ok := t.signedShiftLeft(e); ok {
-			return c
-		}
+	if s, u, ok := t.wrapTypeOf(e); ok && t.wrapUnsigned == "" {
+		return t.openWrap(s, u, func() cexpr { return t.binaryPlain(e) })
 	}
+	return t.binaryPlain(e)
+}
+
+// binaryPlain renders the operator itself, with no question of the unsigned
+// domain: by the time it runs, either the domain is open and this node belongs
+// to it, or there is none.
+func (t *transpiler) binaryPlain(e *ast.BinaryExpr) cexpr {
 	if p, ok := cBinaryPrec[e.Op]; ok {
+		if e.Op == token.SHL || e.Op == token.SHR {
+			// A shift count is a count, not a term of the arithmetic, so it is
+			// rendered outside the domain. Dragging it in would convert it for
+			// nothing and read as though the width mattered.
+			return cexpr{fmt.Sprintf("%s %s %s", t.expr(e.X).at(p), e.Op, t.outsideWrap(e.Y).at(p+1)), p}
+		}
 		return cexpr{fmt.Sprintf("%s %s %s", t.expr(e.X).at(p), e.Op, t.expr(e.Y).at(p+1)), p}
 	}
 	if e.Op == token.AND_NOT { // Go's &^ has no C equivalent
@@ -298,6 +412,12 @@ func (t *transpiler) binary(e *ast.BinaryExpr) cexpr {
 	}
 	t.fail(e.Pos(), "unsupported operator %s", e.Op)
 	return atom("")
+}
+
+// unaryPlain is binaryPlain's counterpart for a negation.
+func (t *transpiler) unaryPlain(e *ast.UnaryExpr) cexpr {
+	x := t.expr(e.X).at(precPrefix)
+	return cexpr{e.Op.String() + unarySep(e.Op, x) + x, precPrefix}
 }
 
 // narrowOperand reports e's Go type when it is one of the storage-only narrow

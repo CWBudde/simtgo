@@ -58,6 +58,10 @@ func transpile(t *testing.T, body string) *simt.Unit {
 // wrong is silent -- the generated code compiles and computes something else
 // -- so both disagreements are pinned here, together with the cases that must
 // stay free of parentheses.
+// The unsigned casts throughout are the wrapping domain -- see wrapDomain in
+// internal/lower/expr.go -- and they change none of the precedence these cases
+// are about: the grouping in each want is still exactly what C needs to parse
+// the Go the way Go parses it.
 func TestCPrecedence(t *testing.T) {
 	const decl = "func K(ctx gpu.Ctx, y []float32, a, b, c int32) "
 	cases := []struct{ name, body, want string }{{
@@ -72,15 +76,15 @@ func TestCPrecedence(t *testing.T) {
 		// wraps, so the shift happened first.
 		name: "shift binds looser than addition in C",
 		body: decl + "{ y[0] = float32(a<<b + c) }",
-		want: "(float)((int)((unsigned int)(a) << b) + c)",
+		want: "(float)((int)(((unsigned int)(a) << b) + (unsigned int)(c)))",
 	}, {
 		name: "a left-associative chain needs no grouping",
 		body: decl + "{ y[0] = float32(a - b - c) }",
-		want: "(float)(a - b - c)",
+		want: "(float)((int)((unsigned int)(a) - (unsigned int)(b) - (unsigned int)(c)))",
 	}, {
 		name: "the right operand of an equal level does",
 		body: decl + "{ y[0] = float32(a - (b - c)) }",
-		want: "(float)(a - (b - c))",
+		want: "(float)((int)((unsigned int)(a) - ((unsigned int)(b) - (unsigned int)(c))))",
 	}, {
 		name: "a condition is not wrapped twice",
 		body: "func K(ctx gpu.Ctx, y []float32) { i := ctx.GlobalID(); if i < len(y) { y[i] = 1 } }",
@@ -88,7 +92,7 @@ func TestCPrecedence(t *testing.T) {
 	}, {
 		name: "and-not lowers to a masked complement",
 		body: decl + "{ y[0] = float32(a&^b + c) }",
-		want: "(float)((a & ~b) + c)",
+		want: "(float)((int)((unsigned int)(a & ~b) + (unsigned int)(c)))",
 	}}
 
 	for _, tc := range cases {
@@ -121,23 +125,25 @@ func TestUnaryOperatorsDoNotFuse(t *testing.T) {
 	cases := []struct{ name, body, want string }{{
 		name: "a negation of a negation",
 		body: decl + "{ y[0] = -(-c) }",
-		want: "y[0] = - -c;",
+		want: "y[0] = (int)(- -(unsigned int)(c));",
 	}, {
 		name: "the same thing written with a space, which Go already allows",
 		body: decl + "{ y[0] = - -c }",
-		want: "y[0] = - -c;",
+		want: "y[0] = (int)(- -(unsigned int)(c));",
 	}, {
 		name: "three of them",
 		body: decl + "{ y[0] = -(-(-c)) }",
-		want: "y[0] = - - -c;",
+		want: "y[0] = (int)(- - -(unsigned int)(c));",
 	}, {
+		// Unwrapped, unlike the negations above: unary plus is the identity,
+		// so it has no overflow to define and wrapDomain leaves it alone.
 		name: "a unary plus of a unary plus",
 		body: decl + "{ y[0] = +(+c) }",
 		want: "y[0] = + +c;",
 	}, {
 		name: "a binary minus before a unary one already had its space",
 		body: decl + "{ y[0] = c - (-c) }",
-		want: "y[0] = c - -c;",
+		want: "y[0] = (int)((unsigned int)(c) - -(unsigned int)(c));",
 	}, {
 		name: "two complements are not a token",
 		body: decl + "{ y[0] = ^(^c) }",
@@ -220,6 +226,74 @@ func TestRangeIndexIsPerIteration(t *testing.T) {
 	}
 }
 
+// TestWrappingArithmetic pins the shape of the unsigned domain, which is the
+// whole of what makes it bearable.
+//
+// Go defines signed overflow as wrapping and C leaves it undefined, so the
+// arithmetic is computed in the unsigned type of the same width. Doing that per
+// *operator* would bury the source: `a + b*c` would become a cast four deep.
+// Doing it per *region* keeps one conversion at each boundary, and these cases
+// are what says it stayed that way.
+//
+// The last three are the boundaries. `/` means something different on unsigned
+// operands, so it ends the region rather than joining it; an unsigned kernel
+// has nothing to define, since its arithmetic already wraps in C; and a float
+// has no wrapping to speak of.
+func TestWrappingArithmetic(t *testing.T) {
+	const prelude = "package kernels\n\nimport \"github.com/CWBudde/gocuda/gpu\"\n\n"
+	cases := []struct{ name, body, want string }{{
+		// One conversion back, three operands converted in -- not one cast
+		// pair per operator, which is the point of the whole design.
+		name: "a mixed expression converts once at its boundary",
+		body: "func K(ctx gpu.Ctx, y []int32, a, b, c int32) { y[0] = a + b*c }",
+		want: "y[0] = (int)((unsigned int)(a) + (unsigned int)(b) * (unsigned int)(c));",
+	}, {
+		name: "a chain stays one region",
+		body: "func K(ctx gpu.Ctx, y []int32, a, b, c int32) { y[0] = a + b + c }",
+		want: "y[0] = (int)((unsigned int)(a) + (unsigned int)(b) + (unsigned int)(c));",
+	}, {
+		name: "negation, which overflows on the most negative value",
+		body: "func K(ctx gpu.Ctx, y []int32, a int32) { y[0] = -a }",
+		want: "y[0] = (int)(-(unsigned int)(a));",
+	}, {
+		name: "int64 uses the 64-bit unsigned type",
+		body: "func K(ctx gpu.Ctx, y []int64, a, b int64) { y[0] = a*b + 7 }",
+		want: "y[0] = (long long)((unsigned long long)(a) * (unsigned long long)(b) + 7ull);",
+	}, {
+		// The shifted value belongs to the region and the count does not: a
+		// count is not a term of the arithmetic, and converting it would read
+		// as though its width mattered.
+		name: "a shift keeps its count outside",
+		body: "func K(ctx gpu.Ctx, y []int32, a, b int32) { y[0] = a<<2 + b }",
+		want: "y[0] = (int)(((unsigned int)(a) << 2) + (unsigned int)(b));",
+	}, {
+		name: "division ends the region",
+		body: "func K(ctx gpu.Ctx, y []int32, a, b int32) { y[0] = a + b/2 }",
+		want: "y[0] = (int)((unsigned int)(a) + (unsigned int)(b / 2));",
+	}, {
+		name: "an unsigned kernel is left alone",
+		body: "func K(ctx gpu.Ctx, y []uint32, a, b uint32) { y[0] = a + b*3 }",
+		want: "y[0] = a + b * 3u;",
+	}, {
+		name: "a float expression is left alone",
+		body: "func K(ctx gpu.Ctx, y []float32, a, b float32) { y[0] = a + b*2.0 }",
+		want: "y[0] = a + b * 2.0f;",
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fsys := fstest.MapFS{"k.go": &fstest.MapFile{Data: []byte(prelude + tc.body)}}
+			u, err := simt.Transpile(fsys, "K")
+			if err != nil {
+				t.Fatalf("Transpile: %v", err)
+			}
+			if !strings.Contains(u.Source, tc.want) {
+				t.Errorf("generated CUDA does not contain %q:\n%s", tc.want, u.Source)
+			}
+		})
+	}
+}
+
 // TestShiftsThatStayAccepted is the other half of the wide-shift rule, and the
 // half that decides whether it is worth having: a check that refuses too much
 // is easy and useless.
@@ -282,21 +356,21 @@ func TestShadowingInitialiserReadsTheOuterVariable(t *testing.T) {
 	}{{
 		name: "a short declaration initialised from what it shadows",
 		body: decl + "{\n\t{\n\t\ta := a + 1\n\t\ty[0] = a\n\t}\n}",
-		want: []string{"int a2 = a + 1;", "y[0] = a2;"},
+		want: []string{"int a2 = (int)((unsigned int)(a) + 1u);", "y[0] = a2;"},
 	}, {
 		name: "the same rule for var",
 		body: decl + "{\n\t{\n\t\tvar a int32 = a + 7\n\t\ty[0] = a\n\t}\n}",
-		want: []string{"int a2 = a + 7;", "y[0] = a2;"},
+		want: []string{"int a2 = (int)((unsigned int)(a) + 7u);", "y[0] = a2;"},
 	}, {
 		name: "inside a loop body, where the outer name is the parameter",
 		body: decl + "{\n\tfor i := 0; i < 1; i++ {\n\t\ta := a * 2\n\t\ty[0] = a\n\t}\n}",
-		want: []string{"int a2 = a * 2;", "y[0] = a2;"},
+		want: []string{"int a2 = (int)((unsigned int)(a) * 2u);", "y[0] = a2;"},
 	}, {
 		// Each shadow reads the one before it, so the names have to keep
 		// counting rather than both landing on a2.
 		name: "shadowed twice, each from the last",
 		body: decl + "{\n\t{\n\t\ta := a + 1\n\t\t{\n\t\t\ta := a * 3\n\t\t\ty[0] = a\n\t\t}\n\t}\n}",
-		want: []string{"int a2 = a + 1;", "int a3 = a2 * 3;", "y[0] = a3;"},
+		want: []string{"int a2 = (int)((unsigned int)(a) + 1u);", "int a3 = (int)((unsigned int)(a2) * 3u);", "y[0] = a3;"},
 	}, {
 		name: "an ordinary shadow is left as the author spelled it",
 		body: decl + "{\n\t{\n\t\ta := int32(1)\n\t\ty[0] = a\n\t}\n}",
@@ -328,7 +402,7 @@ func TestShadowedLen(t *testing.T) {
 		"\t}\n"+
 		"\ty[0] = float32(len(x))\n"+ // the parameter again, once the shadow is gone
 		"}")
-	for _, want := range []string{"if (i < x_len)", "int x = i + 1;", "y[0] = (float)(x_len);"} {
+	for _, want := range []string{"if (i < x_len)", "int x = (int)((unsigned int)(i) + 1u);", "y[0] = (float)(x_len);"} {
 		if !strings.Contains(u.Source, want) {
 			t.Errorf("generated CUDA does not contain %q:\n%s", want, u.Source)
 		}
@@ -564,11 +638,11 @@ func TestSwitch(t *testing.T) {
 		// the comparisons stand as they are.
 		name: "a case with several values tests each of them",
 		body: decl + "{ switch a { case b, b + 1: y[0] = 1 } }",
-		want: []string{"if (switch_tag == b || switch_tag == b + 1)"},
+		want: []string{"if (switch_tag == b || switch_tag == (int)((unsigned int)(b) + 1u))"},
 	}, {
 		name: "an initialiser gets its own scope",
 		body: decl + "{ switch c := a + b; c { case 1: y[0] = 1 } }",
-		want: []string{"int c = a + b;", "switch (c)"},
+		want: []string{"int c = (int)((unsigned int)(a) + (unsigned int)(b));", "switch (c)"},
 	}}
 
 	for _, tc := range cases {
@@ -845,7 +919,7 @@ func TestParallelAssignment(t *testing.T) {
 		body: "func K(ctx gpu.Ctx, y []float32, n int32) {\n" +
 			"\ti := 0\n\tj := int(n) - 1\n" +
 			"\tfor i < j {\n\t\ty[i], y[j] = y[j], y[i]\n\t\ti, j = i+1, j-1\n\t}\n}",
-		want: []string{"int i_tmp = i + 1;", "int j_tmp = j - 1;", "i = i_tmp;", "j = j_tmp;"},
+		want: []string{"int i_tmp = (int)((unsigned int)(i) + 1u);", "int j_tmp = (int)((unsigned int)(j) - 1u);", "i = i_tmp;", "j = j_tmp;"},
 	}}
 
 	for _, tc := range cases {
@@ -1298,7 +1372,7 @@ func TestAtomics(t *testing.T) {
 	}, {
 		name: "the index may be an expression",
 		body: decl + "{ i := ctx.GlobalID(); gpu.AtomicAddI32(h, i+1, 1) }",
-		want: "atomicAdd(&h[i + 1], 1);",
+		want: "atomicAdd(&h[(int)((unsigned int)(i) + 1u)], 1);",
 	}, {
 		// A shared tile is a __shared__ array rather than a pointer parameter,
 		// so its address is generic; the hardware resolves that back to a
@@ -1408,7 +1482,7 @@ func TestNarrowStorage(t *testing.T) {
 		// with the arithmetic in between happening at int32.
 		name: "int32 out, uint8 back in",
 		body: "func K(ctx gpu.Ctx, out, x []uint8) { out[0] = uint8(int32(x[0]) * 2) }",
-		want: "out[0] = (unsigned char)((int)(x[0]) * 2);",
+		want: "out[0] = (unsigned char)((int)((unsigned int)((int)(x[0])) * 2u));",
 	}, {
 		// The things that are not arithmetic and have to keep working, or the
 		// feature is storage nobody can reach.
@@ -1555,7 +1629,7 @@ func TestWarpPrimitives(t *testing.T) {
 	}, {
 		name: "down, with an expression for the delta",
 		body: decl + "{ i := ctx.GlobalID(); y[0] = ctx.ShuffleDownF32(y[1], i+1) }",
-		want: "y[0] = __shfl_down_sync(0xffffffff, y[1], i + 1);",
+		want: "y[0] = __shfl_down_sync(0xffffffff, y[1], (int)((unsigned int)(i) + 1u));",
 	}, {
 		name: "ballot returns the mask itself",
 		body: decl + "{ h[0] = int32(ctx.Ballot(y[0] > 0)) }",

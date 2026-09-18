@@ -3,11 +3,11 @@ extern "C" __global__ void FIR(float* __restrict__ y, int y_len, const float* __
 {
 	__shared__ float tile[320];
 	int taps = h_len;
-	int base = (int)blockIdx.x * (int)blockDim.x;
+	int base = (int)((unsigned int)((int)blockIdx.x) * (unsigned int)((int)blockDim.x));
 	int t = (int)threadIdx.x;
-	for (int k = t; k < (int)blockDim.x + taps - 1; k += (int)blockDim.x)
+	for (int k = t; k < (int)((unsigned int)((int)blockDim.x) + (unsigned int)(taps) - 1u); k += (int)blockDim.x)
 	{
-		int src = base + k - (taps - 1);
+		int src = (int)((unsigned int)(base) + (unsigned int)(k) - ((unsigned int)(taps) - 1u));
 		float v = 0.0f;
 		if (src >= 0 && src < x_len)
 		{
@@ -16,13 +16,13 @@ extern "C" __global__ void FIR(float* __restrict__ y, int y_len, const float* __
 		tile[k] = v;
 	}
 	__syncthreads();
-	int n = base + t;
+	int n = (int)((unsigned int)(base) + (unsigned int)(t));
 	if (n < y_len)
 	{
 		float acc = 0.0f;
 		for (int k = 0; k < h_len; k++)
 		{
-			acc += h[k] * tile[t + taps - 1 - k];
+			acc += h[k] * tile[(int)((unsigned int)(t) + (unsigned int)(taps) - 1u - (unsigned int)(k))];
 		}
 		y[n] = acc;
 	}

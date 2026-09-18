@@ -211,6 +211,12 @@ type transpiler struct {
 	// empty for almost every kernel: see shadowRename for the one case that
 	// fills it.
 	renamed map[types.Object]string
+	// wrapSigned and wrapUnsigned are the open unsigned-arithmetic domain, or
+	// "" when there is none. See wrapDomain in expr.go: Go's signed overflow
+	// wraps and C's is undefined, so a region of + - * and << is computed in
+	// the unsigned type of the same width and converted back once at its
+	// boundary rather than once per operator.
+	wrapSigned, wrapUnsigned string
 	// labels holds the labelled loops currently open, keyed by their Go name.
 	labels map[string]*labelState
 	// pendingLabel is the label the next loop will carry. It is claimed by

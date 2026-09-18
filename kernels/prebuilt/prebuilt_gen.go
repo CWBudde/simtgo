@@ -83,19 +83,19 @@ var ptxWarpReduceSum []byte
 func init() {
 	simt.RegisterPrebuilt(simt.Prebuilt{
 		Name:         "BandGain",
-		SourceSHA256: "9eafec934c408834e8889058820fad34fece8ccfaaa28196e523562b45e69b72",
+		SourceSHA256: "7e04c6a0c9d807f99b260109528c260f660ece40b842ee77fac4d0db603a1fce",
 		Arch:         "compute_75",
 		PTX:          ptxBandGain,
 	})
 	simt.RegisterPrebuilt(simt.Prebuilt{
 		Name:         "Classify",
-		SourceSHA256: "cd62392c21837f683670edc4587938ee3d5dea0ea9fbde21d9ba0f77ce58e7a5",
+		SourceSHA256: "88538dbe46fcf4eafd38269d87f61bbdc7510a9bfe62bd6f06b1d0f31d7701a7",
 		Arch:         "compute_75",
 		PTX:          ptxClassify,
 	})
 	simt.RegisterPrebuilt(simt.Prebuilt{
 		Name:          "FIR",
-		SourceSHA256:  "1985b2a4ba486d79a94459a5ae56248ac6d0fb08a1958169eb5bca2029baac49",
+		SourceSHA256:  "8879d8053b61c0f12afea47fa728fc883b68f0d6b80090f8f3056aa1c04aadbd",
 		Arch:          "compute_75",
 		PTX:           ptxFIR,
 		RequiredBlock: 256,
@@ -103,7 +103,7 @@ func init() {
 	})
 	simt.RegisterPrebuilt(simt.Prebuilt{
 		Name:         "Gray",
-		SourceSHA256: "32e62e5b9731fccce2ef7455b3fedccf74acb85d2f625a870e3a92a9bd3ccabc",
+		SourceSHA256: "b27ce7c28720356b01beb28cca54b057991221fc727057f62fa012c8ab4f4100",
 		Arch:         "compute_75",
 		PTX:          ptxGray,
 	})
@@ -134,7 +134,7 @@ func init() {
 	})
 	simt.RegisterPrebuilt(simt.Prebuilt{
 		Name:         "Quantize",
-		SourceSHA256: "c1ec7e665682ccd4ad48c36d94e51da53ab8065954b628748780a96dcd6b9bde",
+		SourceSHA256: "4a810d50ae8c5a057a10ac05179502247b01a43eaf06f7c6eb847a3d63c272f5",
 		Arch:         "compute_75",
 		PTX:          ptxQuantize,
 	})
@@ -146,7 +146,7 @@ func init() {
 	})
 	simt.RegisterPrebuilt(simt.Prebuilt{
 		Name:          "Transpose",
-		SourceSHA256:  "7af1809319b9e33c947c21b93f77c3f2d173008597752a692fbf8fc4d6191069",
+		SourceSHA256:  "5f5bf43ac0fc6e7de8b3adaa05f692a50c9533334412d06e53c0ad8058b5b488",
 		Arch:          "compute_75",
 		PTX:           ptxTranspose,
 		RequiredBlock: 256,
