@@ -145,7 +145,8 @@ func (t *transpiler) expr(e ast.Expr) cexpr {
 		}
 		switch e.Op {
 		case token.SUB, token.ADD, token.NOT:
-			return cexpr{fmt.Sprintf("%s%s", e.Op, t.expr(e.X).at(precPrefix)), precPrefix}
+			x := t.expr(e.X).at(precPrefix)
+			return cexpr{e.Op.String() + unarySep(e.Op, x) + x, precPrefix}
 		case token.XOR:
 			return cexpr{"~" + t.expr(e.X).at(precPrefix), precPrefix}
 		}
@@ -177,6 +178,41 @@ func (t *transpiler) expr(e ast.Expr) cexpr {
 	}
 	t.fail(e.Pos(), "unsupported expression %T", e)
 	return atom("")
+}
+
+// unarySep is the space that keeps a unary operator from fusing with its
+// operand into a different token.
+//
+// Go's -(-c) and C's are the same expression, but the obvious spelling of it
+// is "--c", which C++ lexes by maximal munch as the predecrement operator.
+// Where c is a modifiable lvalue that compiles, so nothing reports it: the
+// generated kernel decrements c and yields the decremented value, where the Go
+// negated it twice and changed nothing. The compile error it gives on a
+// prvalue -- "expression must be a modifiable lvalue" -- is the lucky half of
+// the same bug.
+//
+// Only + and - can fuse. "!!x" is two logical nots and "~~x" two complements;
+// neither pair is a token in C++, and neither needs the space.
+//
+// The test for it is the operand's rendered text rather than its AST, because
+// what fuses is what is written: a negative constant folded to "-5", a
+// parenthesised expression, and a nested unary all arrive here as strings, and
+// only the first character decides.
+func unarySep(op token.Token, operand string) string {
+	if operand == "" {
+		return ""
+	}
+	switch op {
+	case token.SUB:
+		if operand[0] == '-' {
+			return " "
+		}
+	case token.ADD:
+		if operand[0] == '+' {
+			return " "
+		}
+	}
+	return ""
 }
 
 func (t *transpiler) binary(e *ast.BinaryExpr) cexpr {
@@ -531,7 +567,7 @@ func (t *transpiler) ident(id *ast.Ident) cexpr {
 		t.fail(id.Pos(), "nil has no device equivalent")
 		return atom("")
 	}
-	return atom("%s", cname(id.Name))
+	return atom("%s", t.cnameOf(obj, id.Name))
 }
 
 // typeOf reports e's checked type, refusing rather than panicking when the

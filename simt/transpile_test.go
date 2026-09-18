@@ -96,6 +96,117 @@ func TestCPrecedence(t *testing.T) {
 	}
 }
 
+// TestUnaryOperatorsDoNotFuse is a lexing rule rather than a precedence one,
+// and it is here because the fuzzer found it: a generated kernel wrote the
+// equivalent of -(-c) and the emitter produced "--c".
+//
+// C++ lexes by maximal munch, so "--c" is the predecrement operator. On the
+// operand the fuzzer happened to produce -- a cast, which is a prvalue --
+// NVRTC refused it with "expression must be a modifiable lvalue", and that is
+// the harmless half of the bug. On a plain variable it compiles, decrements
+// the variable and yields the decremented value, where the Go negated twice
+// and changed nothing: a wrong answer and a side effect the source never had,
+// with nothing to report it.
+//
+// The last two cases are the negative control. "~~" and "!!" are not tokens in
+// C++, so a space there would be noise, and a rule that inserted one anyway
+// would be pinned here as correct.
+func TestUnaryOperatorsDoNotFuse(t *testing.T) {
+	const decl = "func K(ctx gpu.Ctx, y []int32, c int32) "
+	cases := []struct{ name, body, want string }{{
+		name: "a negation of a negation",
+		body: decl + "{ y[0] = -(-c) }",
+		want: "y[0] = - -c;",
+	}, {
+		name: "the same thing written with a space, which Go already allows",
+		body: decl + "{ y[0] = - -c }",
+		want: "y[0] = - -c;",
+	}, {
+		name: "three of them",
+		body: decl + "{ y[0] = -(-(-c)) }",
+		want: "y[0] = - - -c;",
+	}, {
+		name: "a unary plus of a unary plus",
+		body: decl + "{ y[0] = +(+c) }",
+		want: "y[0] = + +c;",
+	}, {
+		name: "a binary minus before a unary one already had its space",
+		body: decl + "{ y[0] = c - (-c) }",
+		want: "y[0] = c - -c;",
+	}, {
+		name: "two complements are not a token",
+		body: decl + "{ y[0] = ^(^c) }",
+		want: "y[0] = ~~c;",
+	}, {
+		name: "two logical nots are not a token either",
+		body: "func K(ctx gpu.Ctx, y []int32, p bool) { if !(!p) { y[0] = 1 } }",
+		want: "if (!!p)",
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := transpile(t, tc.body).Source
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("generated CUDA does not contain %q:\n%s", tc.want, got)
+			}
+		})
+	}
+}
+
+// TestShadowingInitialiserReadsTheOuterVariable is the second thing the fuzzer
+// found, and the worse of the two.
+//
+// Go starts a variable's scope at the end of its declaration, so `a := a + 1`
+// reads the outer a and shadows it from the next statement on. C++ starts a
+// name at its declarator, so "int a = a + 1;" reads the variable being
+// declared, before it has a value. That is accepted, computes from whatever
+// the stack slot held, and NVRTC only sometimes remarks on it -- which is how
+// a rule this basic went unnoticed until a generated kernel wrote one.
+//
+// The last case is the control, and the reason the fix is not simply to rename
+// every shadow: an ordinary one means the same thing in both languages, and a
+// kernel should read as the author wrote it.
+func TestShadowingInitialiserReadsTheOuterVariable(t *testing.T) {
+	const decl = "func K(ctx gpu.Ctx, y []int32, a int32) "
+	cases := []struct {
+		name, body string
+		want       []string
+	}{{
+		name: "a short declaration initialised from what it shadows",
+		body: decl + "{\n\t{\n\t\ta := a + 1\n\t\ty[0] = a\n\t}\n}",
+		want: []string{"int a2 = a + 1;", "y[0] = a2;"},
+	}, {
+		name: "the same rule for var",
+		body: decl + "{\n\t{\n\t\tvar a int32 = a + 7\n\t\ty[0] = a\n\t}\n}",
+		want: []string{"int a2 = a + 7;", "y[0] = a2;"},
+	}, {
+		name: "inside a loop body, where the outer name is the parameter",
+		body: decl + "{\n\tfor i := 0; i < 1; i++ {\n\t\ta := a * 2\n\t\ty[0] = a\n\t}\n}",
+		want: []string{"int a2 = a * 2;", "y[0] = a2;"},
+	}, {
+		// Each shadow reads the one before it, so the names have to keep
+		// counting rather than both landing on a2.
+		name: "shadowed twice, each from the last",
+		body: decl + "{\n\t{\n\t\ta := a + 1\n\t\t{\n\t\t\ta := a * 3\n\t\t\ty[0] = a\n\t\t}\n\t}\n}",
+		want: []string{"int a2 = a + 1;", "int a3 = a2 * 3;", "y[0] = a3;"},
+	}, {
+		name: "an ordinary shadow is left as the author spelled it",
+		body: decl + "{\n\t{\n\t\ta := int32(1)\n\t\ty[0] = a\n\t}\n}",
+		want: []string{"int a = 1;", "y[0] = a;"},
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := transpile(t, tc.body).Source
+			for _, want := range tc.want {
+				if !strings.Contains(got, want) {
+					t.Errorf("generated CUDA does not contain %q:\n%s", want, got)
+				}
+			}
+		})
+	}
+}
+
 // TestShadowedLen pins how len() is resolved. The symbol table is keyed on the
 // object go/types resolved, not on the identifier's text, so a declaration
 // that shadows a slice parameter is a distinct symbol and the parameter's

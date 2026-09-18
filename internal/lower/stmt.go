@@ -107,6 +107,67 @@ func (t *transpiler) assign(s *ast.AssignStmt) {
 	t.line("%s;", t.simple(s))
 }
 
+// shadowRename gives a declared variable a C name of its own when Go and C++
+// disagree about whether it is in scope in its own initialiser.
+//
+// Go says a variable declared in a function is in scope from the end of its
+// declaration, so `a := a + 1` reads the outer a and shadows it afterwards.
+// C++ says a name is in scope from its declarator, so `int a = a + 1;` reads
+// the variable being declared -- itself, uninitialised. The C++ is accepted,
+// and computes from whatever was in that stack slot.
+//
+// Nothing in the repository's own kernels does this and NVRTC only sometimes
+// remarks on it ("variable is used before its value is set"), which is why it
+// survived until a generated kernel wrote it. The fix is to stop the two names
+// being one: the new variable is emitted under a reserved name, and because
+// renamed is keyed on the object rather than on the text, every later use of
+// it follows while the outer variable keeps the name it had.
+//
+// Only a self-reference in the initialiser matters. An ordinary shadow --
+// `a := 1` inside a block that has an outer a -- means the same thing in both
+// languages and is left spelled as the author wrote it.
+func (t *transpiler) shadowRename(id *ast.Ident, rhs ast.Expr) {
+	if rhs == nil || id.Name == "_" {
+		return
+	}
+	obj := t.info.Defs[id]
+	if obj == nil {
+		return
+	}
+	shadows := false
+	ast.Inspect(rhs, func(n ast.Node) bool {
+		use, ok := n.(*ast.Ident)
+		if !ok || use.Name != id.Name {
+			return true
+		}
+		if outer := t.info.Uses[use]; outer != nil && outer != obj {
+			shadows = true
+			return false
+		}
+		return true
+	})
+	if !shadows {
+		return
+	}
+	if t.renamed == nil {
+		t.renamed = map[types.Object]string{}
+	}
+	// reserve counts upwards from the name itself, and collectNames has
+	// already put the Go spelling in the table, so the first candidate free of
+	// anything the author wrote is "a2" -- close enough to the source to be
+	// read against it.
+	t.renamed[obj] = t.reserve(cname(id.Name))
+}
+
+// cnameOf is the C name of one object: its Go name escaped, unless it is one
+// of the few shadowRename had to move out of the way.
+func (t *transpiler) cnameOf(obj types.Object, goName string) string {
+	if n, ok := t.renamed[obj]; ok {
+		return n
+	}
+	return cname(goName)
+}
+
 // define renders a `:=` declaration as `T name = rhs`, without a terminator.
 // Statements and for-clauses both need it, and resolving the declared object
 // in one place keeps the two from deriving the C type differently.
@@ -127,6 +188,7 @@ func (t *transpiler) define(id *ast.Ident, rhs ast.Expr) string {
 		t.poison(obj)
 		return ""
 	}
+	t.shadowRename(id, rhs)
 	decl, ok := t.declare(id)
 	if !ok {
 		return ""
@@ -147,7 +209,7 @@ func (t *transpiler) declare(id *ast.Ident) (string, bool) {
 		return "", false
 	}
 	before := len(t.diags)
-	decl := t.cdecl(obj.Type(), cname(id.Name), id.Pos())
+	decl := t.cdecl(obj.Type(), t.cnameOf(obj, id.Name), id.Pos())
 	if len(t.diags) > before {
 		// The variable exists but has no device type. Every later use of it
 		// would be a fresh complaint about the same declaration.
@@ -685,8 +747,13 @@ func (t *transpiler) decl(s *ast.DeclStmt) {
 					t.poison(obj)
 					continue
 				}
+				if len(vs.Values) != 0 {
+					// `var a = a + 1` has the same scope rule as `a := a + 1`:
+					// Go starts the new variable at the end of the spec.
+					t.shadowRename(n, vs.Values[i])
+				}
 				before := len(t.diags)
-				decl := t.cdecl(obj.Type(), cname(n.Name), n.Pos())
+				decl := t.cdecl(obj.Type(), t.cnameOf(obj, n.Name), n.Pos())
 				if len(t.diags) > before {
 					// Every later use of a variable with no device type would
 					// repeat this one refusal.
