@@ -725,6 +725,26 @@ A transpiler is trusted through evidence, not review.
       and `internal/tolerance` — which three callers depend on and which had no
       tests at all — has them.
 
+      (2026-09-18, later) — **it runs continuously now**:
+      `.github/workflows/fuzz.yml`, daily and on demand, one matrix leg per
+      untagged target so that one finding cannot hide the other. The NVRTC
+      oracle stays out of it for the same reason the parity tests are out of
+      CI: no runner has a toolkit. A case it finds is uploaded as an artifact
+      and committed by hand after it has been read, because a corpus entry is
+      a test every future run pays for and an automated commit would add them
+      faster than anybody diagnoses them.
+
+      Two more findings from the sustained runs, both of them in the
+      *generator* rather than the emitter, which is the outcome the failure
+      message is written to allow for. It clamped every float to ±1000 before
+      converting it to an integer — right in principle, since such a
+      conversion is implementation-dependent in Go and undefined in C — but
+      to a *signed* range, so a negative float reached a `uint32` and the two
+      backends disagreed on every element. And it wrote `o << (o & 31)` on a
+      Go `int`, which is the narrowing above. `NUMERICS.md` gained the
+      conversion rule, because it is a trap for a kernel author and not only
+      for a generator.
+
       What is committed: three targets in `simt/`, two of them running in CI on
       every push. Go runs a fuzz target's seeds as ordinary tests under plain
       `go test`, so the whole host differential costs CI 2.3s and no flag. The
