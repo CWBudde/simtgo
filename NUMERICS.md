@@ -126,10 +126,19 @@ implementation. `--ftz` has nothing to do with it. A subnormal argument or
 result of `expf` is therefore not covered by the sentence above; nothing else
 measured here is affected.
 
-**[unverified]** No subnormal has ever been through a device from this
-repository. No test generates one, and the parity tests use normally
-distributed inputs, so what the hardware does with one is an open question
-rather than an established property.
+**[unverified]** No subnormal has ever been through a **device** from this
+repository, and that part is unchanged: the parity tests use normally
+distributed inputs, so what the hardware does with one is still an open
+question rather than an established property.
+
+**[measured]** Subnormals have now been through the _generated C_, which is a
+weaker statement and worth keeping separate from the one above.
+`internal/fuzz/hostrun` compiles the emitter's output with a host C++ compiler
+and runs it, and the fuzz generator's input distribution puts the smallest
+subnormal, both zeros, both infinities and a NaN into every buffer it makes.
+The host and `gpu.RunCPU` agree on all of them, bit for bit. That says the
+translation preserves them on x86-64; it says nothing about sm_75, where the
+question above is still open.
 
 ## Division, square root and the library functions
 
@@ -323,7 +332,8 @@ In rough order of how much it would be worth learning:
    come down from `1e-5` to something derived rather than guessed.
 3. **Whether the device's `fminf` prefers −0.** Asserted by
    `TestFminFmaxParity`, documented by nobody.
-4. **Subnormals.** Not flushed, per the PTX; never exercised.
+4. **Subnormals.** Not flushed, per the PTX; exercised through the generated
+   C on a host compiler, never through a device.
 5. **`arm64`.** The emulator contracts there and the tolerances were not set
    for it.
 6. **`float64`.** `BandGain` is the only kernel that uses it, its

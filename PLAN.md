@@ -670,6 +670,71 @@ A transpiler is trusted through evidence, not review.
 - [ ] **Differential fuzzing.** Generate random programs in the supported
       subset, run them on the CPU emulator and the GPU, compare. This is the
       backbone of the whole approach and should run continuously.
+
+      (2026-09-18) — the generator, both oracles and the corpus exist; the GPU
+      comparison does not, and cannot here. The definition above turned out to
+      be narrower than the item deserves: it names two backends, and there is a
+      **third that needs no device at all**. `internal/fuzz/hostrun` compiles
+      the emitter's generated CUDA C with an ordinary host C++ compiler behind
+      a small shim and runs it, so "compiles and computes something else" is
+      answerable on a machine with no GPU — which is what CI is. What still
+      needs hardware is only what the device does differently from any C++
+      implementation: the transcendentals, the warp primitives, `fminf`'s
+      treatment of a NaN, and what happens to a subnormal.
+
+      `internal/fuzz` is the generator: one IR rendered twice, as Go source for
+      `simt.Transpile` and as a `func(gpu.Ctx)` closure for `gpu.RunCPU`. The
+      closure is not an interpreter of Go semantics — it *is* Go, running the
+      same operations on the same types — which is what keeps the oracle from
+      being a second implementation somebody has to trust.
+
+      **Measured, on seeds disjoint from the ones the tests use.** The yield is
+      20000/20000: every generated program is accepted by the subset, so a fuzz
+      run tests the emitter rather than the refusal path. Feature coverage over
+      3,000 programs: `switch` 80%, `range` 70%, narrow element types 66%,
+      `SyncThreads` 45%, arrays 45%, shared memory 38%, atomics 32%, `float64`
+      24%, device functions 21%, warp primitives 7.5% — and **structs 0%**.
+      There is no struct node in the IR, which leaves the padding members, the
+      `sizeof` assertion standing in for offsets NVRTC cannot assert, and the
+      `ctype`/`ctypeElem` split untested by this route. That is the next thing
+      the generator wants.
+
+      41.1% of generated programs are in the host oracle's scope — a barrier, a
+      warp primitive, an atomic or a shared tile means something a sequential
+      run cannot reproduce — and 34.8% are also free of a transcendental, which
+      the differential excludes because `sinf` and Go's `math.Sin` are two
+      implementations of a function neither language requires to be correctly
+      rounded. The NVRTC oracle takes all of it.
+
+      **It found two defects in its first minutes**, both in what the catalogue
+      ranks first and neither visible to a golden or a parity test. `-(-c)` was
+      emitted as `--c`, which C++ lexes as predecrement: on a modifiable lvalue
+      that compiles, decrements the variable and yields the decremented value.
+      And `a := a + 1` was emitted as `int a = a + 1;`, where C++ starts the
+      new name at its declarator and Go starts it at the end of the
+      declaration — so the C read the variable being declared instead of the
+      one being shadowed. Both are fixed with tests that fail without the fix.
+
+      **The third finding was in the oracle**, which is the outcome the
+      target's failure message is written to allow for: `tolerance.Agree`
+      settled a NaN for a `float32` and let a `float64` fall through to
+      `reflect.DeepEqual`, so two NaNs in a `[]float64` were reported as
+      disagreeing — "b[2] = NaN, want NaN". A mismatch is a finding about one
+      of the two backends and not a verdict about which, and the emulator has
+      been the wrong one before. The rule is now asked once for both widths,
+      and `internal/tolerance` — which three callers depend on and which had no
+      tests at all — has them.
+
+      What is committed: three targets in `simt/`, two of them running in CI on
+      every push. Go runs a fuzz target's seeds as ordinary tests under plain
+      `go test`, so the whole host differential costs CI 2.3s and no flag. The
+      third, `FuzzOutsideTheSubsetIsRefused`, is the only oracle there is for a
+      rule whose content is that something is refused: it puts each broken rule
+      inside a few hundred lines of generated control flow, where a rule that
+      reads the wrong scope stops firing and `simt/errors_test.go`'s three-line
+      kernels would never notice. Continuous fuzzing still wants a scheduled
+      workflow; it is a `-fuzztime` line, not a design.
+
 - [ ] **`compute-sanitizer`** (`memcheck`, `racecheck`, `initcheck`,
       `synccheck`) over every kernel in CI.
 - [x] **Barrier-divergence analysis.** (2026-09-18) — `internal/lower/diverge.go`,
