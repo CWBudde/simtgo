@@ -353,7 +353,7 @@ func (t *transpiler) deviceFunc(pos token.Pos, obj *types.Func) (string, bool) {
 	}
 	if t.isKernelDecl(fd) {
 		t.fail(pos, "%s is a kernel; a kernel cannot be called from a kernel. "+
-			"Mark it //gocuda:ignore to make it a device function instead", obj.Name())
+			"Mark it %s to make it a device function instead", obj.Name(), DeviceDirective)
 		return "", false
 	}
 	if fd.Recv != nil {

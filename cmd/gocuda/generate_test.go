@@ -209,6 +209,19 @@ func Helper(ctx gpu.Ctx, a []float64) {
 }
 `
 
+const deviceHelper = `package kernels
+
+import "github.com/CWBudde/gocuda/gpu"
+
+// Where is a helper that wants the thread's position, so it takes a Ctx and
+// says what it is.
+//
+//gocuda:device
+func Where(ctx gpu.Ctx) int {
+	return ctx.GlobalID()
+}
+`
+
 const forbiddenImport = `package kernels
 
 import (
@@ -234,6 +247,24 @@ func TestIgnoreDirectiveIsHonouredByGenerate(t *testing.T) {
 	gen := read(t, filepath.Join(o.outDir, genFile))
 	if strings.Contains(gen, "Helper") {
 		t.Errorf("an ignored declaration was gated:\n%s", gen)
+	}
+	if !strings.Contains(gen, "VecAdd") {
+		t.Errorf("the real kernel was not gated:\n%s", gen)
+	}
+}
+
+// TestDeviceDirectiveIsHonouredByGenerate: the same agreement the opt-out
+// needs, for the marker that replaces it. A //gocuda:device helper must not be
+// generated as a kernel -- that is the whole of what the marker does -- and it
+// must still be reachable from one, which the .cu below shows by containing it.
+func TestDeviceDirectiveIsHonouredByGenerate(t *testing.T) {
+	o := fixture(t, map[string]string{"k.go": goodKernel, "helper.go": deviceHelper})
+	if err := run(o); err != nil {
+		t.Fatalf("a device function was lowered as a kernel: %v", err)
+	}
+	gen := read(t, filepath.Join(o.outDir, genFile))
+	if strings.Contains(gen, "Where") {
+		t.Errorf("a //gocuda:device declaration was gated as a kernel:\n%s", gen)
 	}
 	if !strings.Contains(gen, "VecAdd") {
 		t.Errorf("the real kernel was not gated:\n%s", gen)

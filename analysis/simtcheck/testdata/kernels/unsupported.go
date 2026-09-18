@@ -65,3 +65,10 @@ func AtomicOnAnExpression(ctx gpu.Ctx, h []int32) {
 func Float64MathWithoutTheDirective(ctx gpu.Ctx, a []float32) {
 	a[0] = float32(gpu.Sqrt64(2)) // want `is double precision and needs //gocuda:float64`
 }
+
+// Marked is decoration: it takes no gpu.Ctx, so nothing about it would have
+// been a kernel to begin with. Nothing calls it either, which is the point --
+// the check is package-wide, not part of the lowering.
+//
+//gocuda:device
+func Marked(x float32) float32 { return x } // want `//gocuda:device does nothing on Marked`

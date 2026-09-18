@@ -347,9 +347,29 @@ func TestDeviceFunctions(t *testing.T) {
 		},
 	}, {
 		// gpu.Ctx has no device representation, so it is dropped from the
-		// signature and from the call, the way a kernel's own is. The opt-out
+		// signature and from the call, the way a kernel's own is. The marker
 		// is what stops the helper being taken for a kernel in its own right.
-		name: "a helper taking gpu.Ctx, opted out of being a kernel",
+		name: "a helper taking gpu.Ctx, marked as a device function",
+		body: "//gocuda:device\nfunc where(ctx gpu.Ctx) int { return ctx.GlobalID() }\n\n" +
+			"func K(ctx gpu.Ctx, y []float32) { i := where(ctx); if i < len(y) { y[i] = 1 } }",
+		want: []string{"__device__ int where();", "int i = where();"},
+	}, {
+		// The same helper with a slice beside the Ctx, which is the shape that
+		// proves deviceParams and deviceArgs drop the Ctx in step: the
+		// signature loses it and so does the call, and the slice that follows
+		// still splits into a pointer and a length on both sides. An emitter
+		// that dropped it on one side only would emit a call C rejects.
+		name: "a marked helper whose Ctx is followed by a slice",
+		body: "//gocuda:device\nfunc mine(ctx gpu.Ctx, xs []float32) float32 { return xs[ctx.GlobalID()%len(xs)] }\n\n" +
+			"func K(ctx gpu.Ctx, y, x []float32) { y[0] = mine(ctx, x) }",
+		want: []string{
+			"__device__ float mine(float* xs, int xs_len);",
+			"y[0] = mine(x, x_len);",
+		},
+	}, {
+		// //gocuda:ignore keeps meaning what it always meant: not a kernel.
+		// A helper that carries it is still lowered when a kernel calls it.
+		name: "//gocuda:ignore still opts a Ctx helper out of being a kernel",
 		body: "//gocuda:ignore\nfunc where(ctx gpu.Ctx) int { return ctx.GlobalID() }\n\n" +
 			"func K(ctx gpu.Ctx, y []float32) { i := where(ctx); if i < len(y) { y[i] = 1 } }",
 		want: []string{"__device__ int where();", "int i = where();"},

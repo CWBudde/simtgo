@@ -159,6 +159,19 @@ func importRefusal(path string) string {
 // a kernel.
 const IgnoreDirective = "//gocuda:ignore"
 
+// DeviceDirective marks a gpu.Ctx-taking function as a device function rather
+// than a kernel.
+//
+// It exists because the signature rule cannot tell the two apart: a helper
+// that wants the thread's position takes a gpu.Ctx, and taking one is what
+// makes a function a kernel. Until this directive the only way to say so was
+// IgnoreDirective, which says what the function is *not* -- it opts out of
+// being generated, which is also what a Ctx-taking function nobody lowers
+// wants. The two now mean different things, and the difference is legible at
+// the declaration: //gocuda:ignore is "leave this alone", //gocuda:device is
+// "this runs on the device, as a __device__ function".
+const DeviceDirective = "//gocuda:device"
+
 // Float64Directive opts a kernel into double precision.
 //
 // It is opt-in rather than simply allowed because the cost is invisible in the
@@ -178,6 +191,14 @@ const Float64Directive = "//gocuda:float64"
 // go vet has no //nolint equivalent -- there is no general way for a user to
 // silence one of its diagnostics -- so the check has to bring its own.
 func Ignored(doc *ast.CommentGroup) bool { return hasDirective(doc, IgnoreDirective) }
+
+// DeviceMarked reports whether doc declares the function a device function.
+//
+// Unlike Ignored it is not honoured on a file's package comment. A file-wide
+// "everything here takes a Ctx and none of it is a kernel" is what
+// //gocuda:ignore already says; the point of this directive is that it names
+// one declaration.
+func DeviceMarked(doc *ast.CommentGroup) bool { return hasDirective(doc, DeviceDirective) }
 
 // Float64Enabled reports whether doc carries the double-precision opt-in.
 func Float64Enabled(doc *ast.CommentGroup) bool { return hasDirective(doc, Float64Directive) }
@@ -217,18 +238,27 @@ func CheckImports(f *ast.File) []Diagnostic {
 }
 
 // IsKernelDecl reports whether fd is a kernel: a plain function whose first
-// parameter is a gpu.Ctx.
+// parameter is a gpu.Ctx and whose doc comment claims it is something else.
 //
 // Taking a Ctx is what a kernel is for, and nothing else in this repository
 // does it at the top level -- the CPU emulator is driven by function literals,
 // which are not declarations. Making the marker the signature rather than a
 // comment is deliberate: an opt-in directive that someone forgets restores
-// exactly the "compiles fine, dies in main()" failure this phase removes.
+// exactly the "compiles fine, dies in main()" failure this phase removes. The
+// two directives that take it back both say so at the declaration:
+// //gocuda:ignore means "never lowered", //gocuda:device means "lowered, but
+// as a __device__ function a kernel calls".
 func IsKernelDecl(info *types.Info, fd *ast.FuncDecl) bool {
-	if fd.Recv != nil || fd.Body == nil || fd.Type.Params == nil || len(fd.Type.Params.List) == 0 {
+	if Ignored(fd.Doc) || DeviceMarked(fd.Doc) {
 		return false
 	}
-	if Ignored(fd.Doc) {
+	return takesCtx(info, fd)
+}
+
+// takesCtx reports whether fd has the signature a kernel has, before any
+// directive has had its say.
+func takesCtx(info *types.Info, fd *ast.FuncDecl) bool {
+	if fd.Recv != nil || fd.Body == nil || fd.Type.Params == nil || len(fd.Type.Params.List) == 0 {
 		return false
 	}
 	first := fd.Type.Params.List[0]
@@ -237,4 +267,34 @@ func IsKernelDecl(info *types.Info, fd *ast.FuncDecl) bool {
 	}
 	obj := info.Defs[first.Names[0]]
 	return obj != nil && IsCtx(obj.Type())
+}
+
+// CheckDeviceMarkers refuses //gocuda:device on a function that takes no
+// gpu.Ctx.
+//
+// There the directive changes nothing: such a function is already an ordinary
+// helper, and already lowers to a __device__ function the moment a kernel
+// calls it. A marker that is sometimes load-bearing and sometimes decoration
+// is read as decoration everywhere, and the one place it is load-bearing --
+// keeping a Ctx-taking helper from being generated as a kernel in its own
+// right -- is exactly where being ignored would hurt.
+//
+// It is a package-wide check, like CheckImports, rather than something the
+// lowering notices: a marked function no kernel reaches is never lowered at
+// all, so a check that lived in deviceFunc would pass over the case where the
+// mistake is easiest to make.
+func CheckDeviceMarkers(info *types.Info, f *ast.File) []Diagnostic {
+	var diags []Diagnostic
+	for _, d := range f.Decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if !ok || !DeviceMarked(fd.Doc) || takesCtx(info, fd) {
+			continue
+		}
+		diags = append(diags, Diagnostic{
+			Pos: fd.Pos(),
+			Msg: DeviceDirective + " does nothing on " + fd.Name.Name + ", which takes no gpu.Ctx: " +
+				"it is already a device function wherever a kernel calls it, and the directive only means anything on a function the signature rule would otherwise make a kernel",
+		})
+	}
+	return diags
 }

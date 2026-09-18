@@ -31,7 +31,9 @@ Without it those refusals only surface when the kernel is built at run time.
 
 A function that takes a gpu.Ctx but is deliberately never lowered can be
 excluded with a //gocuda:ignore line in its doc comment; the same line in a
-file's package comment excludes the whole file.`
+file's package comment excludes the whole file. A helper that takes a gpu.Ctx
+because it needs the thread's position, and is meant to be called by a kernel,
+says so with //gocuda:device instead.`
 
 // Analyzer is the gocuda vet check. It is exported so that it can be composed
 // into someone else's multichecker.
@@ -84,6 +86,10 @@ func run(pass *analysis.Pass) (any, error) {
 	}
 	for _, f := range files {
 		report(pass, lower.CheckImports(f))
+		// Also a property of the package: the function carrying a pointless
+		// //gocuda:device may be one no kernel reaches, so nothing in the
+		// per-kernel lowering below would ever look at it.
+		report(pass, lower.CheckDeviceMarkers(pass.TypesInfo, f))
 	}
 	for _, fd := range kernels {
 		// The Unit is discarded: this runs the real lowering rather than a

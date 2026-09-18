@@ -161,12 +161,42 @@ func TestUnsupported(t *testing.T) {
 			"func K(ctx gpu.Ctx, a []float32) { a[0] = stage(ctx) }",
 		want: "shared memory may only be declared in a kernel",
 	}, {
-		// Without the opt-out the helper is a kernel in its own right, and
+		// Without a marker the helper is a kernel in its own right, and
 		// calling a kernel is what the previous case refuses.
-		name: "a gpu.Ctx helper that did not opt out of being a kernel",
+		name: "a gpu.Ctx helper that did not say it was a device function",
 		body: "func where(ctx gpu.Ctx) int { return ctx.GlobalID() }\n\n" +
 			"func K(ctx gpu.Ctx, a []float32) { a[0] = float32(where(ctx)) }",
 		want: "where is a kernel",
+	}, {
+		// And the refusal points at the marker that says what the helper is,
+		// not at the one that says what it is not.
+		name: "the refusal names the device marker",
+		body: "func where(ctx gpu.Ctx) int { return ctx.GlobalID() }\n\n" +
+			"func K(ctx gpu.Ctx, a []float32) { a[0] = float32(where(ctx)) }",
+		want: "Mark it //gocuda:device",
+	}, {
+		// The marker only means anything where the signature rule would
+		// otherwise make a kernel. Anywhere else it is decoration, and a
+		// marker that is decoration half the time is read as decoration.
+		name: "//gocuda:device on a function that takes no gpu.Ctx",
+		body: "//gocuda:device\nfunc half(x float32) float32 { return x / 2 }\n\n" +
+			"func K(ctx gpu.Ctx, a []float32) { a[0] = half(a[1]) }",
+		want: "//gocuda:device does nothing on half, which takes no gpu.Ctx",
+	}, {
+		// Refused even though nothing reaches it: the mistake is easiest to
+		// make on a function no kernel calls, so a check that only ran along
+		// the lowering paths would pass over exactly that case.
+		name: "//gocuda:device on a function nothing calls",
+		body: "//gocuda:device\nfunc unused(x float32) float32 { return x }\n\n" +
+			"func K(ctx gpu.Ctx, a []float32) { a[0] = 1 }",
+		want: "//gocuda:device does nothing on unused",
+	}, {
+		// Shared memory and the launch contract are promises about a launch,
+		// and a helper has none -- which the marker does not change.
+		name: "shared memory inside a marked device function",
+		body: "//gocuda:device\nfunc stage(ctx gpu.Ctx) float32 { s := ctx.SharedF32(4)\nreturn s[0] }\n\n" +
+			"func K(ctx gpu.Ctx, a []float32) { a[0] = stage(ctx) }",
+		want: "shared memory may only be declared in a kernel",
 	}, {
 		// The refusal that lives in ctype cannot see this one: no float64 is
 		// written down anywhere. The argument is an untyped constant and the
