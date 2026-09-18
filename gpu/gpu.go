@@ -255,6 +255,15 @@ func (s *blockState) reportLocked(msg string) {
 // goroutine per thread is nothing like a warp. Benchmarks should compare
 // against an ordinary Go loop instead.
 //
+// One contract it does not check is aliasing. The transpiler declares every
+// slice parameter __restrict__ and simt.Kernel.Launch refuses two arguments
+// that were bound to overlapping device memory; here the kernel's slices are
+// captured by the closure and never pass through RunCPU, so there is nothing
+// to compare. It is the weaker side of the pair on purpose rather than by
+// oversight: this kernel is ordinary Go, where two aliased slices are simply
+// two aliased slices, so the emulator computes an answer where the device
+// would have undefined behaviour -- and a launch is where that is caught.
+//
 // RunCPU panics if the kernel violates the block-level contract the emulator
 // can check (see SharedF32 and AssumeBlockDim) or if the kernel itself panics
 // on one of its thread goroutines. The panic is raised here, on RunCPU's own

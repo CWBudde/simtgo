@@ -171,6 +171,18 @@ func TestGeneratedCCompiles(t *testing.T) {
 			"\tj := len(y) - 1\n" +
 			"\tfor i < j {\n\t\ty[i], y[j] = y[j], y[i]\n\t\ti, j = i+1, j-1\n\t}\n}",
 	}, {
+		// The pointer qualifiers, which every signature now carries. const is
+		// only sound if nothing writes through the parameter, and a __device__
+		// function taking `const T* __restrict__` has to be callable with the
+		// kernel's own pointer -- both of which are questions for the compiler
+		// and for nobody else.
+		name: "const and __restrict__ across a device function and an atomic",
+		body: "func total(xs []float32) float32 { s := float32(0)\n\tfor _, v := range xs { s += v }\n\treturn s }\n\n" +
+			"func fill(ys []float32, v float32) { for i := range ys { ys[i] = v } }\n\n" +
+			"func K(ctx gpu.Ctx, y []float32, x []float32, h []int32) {\n" +
+			"\tfill(y, total(x))\n" +
+			"\tgpu.AtomicAddI32(h, 0, 1)\n}",
+	}, {
 		name: "every axis of the grid",
 		body: "func K(ctx gpu.Ctx, y []float32) {\n" +
 			"\ti := ctx.GlobalIDX() + ctx.GlobalIDY() + ctx.GlobalIDZ()\n" +

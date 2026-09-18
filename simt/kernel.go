@@ -27,10 +27,11 @@ type Kernel struct {
 	// answers the same question: what this PTX targets.
 	Arch string
 
-	// RequiredBlock and SharedBytes are what the kernel's source demands of a
-	// launch; see Unit.
+	// RequiredBlock, SharedBytes and Params are what the kernel's source
+	// demands of a launch; see Unit.
 	RequiredBlock int
 	SharedBytes   int
+	Params        []Param
 
 	fn *cuda.Function
 }
@@ -118,6 +119,7 @@ func Build(dev *cuda.Context, fsys fs.FS, name string, opts ...BuildOption) (*Ke
 		Arch:          res.Arch,
 		RequiredBlock: u.RequiredBlock,
 		SharedBytes:   u.SharedBytes,
+		Params:        u.Params,
 		fn:            res.Func,
 	}
 	if res.Prebuilt {
@@ -155,6 +157,84 @@ func (e *BlockSizeError) Error() string {
 	return fmt.Sprintf("simt: %s requires block == %d, got %d", e.Kernel, e.Want, e.Got)
 }
 
+// AliasError is a launch that bound two of a kernel's slice parameters to
+// overlapping device memory while the kernel writes through one of them.
+type AliasError struct {
+	Kernel string
+	Write  string // the parameter the kernel writes through
+	Other  string // the parameter overlapping it
+}
+
+func (e *AliasError) Error() string {
+	return fmt.Sprintf("simt: %s: parameters %s and %s were given overlapping device memory, "+
+		"and the kernel writes through %s; the generated C declares every pointer __restrict__, "+
+		"which promises that they do not overlap",
+		e.Kernel, e.Write, e.Other, e.Write)
+}
+
+// checkAliasing refuses a launch that breaks the __restrict__ promise.
+//
+// The Go source cannot make that promise: VecAdd(ctx, c, a, b) is three
+// parameters and may be handed one buffer three times. The qualifier is worth
+// having anyway -- it is most of what const/__restrict__ buys on a device --
+// so the promise is checked here, against the buffers the caller actually
+// bound, rather than left as undefined behaviour that shows up as wrong
+// numbers on one architecture.
+//
+// Two read-only parameters may share memory, and that is not an oversight:
+// what __restrict__ forbids is an object being modified through one pointer
+// and reached through another, so an overlap matters only when one side of it
+// is written. An argument that cannot report its range -- a raw cuda.Arg
+// holding a pointer -- is skipped, because there is nothing to compare.
+//
+// The CPU emulator makes no such check. RunCPU takes a closure, so the kernel's
+// slices never pass through it and it has no way to see that two of them are
+// the same Go slice; there the kernel is ordinary Go, where aliasing is
+// defined, so the two backends agree on everything except the diagnosis.
+func (k *Kernel) checkAliasing(args []any) error {
+	if len(args) != len(k.Params) {
+		// A mismatched call is a different error, and BuildArgs or the driver
+		// will say so; guessing at which argument is which would not.
+		return nil
+	}
+	type span struct {
+		base  cuda.DevPtr
+		bytes int
+		param int
+	}
+	var spans []span
+	for i, a := range args {
+		if !k.Params[i].Slice {
+			continue
+		}
+		r, ok := a.(cuda.Ranger)
+		if !ok {
+			continue
+		}
+		base, bytes := r.DeviceRange()
+		if bytes == 0 {
+			continue
+		}
+		spans = append(spans, span{base: base, bytes: bytes, param: i})
+	}
+	for i, a := range spans {
+		for _, b := range spans[i+1:] {
+			if a.base >= b.base+cuda.DevPtr(b.bytes) || b.base >= a.base+cuda.DevPtr(a.bytes) {
+				continue
+			}
+			write, other := a.param, b.param
+			if k.Params[write].ReadOnly {
+				write, other = other, write
+			}
+			if k.Params[write].ReadOnly {
+				continue // both only read it, which restrict allows
+			}
+			return &AliasError{Kernel: k.Name, Write: k.Params[write].Name, Other: k.Params[other].Name}
+		}
+	}
+	return nil
+}
+
 // Launch runs the kernel over grid blocks of block threads. Arguments are
 // given as Go values -- device slices, float32, int32 -- in the same order as
 // the Go kernel's parameters, minus the gpu.Ctx.
@@ -162,6 +242,8 @@ func (e *BlockSizeError) Error() string {
 // A kernel that declared its block size with gpu.Ctx.AssumeBlockDim is refused
 // at any other size: its shared tiles are sized for that one geometry, so a
 // different block would stage the wrong number of samples and read past them.
+// A launch that binds one device buffer to two parameters is refused too, when
+// the kernel writes through either of them; see checkAliasing.
 func (k *Kernel) Launch(grid, block int, args ...any) error {
 	return k.LaunchDim(cuda.D1(grid), cuda.D1(block), args...)
 }
@@ -176,6 +258,9 @@ func (k *Kernel) LaunchDim(grid, block cuda.Dim3, args ...any) error {
 	threads := int(block.X) * int(block.Y) * int(block.Z)
 	if k.RequiredBlock != 0 && threads != k.RequiredBlock {
 		return &BlockSizeError{Kernel: k.Name, Want: k.RequiredBlock, Got: threads}
+	}
+	if err := k.checkAliasing(args); err != nil {
+		return err
 	}
 	flat, err := cuda.BuildArgs(args...)
 	if err != nil {

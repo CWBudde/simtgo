@@ -234,6 +234,17 @@ func (t *transpiler) call(c *ast.CallExpr) cexpr {
 			if !ok {
 				return atom("")
 			}
+			if decl := t.declOf(obj); decl != nil {
+				// The same promise Launch checks, one level down: the callee's
+				// pointers are __restrict__, so handing it one buffer twice is
+				// undefined behaviour the moment it writes through either.
+				if a, b, aliased := t.aliasedArgs(c, decl); aliased {
+					t.fail(c.Pos(), "%s is passed the same buffer as both %s and %s, and it writes through one of them; "+
+						"the generated C declares each parameter __restrict__, which promises they do not overlap",
+						obj.Name(), a, b)
+					return atom("")
+				}
+			}
 			return atom("%s(%s)", name, t.deviceArgs(c, obj))
 		}
 		t.fail(c.Pos(), "calls to %s are not supported in kernels", f.Name)

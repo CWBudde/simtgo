@@ -740,6 +740,48 @@ func TileProbe(ctx gpu.Ctx, out []float32) {
 	assertEqual(t, "total", got, []float32{blocks * block})
 }
 
+// TestAliasedLaunchIsRefused is the other half of __restrict__.
+//
+// The generated C promises that a kernel's pointer parameters do not overlap,
+// and the Go source cannot make that promise: VecAdd(ctx, c, a, b) is three
+// parameters and one buffer may fill all three. So the promise is checked
+// where the buffers are known, and a launch that breaks it is refused with an
+// error instead of producing whatever that architecture's scheduler made of
+// the reordering it was told it could do.
+//
+// The accepted half is here too, and it is the half that keeps the check
+// honest: two parameters the kernel only reads may share memory, because
+// __restrict__ only forbids reaching a *modified* object through another
+// pointer. A check that refused every repeat would forbid `dot(x, x)`.
+func TestAliasedLaunchIsRefused(t *testing.T) {
+	ctx := device(t)
+	k, err := simt.Build(ctx, gocuda.Kernels(), "VecAdd")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	const n, block = 1024, 256
+	d1, _ := cuda.Upload(ctx, randomSignal(n))
+	d2, _ := cuda.Upload(ctx, randomSignal(n))
+	defer d1.Free()
+	defer d2.Free()
+
+	// c and a are the same buffer, and VecAdd writes c.
+	err = k.LaunchN(n, block, d1, d1, d2)
+	var bad *simt.AliasError
+	if !errors.As(err, &bad) {
+		t.Fatalf("launching with c and a aliased gave %v, want an AliasError", err)
+	}
+	if bad.Write != "c" || bad.Other != "a" {
+		t.Errorf("AliasError names %s and %s, want c and a", bad.Write, bad.Other)
+	}
+
+	// The two read-only parameters may be the same buffer: nothing is
+	// modified through either, so there is nothing for restrict to forbid.
+	if err := k.LaunchN(n, block, d1, d2, d2); err != nil {
+		t.Errorf("two read-only parameters sharing a buffer were refused: %v", err)
+	}
+}
+
 // TestParallelAssignmentParity runs the two-phase assignment on the device.
 //
 // It is a probe rather than a committed kernel for the reason the struct

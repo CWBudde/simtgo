@@ -72,3 +72,11 @@ func Float64MathWithoutTheDirective(ctx gpu.Ctx, a []float32) {
 //
 //gocuda:device
 func Marked(x float32) float32 { return x } // want `//gocuda:device does nothing on Marked`
+
+// blend writes through one of its two buffers, so passing it the same one
+// twice makes two __restrict__ pointers alias inside the generated C.
+func blend(out, a []float32) { out[0] = a[0] * 2 }
+
+func AliasedCall(ctx gpu.Ctx, y []float32) {
+	blend(y, y) // want `passed the same buffer as both out and a`
+}

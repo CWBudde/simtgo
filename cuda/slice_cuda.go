@@ -64,6 +64,11 @@ func (s *Slice[T]) Arg() Arg { return ArgDev(s.ptr) }
 // transpiler emits for a Go slice parameter.
 func (s *Slice[T]) KernelArgs() []Arg { return []Arg{ArgDev(s.ptr), ArgI32(int32(s.n))} }
 
+// DeviceRange reports the memory the buffer occupies, which is what tells two
+// kernel arguments apart -- or finds them to be the same allocation. See
+// Ranger.
+func (s *Slice[T]) DeviceRange() (DevPtr, int) { return s.ptr, s.n * sizeOf[T]() }
+
 // Free releases the buffer.
 func (s *Slice[T]) Free() {
 	if s.ptr != 0 {

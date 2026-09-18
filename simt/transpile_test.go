@@ -327,14 +327,14 @@ func TestDeviceFunctions(t *testing.T) {
 		body: "func total(xs []float32) float32 { s := float32(0)\nfor _, v := range xs { s += v }\nreturn s }\n\n" +
 			"func K(ctx gpu.Ctx, y, x []float32) { y[0] = total(x) }",
 		want: []string{
-			"__device__ float total(float* xs, int xs_len);",
+			"__device__ float total(const float* __restrict__ xs, int xs_len);",
 			"y[0] = total(x, x_len);",
 		},
 	}, {
 		name: "a helper with no result",
 		body: "func fill(xs []float32, v float32) { for i := range xs { xs[i] = v } }\n\n" +
 			"func K(ctx gpu.Ctx, y []float32) { fill(y, 1) }",
-		want: []string{"__device__ void fill(float* xs, int xs_len, float v);", "fill(y, y_len, 1.0f);"},
+		want: []string{"__device__ void fill(float* __restrict__ xs, int xs_len, float v);", "fill(y, y_len, 1.0f);"},
 	}, {
 		name: "a helper reached only through another helper",
 		body: "func inner(x float32) float32 { return x + 1 }\n\n" +
@@ -363,7 +363,7 @@ func TestDeviceFunctions(t *testing.T) {
 		body: "//gocuda:device\nfunc mine(ctx gpu.Ctx, xs []float32) float32 { return xs[ctx.GlobalID()%len(xs)] }\n\n" +
 			"func K(ctx gpu.Ctx, y, x []float32) { y[0] = mine(ctx, x) }",
 		want: []string{
-			"__device__ float mine(float* xs, int xs_len);",
+			"__device__ float mine(const float* __restrict__ xs, int xs_len);",
 			"y[0] = mine(x, x_len);",
 		},
 	}, {
@@ -480,6 +480,119 @@ func TestParallelAssignment(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestReadOnlyParameters pins the const half of the pointer qualifiers.
+//
+// A parameter is const only when nothing writes through it on any path the
+// kernel reaches, which makes the analysis interprocedural: a slice is
+// forwarded to a device function as a bare pointer, and nothing at the call
+// site says what happens to it. Marking a written parameter const is a compile
+// error at best, so every case here is really asking whether the analysis
+// stayed pessimistic where it could not see.
+func TestReadOnlyParameters(t *testing.T) {
+	cases := []struct {
+		name, body string
+		want       []string
+	}{{
+		name: "what the kernel writes is not const, what it reads is",
+		body: "func K(ctx gpu.Ctx, y, x []float32) { i := ctx.GlobalID(); if i < len(y) { y[i] = x[i] } }",
+		want: []string{"float* __restrict__ y, int y_len, const float* __restrict__ x, int x_len"},
+	}, {
+		// The case the analysis exists for: nothing in K's own body writes y.
+		name: "a write inside a device function reaches the caller's parameter",
+		body: "func fill(xs []float32, v float32) { for i := range xs { xs[i] = v } }\n\n" +
+			"func K(ctx gpu.Ctx, y []float32) { fill(y, 1) }",
+		want: []string{
+			"__device__ void fill(float* __restrict__ xs, int xs_len, float v);",
+			"__global__ void K(float* __restrict__ y, int y_len)",
+		},
+	}, {
+		name: "a helper that only reads leaves both parameters const",
+		body: "func total(xs []float32) float32 { s := float32(0)\nfor _, v := range xs { s += v }\nreturn s }\n\n" +
+			"func K(ctx gpu.Ctx, y, x []float32) { y[0] = total(x) }",
+		want: []string{
+			"__device__ float total(const float* __restrict__ xs, int xs_len);",
+			"__global__ void K(float* __restrict__ y, int y_len, const float* __restrict__ x, int x_len)",
+		},
+	}, {
+		name: "a write two calls deep still reaches the parameter",
+		body: "func inner(xs []float32) { xs[0] = 1 }\n\n" +
+			"func outer(xs []float32) { inner(xs) }\n\n" +
+			"func K(ctx gpu.Ctx, y, x []float32) { outer(y); y[1] = x[0] }",
+		want: []string{
+			"__device__ void inner(float* __restrict__ xs, int xs_len);",
+			"__device__ void outer(float* __restrict__ xs, int xs_len);",
+		},
+	}, {
+		// An atomic is the one write that is not an assignment.
+		name: "an atomic counts as a write",
+		body: "func K(ctx gpu.Ctx, h []int32, x []int32) { gpu.AtomicAddI32(h, 0, x[0]) }",
+		want: []string{"int* __restrict__ h, int h_len, const int* __restrict__ x, int x_len"},
+	}, {
+		name: "an atomic inside a device function counts too",
+		body: "func bump(h []int32, i int) { gpu.AtomicAddI32(h, i, 1) }\n\n" +
+			"func K(ctx gpu.Ctx, h []int32) { bump(h, ctx.GlobalID()) }",
+		want: []string{"__global__ void K(int* __restrict__ h, int h_len)"},
+	}, {
+		name: "a write to a struct field of an element",
+		body: "type P struct{ X, Y float32 }\n\n" +
+			"func K(ctx gpu.Ctx, ps []P, qs []P) { ps[0].X = qs[0].Y }",
+		want: []string{"P* __restrict__ ps, int ps_len, const P* __restrict__ qs, int qs_len"},
+	}, {
+		name: "an increment is a write",
+		body: "func K(ctx gpu.Ctx, n []int32, x []int32) { n[0]++; n[1] = x[0] }",
+		want: []string{"int* __restrict__ n, int n_len, const int* __restrict__ x, int x_len"},
+	}, {
+		// A shared tile is not a parameter, so writing one says nothing about
+		// the parameter it was filled from.
+		name: "staging into a shared tile leaves the source const",
+		body: "func K(ctx gpu.Ctx, y, x []float32) {\n" +
+			"\tctx.AssumeBlockDim(64)\n\ts := ctx.SharedF32(64)\n" +
+			"\ts[ctx.ThreadIdx()] = x[ctx.GlobalID()]\n\tctx.SyncThreads()\n" +
+			"\ty[ctx.GlobalID()] = s[0]\n}",
+		want: []string{"float* __restrict__ y, int y_len, const float* __restrict__ x, int x_len"},
+	}, {
+		// Passing one buffer to two parameters is only a problem when the
+		// callee writes through one of them; two readers may share memory,
+		// because restrict is a promise about what is modified.
+		name: "a buffer passed twice to a helper that only reads",
+		body: "func dot(a, b []float32) float32 { s := float32(0)\nfor i := range a { s += a[i] * b[i] }\nreturn s }\n\n" +
+			"func K(ctx gpu.Ctx, y, x []float32) { y[0] = dot(x, x) }",
+		want: []string{"y[0] = dot(x, x_len, x, x_len);"},
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := transpile(t, tc.body).Source
+			for _, w := range tc.want {
+				if !strings.Contains(got, w) {
+					t.Errorf("generated CUDA does not contain %q:\n%s", w, got)
+				}
+			}
+		})
+	}
+}
+
+// TestUnitParams checks that what a launch needs to know about a parameter
+// travels with the unit: which arguments are buffers, and which of those the
+// kernel writes. The aliasing check at launch is exactly this list plus the
+// pointers the caller bound.
+func TestUnitParams(t *testing.T) {
+	u := transpile(t, "func K(ctx gpu.Ctx, y, x []float32, k float32) { y[0] = x[0] * k }")
+	want := []simt.Param{
+		{Name: "y", Slice: true},
+		{Name: "x", Slice: true, ReadOnly: true},
+		{Name: "k"},
+	}
+	if len(u.Params) != len(want) {
+		t.Fatalf("got %d parameters, want %d: %+v", len(u.Params), len(want), u.Params)
+	}
+	for i, p := range u.Params {
+		if p != want[i] {
+			t.Errorf("parameter %d is %+v, want %+v", i, p, want[i])
+		}
 	}
 }
 
@@ -632,7 +745,8 @@ func TestWideScalars(t *testing.T) {
 	u := transpile(t, "func K(ctx gpu.Ctx, a []int64, b []uint32, c []uint64, d []bool, n int64, m uint32) {\n"+
 		"\ta[0] = n\n\tb[0] = m\n\tc[0] = 7\n\td[0] = n > 0\n}")
 	for _, want := range []string{
-		"long long* a", "unsigned int* b", "unsigned long long* c", "bool* d",
+		"long long* __restrict__ a", "unsigned int* __restrict__ b",
+		"unsigned long long* __restrict__ c", "bool* __restrict__ d",
 		"long long n", "unsigned int m",
 		// The suffix is what keeps the literal's type the one Go gave it,
 		// rather than the first C++ type it happens to fit in.
@@ -648,7 +762,7 @@ func TestWideScalars(t *testing.T) {
 // constant keeps its precision rather than being rounded to a float.
 func TestFloat64Directive(t *testing.T) {
 	onFunc := transpile(t, "//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float64) { y[0] = 0.1 }")
-	if !strings.Contains(onFunc.Source, "double* y") {
+	if !strings.Contains(onFunc.Source, "double* __restrict__ y") {
 		t.Errorf("directive on the function had no effect:\n%s", onFunc.Source)
 	}
 	if !strings.Contains(onFunc.Source, "y[0] = 0.1;") {
@@ -663,7 +777,7 @@ func TestFloat64Directive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("directive in the package comment was not honoured: %v", err)
 	}
-	if !strings.Contains(u.Source, "double* y") {
+	if !strings.Contains(u.Source, "double* __restrict__ y") {
 		t.Errorf("file-wide directive had no effect:\n%s", u.Source)
 	}
 }

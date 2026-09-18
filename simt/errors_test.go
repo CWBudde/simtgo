@@ -252,6 +252,16 @@ func TestUnsupported(t *testing.T) {
 		body: "func K(ctx gpu.Ctx, y []float32) { var p, q [2]float32; p, q = q, p; y[0] = p[0] }",
 		want: "cannot be assigned",
 	}, {
+		// Every pointer in the generated C is __restrict__, and a launch
+		// checks that against the buffers it was given. A call inside the
+		// kernel has no launch to check it, so it is refused where it is
+		// lowered -- one Go call with nothing wrong with it, and two aliased
+		// restrict pointers in C.
+		name: "one buffer passed as two parameters of a helper that writes",
+		body: "func blend(out, a []float32) { out[0] = a[0] * 2 }\n\n" +
+			"func K(ctx gpu.Ctx, y []float32) { blend(y, y) }",
+		want: "blend is passed the same buffer as both out and a",
+	}, {
 		name: "map",
 		body: "func K(ctx gpu.Ctx, a []float32) { m := map[int]int{}; a[0] = float32(m[1]) }",
 		want: "unsupported type",
