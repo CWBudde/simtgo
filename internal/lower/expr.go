@@ -180,6 +180,53 @@ func (t *transpiler) expr(e ast.Expr) cexpr {
 	return atom("")
 }
 
+// unsignedOf is the unsigned C type of the same width, for the round trip
+// signedShiftLeft makes. Only the two signed types the subset allows an
+// operator on are here; the narrow ones never reach an operator at all.
+var unsignedOf = map[string]string{
+	"int":       "unsigned int",
+	"long long": "unsigned long long",
+}
+
+// signedShiftLeft emits a signed `<<` through its unsigned counterpart, which
+// is the only spelling of it C defines.
+//
+// Go says a left shift of a signed integer wraps: int64(1) << 63 is
+// MinInt64, and every bit shifted off the top is simply gone. C says a signed
+// left shift whose result is not representable is *undefined*, which is not a
+// wrong number but a licence for the compiler to assume it cannot happen. The
+// two therefore differ on exactly the values Go defines and C does not, and
+// the difference is invisible: the generated code compiles, and what it does
+// depends on the optimiser.
+//
+// The differential fuzzer found it, on `(p ^ b*8) << 63` -- the host and the
+// emulator disagreed on every element of the buffer, by whole powers of two.
+//
+// Casting to the unsigned type of the same width, shifting there and casting
+// back is the standard way to write a defined wrapping shift, and it is what
+// Go's semantics are: the conversion back is implementation-defined in C89 and
+// defined as the two's-complement reinterpretation from C++20 on, which is
+// what every target this emitter has runs. The right shift needs none of this,
+// because it cannot overflow -- and neither do the unsigned kinds, which wrap
+// by definition and are left spelled as they were.
+func (t *transpiler) signedShiftLeft(e *ast.BinaryExpr) (cexpr, bool) {
+	tv, ok := t.info.Types[e.X]
+	if !ok || tv.Type == nil {
+		return cexpr{}, false
+	}
+	basic, ok := tv.Type.Underlying().(*types.Basic)
+	if !ok || basic.Info()&types.IsInteger == 0 || basic.Info()&types.IsUnsigned != 0 {
+		return cexpr{}, false
+	}
+	signed := t.ctype(tv.Type, e.Pos())
+	unsigned, ok := unsignedOf[signed]
+	if !ok {
+		return cexpr{}, false
+	}
+	return cexpr{fmt.Sprintf("(%s)((%s)(%s) << %s)",
+		signed, unsigned, t.expr(e.X).s, t.expr(e.Y).at(cBinaryPrec[token.SHL]+1)), precPrefix}, true
+}
+
 // unarySep is the space that keeps a unary operator from fusing with its
 // operand into a different token.
 //
@@ -233,6 +280,11 @@ func (t *transpiler) binary(e *ast.BinaryExpr) cexpr {
 				t.fail(e.Pos(), "%s compares %s field by field in Go, which C cannot do; compare the fields you mean", e.Op, typ)
 				return atom("")
 			}
+		}
+	}
+	if e.Op == token.SHL {
+		if c, ok := t.signedShiftLeft(e); ok {
+			return c
 		}
 	}
 	if p, ok := cBinaryPrec[e.Op]; ok {

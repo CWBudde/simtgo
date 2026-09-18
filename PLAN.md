@@ -797,8 +797,33 @@ A transpiler is trusted through evidence, not review.
       device's answer on both backends — the same resolution the `int`
       narrowing got, for the same reason. The integer overloads are untouched.
 
-      **Six defects in all, in roughly twenty-five minutes of searching**,
-      four of them in the emitter and two in the oracle. That ratio is worth
+      And one it found in its own earlier fix: `shadowRename` reserved the
+      *escaped* name, so `double := double + 1` reserved "double_", found
+      nothing called that, and handed back the name the outer variable already
+      had. The rename renamed nothing and the defect it exists to fix was
+      still there. NVRTC's "used before its value is set" caught it — the same
+      signal that found the original.
+
+      **Still open, and the largest thing the fuzzer has turned up.** Go
+      defines signed integer overflow as wrapping; C leaves it *undefined*,
+      for `+`, `-`, `*`, unary `-` and `<<` alike. The generated code
+      therefore has no defined meaning on exactly the values Go does define,
+      and the difference is invisible: it compiles, and what it does depends
+      on the optimiser. The fuzzer hit it through `11 - (x << 63)`, where
+      `x << 63` is `MinInt64` and the subtraction overflows —
+      `fuzz.Generate(-279)` with inputs `205` reproduces it, and the host and
+      the emulator disagreed by whole powers of two on every element.
+
+      Only the shift is fixed so far, by emitting it through the unsigned type
+      of the same width, which is the standard spelling of a defined wrapping
+      shift and cost no golden or artifact churn. The same technique covers
+      the rest, and applying it to `+`, `-`, `*` and unary `-` would change
+      the look of every generated kernel — which is a decision about what the
+      emitted C is for, not a bug fix, and is why it is recorded here rather
+      than done.
+
+      **Seven defects in all, in roughly half an hour of searching**, five of
+      them in the emitter and two in the oracle. That ratio is worth
       recording: an oracle this young has its own bugs, and a differential
       that reports a mismatch as "a finding about one of them and not a
       verdict about which" is what makes those cheap to tell apart.

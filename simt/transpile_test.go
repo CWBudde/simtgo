@@ -65,9 +65,14 @@ func TestCPrecedence(t *testing.T) {
 		body: decl + "{ if a&b == c { y[0] = 1 } }",
 		want: "if ((a & b) == c)",
 	}, {
+		// The shift is emitted through its unsigned counterpart, because a
+		// signed left shift that overflows is undefined in C and wraps in Go;
+		// see signedShiftLeft. The precedence point this case exists for is
+		// unchanged and if anything plainer: the sum is what the conversion
+		// wraps, so the shift happened first.
 		name: "shift binds looser than addition in C",
 		body: decl + "{ y[0] = float32(a<<b + c) }",
-		want: "(float)((a << b) + c)",
+		want: "(float)((int)((unsigned int)(a) << b) + c)",
 	}, {
 		name: "a left-associative chain needs no grouping",
 		body: decl + "{ y[0] = float32(a - b - c) }",

@@ -152,11 +152,18 @@ func (t *transpiler) shadowRename(id *ast.Ident, rhs ast.Expr) {
 	if t.renamed == nil {
 		t.renamed = map[types.Object]string{}
 	}
-	// reserve counts upwards from the name itself, and collectNames has
-	// already put the Go spelling in the table, so the first candidate free of
-	// anything the author wrote is "a2" -- close enough to the source to be
-	// read against it.
-	t.renamed[obj] = t.reserve(cname(id.Name))
+	// Reserved on the *Go* spelling and escaped afterwards, which is the order
+	// that matters: collectNames fills the table with what the author wrote,
+	// so reserving an already-escaped name asks the table about a string it
+	// has never seen. For a name needing no escape the two are the same and
+	// either order works; for one that is a C++ keyword they are not.
+	// `double := double + 1` reserved "double_", found nothing called that,
+	// and handed back "double_" -- the very name the outer variable already
+	// had, so the rename renamed nothing and the bug it exists to fix was
+	// still there. The fuzzer found that, through NVRTC's remark about a
+	// variable used before its value is set, which is the same signal that
+	// found the original.
+	t.renamed[obj] = cname(t.reserve(id.Name))
 }
 
 // cnameOf is the C name of one object: its Go name escaped, unless it is one
