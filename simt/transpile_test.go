@@ -14,7 +14,7 @@ import (
 // TestGolden pins the generated CUDA for every example kernel. Run with
 // GOCUDA_UPDATE=1 to refresh the golden files after an intentional change.
 func TestGolden(t *testing.T) {
-	for _, name := range []string{"VecAdd", "Magnitude", "Scale", "FIR", "Classify", "Softclip", "Transpose"} {
+	for _, name := range []string{"VecAdd", "Magnitude", "Scale", "FIR", "Classify", "Softclip", "Transpose", "Quantize", "BandGain"} {
 		t.Run(name, func(t *testing.T) {
 			u, err := simt.Transpile(gocuda.Kernels(), name)
 			if err != nil {
@@ -479,4 +479,179 @@ func TestGeneratedCScopes(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestFixedSizeArrays covers the three things an array is allowed to be:
+// declared, indexed, and walked. Its extent lands after the name, which is the
+// whole reason declarations go through cdecl rather than a type string.
+func TestFixedSizeArrays(t *testing.T) {
+	u := transpile(t, "func K(ctx gpu.Ctx, y []float32) {\n"+
+		"\tvar taps [4]float32\n"+
+		"\ttaps[0] = 1\n"+
+		"\tsum := float32(0)\n"+
+		"\tfor _, v := range taps {\n\t\tsum += v\n\t}\n"+
+		"\ty[0] = sum / float32(len(taps))\n}")
+	for _, want := range []string{
+		"float taps[4] = {};",
+		"taps[0] = 1.0f;",
+		"for (int v_i = 0; v_i < 4; v_i++)",
+		"float v = taps[v_i];",
+		// len() on an array is a Go constant, so float32(len(taps)) folds to a
+		// float32 constant before the emitter is asked. There is no length
+		// parameter to consult and no conversion left to render.
+		"y[0] = sum / 4.0f;",
+	} {
+		if !strings.Contains(u.Source, want) {
+			t.Errorf("missing %q in:\n%s", want, u.Source)
+		}
+	}
+}
+
+// TestZeroValueOfAnAggregate pins the one place `var` could not keep emitting
+// `= 0`: C++ has no such initialiser for an array, and a bool deserved better
+// than an int anyway.
+func TestZeroValueOfAnAggregate(t *testing.T) {
+	u := transpile(t, "func K(ctx gpu.Ctx, y []float32) {\n"+
+		"\tvar a [2]float32\n\tvar n int32\n"+
+		"\ta[0] = float32(n)\n\ty[0] = a[0]\n}")
+	if !strings.Contains(u.Source, "float a[2] = {};") {
+		t.Errorf("array not value-initialised:\n%s", u.Source)
+	}
+	if !strings.Contains(u.Source, "int n = 0;") {
+		t.Errorf("scalar zero value changed, which would rewrite every golden:\n%s", u.Source)
+	}
+}
+
+// TestWideScalars pins the widened type map, including the two kinds that
+// lowered all along with nothing to say they did.
+func TestWideScalars(t *testing.T) {
+	u := transpile(t, "func K(ctx gpu.Ctx, a []int64, b []uint32, c []uint64, d []bool, n int64, m uint32) {\n"+
+		"\ta[0] = n\n\tb[0] = m\n\tc[0] = 7\n\td[0] = n > 0\n}")
+	for _, want := range []string{
+		"long long* a", "unsigned int* b", "unsigned long long* c", "bool* d",
+		"long long n", "unsigned int m",
+		// The suffix is what keeps the literal's type the one Go gave it,
+		// rather than the first C++ type it happens to fit in.
+		"c[0] = 7ull;",
+	} {
+		if !strings.Contains(u.Source, want) {
+			t.Errorf("missing %q in:\n%s", want, u.Source)
+		}
+	}
+}
+
+// TestFloat64Directive covers both spellings of the opt-in, and that a double
+// constant keeps its precision rather than being rounded to a float.
+func TestFloat64Directive(t *testing.T) {
+	onFunc := transpile(t, "//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float64) { y[0] = 0.1 }")
+	if !strings.Contains(onFunc.Source, "double* y") {
+		t.Errorf("directive on the function had no effect:\n%s", onFunc.Source)
+	}
+	if !strings.Contains(onFunc.Source, "y[0] = 0.1;") {
+		t.Errorf("double constant not rendered at full width:\n%s", onFunc.Source)
+	}
+
+	// Directly above the package clause, with no blank line: that is what makes
+	// it the file's doc comment rather than a detached comment near the top.
+	src := "//gocuda:float64\npackage kernels\n\nimport \"github.com/CWBudde/gocuda/gpu\"\n\n" +
+		"func K(ctx gpu.Ctx, y []float64) { y[0] = 1 }\n"
+	u, err := simt.Transpile(fstest.MapFS{"k.go": &fstest.MapFile{Data: []byte(src)}}, "K")
+	if err != nil {
+		t.Fatalf("directive in the package comment was not honoured: %v", err)
+	}
+	if !strings.Contains(u.Source, "double* y") {
+		t.Errorf("file-wide directive had no effect:\n%s", u.Source)
+	}
+}
+
+// TestStructLayoutIsAsserted is the layout guarantee in the only form NVRTC
+// can carry it.
+//
+// The emitter never models the C ABI. It states what Go believes about the type
+// and lets the C++ compiler check that against what it believes, so the promise
+// holds on whatever architecture and CUDA version the kernel is built for
+// rather than on the one it was written on. Offsets are missing from the
+// assertions because NVRTC compiles a string with no include path and so has no
+// offsetof; TestStructRoundTrip in the parity tests pins those instead.
+func TestStructLayoutIsAsserted(t *testing.T) {
+	u := transpile(t, "type Shape struct {\n\tFloor float32\n\tCount int32\n\tBias  float64\n}\n\n"+
+		"//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float32, cfg Shape) { y[0] = cfg.Floor }")
+	for _, want := range []string{
+		"struct Shape\n{\n\tfloat Floor;\n\tint Count;\n\tdouble Bias;\n};",
+		// 4 + 4 of Count, four bytes of padding, then Bias at 8: the padded
+		// case is the one where Go and C could part company.
+		`static_assert(sizeof(Shape) == 16,`,
+		`static_assert(alignof(Shape) == 8,`,
+		"y[0] = cfg.Floor;",
+	} {
+		if !strings.Contains(u.Source, want) {
+			t.Errorf("missing %q in:\n%s", want, u.Source)
+		}
+	}
+	// The definition has to precede the entry point that names it.
+	if strings.Index(u.Source, "struct Shape") > strings.Index(u.Source, "__global__") {
+		t.Errorf("struct defined after the kernel that uses it:\n%s", u.Source)
+	}
+}
+
+// TestStructLiteralIsPositional pins the spelling rather than the values.
+//
+// Designated initialisers are C++20 and NVRTC defaults to C++17, so a keyed Go
+// literal has to come out positionally -- with the fields left off written as
+// their zero value rather than left to C++ to fill in.
+func TestStructLiteralIsPositional(t *testing.T) {
+	u := transpile(t, "type P struct{ X, Y, Z float32 }\n\n"+
+		"func K(ctx gpu.Ctx, y []float32) { p := P{Y: 2}; y[0] = p.X + p.Y + p.Z }")
+	if !strings.Contains(u.Source, "P p = P{0, 2.0f, 0};") {
+		t.Errorf("literal not rendered positionally:\n%s", u.Source)
+	}
+	if strings.Contains(u.Source, ".Y =") {
+		t.Errorf("designated initialiser emitted, which NVRTC's dialect has no answer for:\n%s", u.Source)
+	}
+}
+
+// TestStructDefinedOnce covers a type reached by two paths -- a slice element
+// and a by-value parameter -- which must not be defined twice.
+func TestStructDefinedOnce(t *testing.T) {
+	u := transpile(t, "type P struct{ X, Y float32 }\n\n"+
+		"func K(ctx gpu.Ctx, y []float32, ps []P, one P) { y[0] = ps[0].X + one.Y }")
+	if n := strings.Count(u.Source, "struct P\n"); n != 1 {
+		t.Errorf("struct P defined %d times:\n%s", n, u.Source)
+	}
+}
+
+// TestRangeOverAWideIntegerKeepsItsType is a regression test for a silent
+// mistranslation that arrived with int64.
+//
+// Go gives `i` in `for i := range n` the type of n, so an int64 bound makes the
+// index an int64. Emitting `for (int i = 0; ...)` computed every expression
+// using it in 32 bits instead: i*i at i = 50000 is 2500000000 in Go and
+// -1794967296 in C, and a bound above MaxInt32 would never terminate, since the
+// counter wraps before it reaches one. NVRTC compiled it without a murmur.
+func TestRangeOverAWideIntegerKeepsItsType(t *testing.T) {
+	u := transpile(t, "func K(ctx gpu.Ctx, out []int64, n int64) {\n"+
+		"\tfor i := range n {\n\t\tout[0] = i * i\n\t}\n}")
+	if !strings.Contains(u.Source, "for (long long i = 0; i < n; i++)") {
+		t.Errorf("range counter did not keep the bound's type:\n%s", u.Source)
+	}
+
+	// A slice still counts in int, because len() is an int and widening it
+	// would change every committed golden to say the same thing.
+	v := transpile(t, "func K(ctx gpu.Ctx, y []float32) {\n"+
+		"\tfor i := range y {\n\t\ty[i] = 1\n\t}\n}")
+	if !strings.Contains(v.Source, "for (int i = 0; i < y_len; i++)") {
+		t.Errorf("slice range counter changed:\n%s", v.Source)
+	}
+}
+
+// TestMinInt64Literal covers the one integer constant C++ cannot spell
+// directly: it tokenises the positive magnitude first and applies unary minus
+// afterwards, and 9223372036854775808 fits no signed type. NVRTC and nvcc both
+// accept the naive spelling, but the generated .cu is a committed artifact and
+// other compilers are entitled to refuse it.
+func TestMinInt64Literal(t *testing.T) {
+	u := transpile(t, "func K(ctx gpu.Ctx, out []int64) { var n int64 = -9223372036854775808; out[0] = n }")
+	if !strings.Contains(u.Source, "(-9223372036854775807ll - 1)") {
+		t.Errorf("minimum int64 not rendered representably:\n%s", u.Source)
+	}
 }

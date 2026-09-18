@@ -103,7 +103,7 @@ assignment, `if`/`else`, three-clause `for`, `for i := range`,
 arithmetic, comparisons, indexing and conversions all translate.
 `gpu.Sqrt`, `gpu.Hypot` and friends become `sqrtf`, `hypotf`; `ctx.GlobalID()`
 becomes `blockIdx.x * blockDim.x + threadIdx.x`; `ctx.SharedF32(n)` becomes a
-`__shared__` array.
+`__shared__` array. Struct literals and field access translate too.
 
 Grids and blocks have three axes. The unsuffixed accessors are `x`, which is
 CUDA's own spelling, and `ThreadIdxY`, `BlockIdxZ`, `GlobalIDY` and the rest
@@ -147,13 +147,76 @@ because both are promises about a launch. The CPU side needs nothing at all
 for any of this: a device function is ordinary Go, so `RunCPU` runs the very
 code the device compiles.
 
-Everything else is **refused with a file and line**, never mistranslated:
-allocation, interfaces, goroutines, multiple assignment, `float64` (1/32 rate
-on `sm_75`), and any import other than package `gpu`. `simt/errors_test.go`
-pins that boundary.
+#### Types
 
-One deliberate infidelity: Go's `int` is 64-bit, CUDA's is 32-bit. Kernel
-indices are bounded by the grid, so they are narrowed.
+| Go                          | CUDA                 |
+| --------------------------- | -------------------- |
+| `float32`                   | `float`              |
+| `float64`                   | `double`, opt-in     |
+| `int`, `int32`              | `int`                |
+| `int64`                     | `long long`          |
+| `uint32`                    | `unsigned int`       |
+| `uint64`                    | `unsigned long long` |
+| `bool`                      | `bool`               |
+| a named struct of the above | a CUDA `struct`      |
+| `[N]T` of the above         | `T name[N]`          |
+
+The 64-bit types are `long long` and never `long`, which is 8 bytes on Linux
+and 4 on Windows.
+
+`float64` needs `//gocuda:float64` on the kernel, or on its file's package
+comment. The cost is invisible in the source — the device runs a double at a
+fraction of the float32 rate, so a kernel that acquired one by accident would
+be correct and far slower — and the opt-in makes that something somebody wrote
+down. It covers the kernel's whole translation unit, device functions included;
+a helper may not carry its own, for the reason `SharedF32` and `AssumeBlockDim`
+may not either. There is no `float64` vocabulary in `gpu`: `gpu.Sqrt` and
+friends are `float32`, so a double kernel gets arithmetic, comparison and
+conversion and nothing else.
+
+**Go's `int` is 64-bit and CUDA's is 32-bit.** That narrowing is the one
+deliberate infidelity, and it holds only for a value passed on its own, where
+an index is bounded by the grid anyway. As a slice element, an array element or
+a struct field it is not a lost high word but a different stride, and
+`cuda.Upload` copies Go's layout regardless — so `[]int` is refused, along with
+`int` as a struct field. It used to lower cleanly and return the wrong numbers.
+
+`int8`, `int16`, `uint8` and `uint16` are refused too, and not for their width,
+which matches: Go computes `int8 * int8` in 8 bits and wraps, while C promotes
+both to `int` and truncates only at the assignment, so
+`a, b := int8(100), int8(3); a*b/2` is 22 in Go and −106 in C.
+
+**A struct is laid out by Go and checked by CUDA.** The generated C carries
+what `go/types` says about the type:
+
+```c
+struct Shape { float Floor; int Count; double Bias; };
+static_assert(sizeof(Shape) == 16, "gocuda: Shape is a different size in CUDA than in Go");
+static_assert(alignof(Shape) == 8, "gocuda: Shape is differently aligned in CUDA than in Go");
+```
+
+The emitter never models the C ABI. It states Go's numbers and lets the C++
+compiler refuse them, so the guarantee holds wherever the kernel is built
+rather than where it was written. Offsets are missing because NVRTC compiles a
+string with no include path and so has no `offsetof`; `TestStructLayoutRoundTrip`
+pins those by reading each field back through the device instead, which
+exercises the `cuda.Upload` copy path a `static_assert` could only have had an
+opinion about. Struct literals lower positionally, because designated
+initialisers are C++20 and NVRTC defaults to C++17.
+
+**An array is storage, not a value.** It can be declared, indexed, measured
+with `len` and ranged over. It cannot be a parameter — Go passes a copy and C
+decays the parameter to a pointer, so a write inside the function would reach
+the caller's array — nor a result, which C cannot return at all, nor assigned
+whole, which C++ will not do. Wrap it in a struct if it has to travel; both
+languages copy that. `==` on a struct or an array is refused for the same kind
+of reason: Go compares field by field and C++ gives a plain aggregate no
+operator at all.
+
+Everything else is **refused with a file and line**, never mistranslated:
+allocation, interfaces, goroutines, multiple assignment, methods, embedded
+fields, and any import other than package `gpu`. `simt/errors_test.go` pins
+that boundary.
 
 ### Errors before `main()`
 
@@ -167,7 +230,8 @@ gocuda vet ./kernels                   # or: go vet -vettool=$(which gocuda) ./.
 
 ```text
 kernels/bad.go:4:2: kernels may not import math (only github.com/CWBudde/gocuda/gpu is available on the device)
-kernels/bad.go:10:23: unsupported type float64 on the device (kernels are float32/int32 only)
+kernels/bad.go:10:23: float64 needs //gocuda:float64 on kernel Bad, or on its file's package comment: the device runs double at a fraction of the float32 rate, so it is opt-in
+kernels/bad.go:10:38: []int cannot cross to the device: Go's int is 8 bytes and CUDA's int is 4, so the elements would not line up; use int32 or int64
 kernels/bad.go:11:2: multiple assignment is not supported in kernels
 ```
 

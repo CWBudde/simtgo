@@ -107,6 +107,15 @@ func importRefusal(path string) string {
 // a kernel.
 const IgnoreDirective = "//gocuda:ignore"
 
+// Float64Directive opts a kernel into double precision.
+//
+// It is opt-in rather than simply allowed because the cost is invisible in the
+// source: sm_75 runs float64 at 1/32 the float32 rate, so a kernel that gained
+// a double by accident -- an untyped constant binding wider than intended, say
+// -- would still be correct and thirty times slower. The directive makes that
+// a decision somebody wrote down.
+const Float64Directive = "//gocuda:float64"
+
 // Ignored reports whether doc carries the opt-out directive.
 //
 // It lives here, beside the rule it opts out of, because every caller that
@@ -116,12 +125,20 @@ const IgnoreDirective = "//gocuda:ignore"
 //
 // go vet has no //nolint equivalent -- there is no general way for a user to
 // silence one of its diagnostics -- so the check has to bring its own.
-func Ignored(doc *ast.CommentGroup) bool {
+func Ignored(doc *ast.CommentGroup) bool { return hasDirective(doc, IgnoreDirective) }
+
+// Float64Enabled reports whether doc carries the double-precision opt-in.
+func Float64Enabled(doc *ast.CommentGroup) bool { return hasDirective(doc, Float64Directive) }
+
+// hasDirective reports whether doc carries the line name, alone or followed by
+// a space and an explanation. A directive is a whole line, so a mention of it
+// inside a sentence is prose about the directive rather than a use of it.
+func hasDirective(doc *ast.CommentGroup, name string) bool {
 	if doc == nil {
 		return false
 	}
 	for _, c := range doc.List {
-		if c.Text == IgnoreDirective || strings.HasPrefix(c.Text, IgnoreDirective+" ") {
+		if c.Text == name || strings.HasPrefix(c.Text, name+" ") {
 			return true
 		}
 	}

@@ -6,6 +6,7 @@ import (
 	"go/constant"
 	"go/token"
 	"go/types"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -150,13 +151,22 @@ func (t *transpiler) expr(e ast.Expr) cexpr {
 		if typ == nil {
 			return atom("")
 		}
-		if _, ok := typ.Underlying().(*types.Slice); !ok {
-			t.fail(e.Pos(), "only slices can be indexed in kernels")
+		switch typ.Underlying().(type) {
+		case *types.Slice, *types.Array:
+			// A Go array and a C one index identically; the difference between
+			// them is what happens when the whole thing is assigned or passed,
+			// which is refused elsewhere.
+		default:
+			t.fail(e.Pos(), "only slices and arrays can be indexed in kernels")
 			return atom("")
 		}
 		// The subscript itself is delimited by the brackets, so it needs no
 		// precedence of its own; what is indexed does.
 		return cexpr{fmt.Sprintf("%s[%s]", t.expr(e.X).at(precPostfix), t.expr(e.Index).s), precPostfix}
+	case *ast.SelectorExpr:
+		return t.selector(e)
+	case *ast.CompositeLit:
+		return t.composite(e)
 	case *ast.CallExpr:
 		return t.call(e)
 	}
@@ -165,6 +175,19 @@ func (t *transpiler) expr(e ast.Expr) cexpr {
 }
 
 func (t *transpiler) binary(e *ast.BinaryExpr) cexpr {
+	if e.Op == token.EQL || e.Op == token.NEQ {
+		// Go compares a struct or an array field by field. C++ gives a plain
+		// aggregate no operator== at all, so emitting the same spelling would
+		// produce an NVRTC error about generated code nobody wrote -- and, if
+		// one ever were defined, a comparison that included padding.
+		if typ := t.typeOf(e.X); typ != nil {
+			switch typ.Underlying().(type) {
+			case *types.Struct, *types.Array:
+				t.fail(e.Pos(), "%s compares %s field by field in Go, which C cannot do; compare the fields you mean", e.Op, typ)
+				return atom("")
+			}
+		}
+	}
 	if p, ok := cBinaryPrec[e.Op]; ok {
 		return cexpr{fmt.Sprintf("%s %s %s", t.expr(e.X).at(p), e.Op, t.expr(e.Y).at(p+1)), p}
 	}
@@ -189,6 +212,7 @@ func (t *transpiler) call(c *ast.CallExpr) cexpr {
 			t.fail(c.Pos(), "unsupported conversion")
 			return atom("")
 		}
+		t.checkNarrowing(tv.Type, c.Args[0], c.Pos())
 		return cexpr{fmt.Sprintf("(%s)(%s)", t.ctype(tv.Type, c.Pos()), t.expr(c.Args[0]).s), precPrefix}
 	}
 
@@ -216,6 +240,14 @@ func (t *transpiler) call(c *ast.CallExpr) cexpr {
 		return atom("")
 
 	case *ast.SelectorExpr:
+		if sel := t.info.Selections[f]; sel != nil && sel.Kind() == types.MethodVal && !IsCtx(sel.Recv()) {
+			// Reported here rather than left to the catch-all below, which
+			// would say "unsupported call" and nothing about why. gpu.Ctx is
+			// the one receiver with device meaning; every other method would
+			// need a C++ member function, and the subset has no objects.
+			t.fail(c.Pos(), "methods are not supported in kernels; %s cannot be called on the device", f.Sel.Name)
+			return atom("")
+		}
 		if sel := t.info.Selections[f]; sel != nil && sel.Kind() == types.MethodVal && IsCtx(sel.Recv()) {
 			name := sel.Obj().Name()
 			switch name {
@@ -414,22 +446,92 @@ func (t *transpiler) constant(tv types.TypeAndValue, pos token.Pos) cexpr {
 	case info&types.IsBoolean != 0:
 		return atom("%s", strconv.FormatBool(constant.BoolVal(tv.Value)))
 	case info&types.IsFloat != 0:
+		// The width matters twice over. Rendering a float64 constant at 32 bits
+		// would quietly round it, and anything past a float's range would come
+		// out +Inf; the trailing f would then tell C++ to store that in a float
+		// anyway. An untyped constant keeps the single-precision spelling,
+		// because that is what it becomes in a kernel without the directive.
+		bits, suffix := 32, "f"
+		if basic.Kind() == types.Float64 {
+			bits, suffix = 64, ""
+		}
 		f, _ := constant.Float64Val(constant.ToFloat(tv.Value))
-		s := strconv.FormatFloat(f, 'g', -1, 32)
+		s := strconv.FormatFloat(f, 'g', -1, bits)
 		if !strings.ContainsAny(s, ".eE") {
 			s += ".0"
 		}
-		return number(s + "f")
+		return number(s + suffix)
+	case info&types.IsUnsigned != 0:
+		// Int64Val cannot represent a uint64 above MaxInt64, and refusing one
+		// as "does not fit in an int64" would be a wrong answer about a legal
+		// constant rather than a refusal of anything.
+		v, ok := constant.Uint64Val(constant.ToInt(tv.Value))
+		if !ok {
+			t.fail(pos, "constant %s does not fit in a uint64", tv.Value)
+			return atom("")
+		}
+		return number(strconv.FormatUint(v, 10) + intSuffix(basic.Kind()))
 	case info&types.IsInteger != 0:
 		v, ok := constant.Int64Val(constant.ToInt(tv.Value))
 		if !ok {
 			t.fail(pos, "constant %s does not fit in an int64", tv.Value)
 			return atom("")
 		}
-		return number(strconv.FormatInt(v, 10))
+		if v == math.MinInt64 {
+			// C++ has no literal for this value: it tokenises the positive
+			// magnitude first and applies unary minus afterwards, and
+			// 9223372036854775808 fits no signed type. NVRTC and nvcc both
+			// accept the straightforward spelling anyway, but the generated
+			// .cu is a committed artifact people compile with other tools, so
+			// it is written the way the standard allows.
+			return cexpr{"(-9223372036854775807ll - 1)", precAtom}
+		}
+		return number(strconv.FormatInt(v, 10) + intSuffix(basic.Kind()))
 	}
 	t.fail(pos, "unsupported constant of type %s", tv.Type)
 	return atom("")
+}
+
+// checkNarrowing refuses int(x) where x is 64 bits wide.
+//
+// On the host that conversion is exact -- Go's int is 64 bits -- and on the
+// device it truncates, because C's int is 32. So it is a conversion that means
+// one thing where it is read and another where it runs, which is the shape of
+// mistranslation this package exists to refuse. int32(x) is lossy in Go too, so
+// an author who writes that has said what they meant.
+func (t *transpiler) checkNarrowing(to types.Type, from ast.Expr, pos token.Pos) {
+	dst, ok := to.Underlying().(*types.Basic)
+	if !ok || (dst.Kind() != types.Int && dst.Kind() != types.Uint) {
+		return
+	}
+	src, ok := t.typeOf(from).Underlying().(*types.Basic)
+	if !ok {
+		return
+	}
+	switch src.Kind() {
+	case types.Int64, types.Uint64:
+		t.fail(pos, "converting %s to %s truncates on the device, where int is 32 bits, and does not on the host; write int32(x) if that is what you mean", src, dst)
+	}
+}
+
+// intSuffix is the C++ suffix that gives a literal the type the Go constant
+// has. Without it C++ picks the first type the value fits in, which is the
+// right answer often enough to be a trap: a small constant in a long long
+// expression is an int, and the expression's type then depends on what it was
+// multiplied by rather than on what the author declared.
+//
+// An untyped constant gets no suffix. It has no Go type to preserve, and the
+// existing goldens spell it plainly.
+func intSuffix(k types.BasicKind) string {
+	switch k {
+	case types.Int64:
+		return "ll"
+	case types.Uint64:
+		return "ull"
+	case types.Uint32:
+		return "u"
+	}
+	return ""
 }
 
 // number renders a folded literal. A negative one is really a minus sign

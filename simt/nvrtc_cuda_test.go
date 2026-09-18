@@ -28,6 +28,74 @@ import (
 func TestGeneratedCCompiles(t *testing.T) {
 	const arch = "compute_75"
 	cases := []struct{ name, body string }{{
+		// The float64 vocabulary is arithmetic and nothing else: gpu.Sqrt and
+		// friends are float32-only, so the interesting question is whether the
+		// builtins the emitter does reach have double overloads NVRTC can see
+		// with no headers included. min/max are the ones expr.go maps directly,
+		// and a comment claiming CUDA provides them is not a measurement.
+		name: "float64 arithmetic, min/max on doubles, and 64-bit literals",
+		body: "//gocuda:float64\n" +
+			"func K(ctx gpu.Ctx, out, a, b []float64) {\n" +
+			"\ti := ctx.GlobalID()\n" +
+			"\tif i < len(out) {\n" +
+			"\t\tlo := min(a[i], b[i])\n" +
+			"\t\thi := max(a[i], b[i])\n" +
+			"\t\tvar n int64 = 9007199254740993\n" +
+			"\t\tout[i] = lo*2.5 + hi + float64(n%7)\n" +
+			"\t}\n}",
+	}, {
+		// NVRTC accepted this happily while the counter was an int, which is
+		// why it needed a golden assertion rather than only a compile check --
+		// the wrong answer was in the arithmetic, not in the syntax.
+		name: "ranging over a 64-bit bound",
+		body: "func K(ctx gpu.Ctx, out []int64, n int64) {\n" +
+			"\tfor i := range n {\n\t\tout[0] = i * i\n\t}\n}",
+	}, {
+		name: "the minimum int64 constant",
+		body: "func K(ctx gpu.Ctx, out []int64) {\n" +
+			"\tvar n int64 = -9223372036854775808\n\tout[0] = n\n}",
+	}, {
+		name: "unsigned and 64-bit integer arithmetic",
+		body: "func K(ctx gpu.Ctx, out []int64, x []int32, seed uint32) {\n" +
+			"\ti := ctx.GlobalID()\n" +
+			"\tif i < len(out) {\n" +
+			"\t\th := seed ^ uint32(x[i])\n" +
+			"\t\th = h*2654435761 + 1\n" +
+			"\t\tv := int64(x[i])\n" +
+			"\t\tout[i] = v*v + int64(h%16)\n" +
+			"\t}\n}",
+	}, {
+		// The struct emission is the C++ furthest from anything the author
+		// wrote, and the static_asserts in it are the layout guarantee: they
+		// state what Go believes and let NVRTC refuse it. A padded struct is
+		// the interesting case -- Count at 4, four bytes of padding, Bias at 8,
+		// size 16, align 8 -- because that is where the two could disagree.
+		name: "a padded struct, by value and as a slice element",
+		body: "type Shape struct {\n\tFloor float32\n\tCount int32\n\tBias  float64\n}\n\n" +
+			"type Band struct{ Upper, Gain float32 }\n\n" +
+			"//gocuda:float64\n" +
+			"func K(ctx gpu.Ctx, y, x []float32, bands []Band, cfg Shape) {\n" +
+			"\ti := ctx.GlobalID()\n" +
+			"\tif i >= len(y) {\n\t\treturn\n\t}\n" +
+			"\tbest := Band{1, cfg.Floor}\n" +
+			"\tfor _, b := range bands {\n" +
+			"\t\tif x[i] <= b.Upper {\n\t\t\tbest = b\n\t\t\tbreak\n\t\t}\n\t}\n" +
+			"\ty[i] = float32(float64(x[i])*float64(best.Gain)+cfg.Bias) + float32(cfg.Count)\n}",
+	}, {
+		name: "a struct literal with keyed fields, some of them left out",
+		body: "type P struct{ X, Y, Z float32 }\n\n" +
+			"func K(ctx gpu.Ctx, y []float32) {\n" +
+			"\tp := P{Y: 2}\n" +
+			"\ty[0] = p.X + p.Y + p.Z\n}",
+	}, {
+		name: "a fixed-size array declared, indexed and ranged over",
+		body: "func K(ctx gpu.Ctx, y []float32) {\n" +
+			"\tvar taps [4]float32\n" +
+			"\ttaps[1] = 2\n" +
+			"\tsum := float32(0)\n" +
+			"\tfor _, v := range taps {\n\t\tsum += v\n\t}\n" +
+			"\ty[0] = sum\n}",
+	}, {
 		name: "a labelled continue past a later declaration",
 		body: "func K(ctx gpu.Ctx, y []float32, n int32) {\n" +
 			"outer:\n" +
@@ -97,7 +165,7 @@ func TestGeneratedCCompiles(t *testing.T) {
 
 	// The committed kernels go through the same gate, so a kernel that stops
 	// compiling is caught here and not at some later launch.
-	for _, name := range []string{"VecAdd", "Magnitude", "Scale", "FIR", "Classify", "Softclip", "Transpose"} {
+	for _, name := range []string{"VecAdd", "Magnitude", "Scale", "FIR", "Classify", "Softclip", "Transpose", "Quantize", "BandGain"} {
 		t.Run(name, func(t *testing.T) {
 			u, err := simt.Transpile(gocuda.Kernels(), name)
 			if err != nil {

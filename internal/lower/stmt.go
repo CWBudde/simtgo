@@ -107,14 +107,21 @@ func (t *transpiler) define(id *ast.Ident, rhs ast.Expr) string {
 		t.fail(id.Pos(), "%s has no resolved type", id.Name)
 		return ""
 	}
+	if _, ok := obj.Type().Underlying().(*types.Array); ok {
+		// `a := b` copies in Go and will not compile in C++, exactly as `a = b`
+		// does not. A declaration with an initialiser is the same move.
+		t.refuseArrayValue(rhs, id.Pos())
+		t.poison(obj)
+		return ""
+	}
 	before := len(t.diags)
-	ctype := t.ctype(obj.Type(), id.Pos())
+	decl := t.cdecl(obj.Type(), cname(id.Name), id.Pos())
 	if len(t.diags) > before {
 		// The variable exists but has no device type. Every later use of it
 		// would be a fresh complaint about the same declaration.
 		t.poison(obj)
 	}
-	return fmt.Sprintf("%s %s = %s", ctype, cname(id.Name), t.expr(rhs).s)
+	return fmt.Sprintf("%s = %s", decl, t.expr(rhs).s)
 }
 
 // returnStmt lowers a return. A kernel writes through its parameters and has
@@ -201,6 +208,25 @@ func (t *transpiler) sharedSize(e ast.Expr) (n int, isShared, ok bool) {
 	return n, true, true
 }
 
+// refuseArrayValue reports, and refuses, an expression whose type is an array
+// being moved as a whole.
+//
+// Go copies an array on assignment. C++ will not assign a raw array at all, so
+// the same spelling becomes an NVRTC error about generated code. An array here
+// is storage: declare it, index it, len it, range it, put it in a struct. Copy
+// it element by element, or wrap it in a struct, which both languages copy.
+func (t *transpiler) refuseArrayValue(e ast.Expr, pos token.Pos) bool {
+	typ := t.typeOf(e)
+	if typ == nil {
+		return false
+	}
+	if _, ok := typ.Underlying().(*types.Array); ok {
+		t.fail(pos, "a whole %s cannot be assigned: Go copies it and C++ will not assign an array at all; copy the elements, or wrap the array in a struct", typ)
+		return true
+	}
+	return false
+}
+
 // simple renders an assignment or increment inline, without a terminator, so
 // it can also serve as a for-loop clause.
 func (t *transpiler) simple(s ast.Stmt) string {
@@ -226,6 +252,9 @@ func (t *transpiler) simple(s ast.Stmt) string {
 		case token.ASSIGN, token.ADD_ASSIGN, token.SUB_ASSIGN, token.MUL_ASSIGN,
 			token.QUO_ASSIGN, token.REM_ASSIGN, token.AND_ASSIGN, token.OR_ASSIGN,
 			token.XOR_ASSIGN, token.SHL_ASSIGN, token.SHR_ASSIGN:
+			if t.refuseArrayValue(s.Lhs[0], s.Pos()) {
+				return ""
+			}
 			// Both sides stand in positions that accept a whole expression, so
 			// neither needs parentheses of its own.
 			return fmt.Sprintf("%s %s %s", t.expr(s.Lhs[0]).s, s.Tok, t.expr(s.Rhs[0]).s)
@@ -267,8 +296,18 @@ func (t *transpiler) decl(s *ast.DeclStmt) {
 					t.fail(n.Pos(), "%s has no resolved type", n.Name)
 					continue
 				}
+				if _, isArr := obj.Type().Underlying().(*types.Array); isArr && len(vs.Values) != 0 {
+					// `var a [N]T = b` moves the array as a whole, which is the
+					// same thing `a := b` and `a = b` do and which C++ refuses
+					// for all three. Without this the initialiser reached NVRTC
+					// as `float a[2] = b;`. An uninitialised `var` is fine: it
+					// gets zeroValue's `{}`, which is how C++ spells it.
+					t.refuseArrayValue(vs.Values[i], n.Pos())
+					t.poison(obj)
+					continue
+				}
 				before := len(t.diags)
-				ctype := t.ctype(obj.Type(), n.Pos())
+				decl := t.cdecl(obj.Type(), cname(n.Name), n.Pos())
 				if len(t.diags) > before {
 					// Every later use of a variable with no device type would
 					// repeat this one refusal.
@@ -276,10 +315,10 @@ func (t *transpiler) decl(s *ast.DeclStmt) {
 					continue
 				}
 				if len(vs.Values) == 0 {
-					t.line("%s %s = 0;", ctype, cname(n.Name))
+					t.line("%s = %s;", decl, t.zeroValue(obj.Type()))
 					continue
 				}
-				t.line("%s %s = %s;", ctype, cname(n.Name), t.expr(vs.Values[i]).s)
+				t.line("%s = %s;", decl, t.expr(vs.Values[i]).s)
 			}
 		}
 	default:
@@ -517,26 +556,37 @@ func (t *transpiler) rangeStmt(s *ast.RangeStmt) {
 	}
 
 	var limit cexpr
-	isSlice := false
+	indexable := false
+	// The counter's C type. len() is an int, so a slice or an array counts in
+	// int; ranging over an integer gives the index that integer's own type,
+	// and emitting int for a wider one would be a mistranslation rather than a
+	// narrowing -- `i*i` at i = 50000 is 2500000000 in Go and -1794967296 in
+	// 32-bit C, and a bound above MaxInt32 would never terminate at all.
+	counter := "int"
 	xt := t.typeOf(s.X)
 	if xt == nil {
 		return
 	}
 	switch typ := xt.Underlying().(type) {
 	case *types.Slice:
-		limit, isSlice = t.lengthOf(s.X), true
+		limit, indexable = t.lengthOf(s.X), true
+	case *types.Array:
+		// An array's length is part of its type, so the bound is a literal
+		// rather than a companion parameter.
+		limit, indexable = number(strconv.FormatInt(typ.Len(), 10)), true
 	case *types.Basic:
 		if typ.Info()&types.IsInteger == 0 {
 			t.fail(s.X.Pos(), "cannot range over %s", typ)
 			return
 		}
+		counter = t.ctype(xt, s.X.Pos())
 		limit = t.expr(s.X)
 	default:
 		t.fail(s.X.Pos(), "cannot range over %s", typ)
 		return
 	}
-	if value != nil && !isSlice {
-		t.fail(s.Pos(), "only a slice can be ranged over with a value")
+	if value != nil && !indexable {
+		t.fail(s.Pos(), "only a slice or an array can be ranged over with a value")
 		return
 	}
 
@@ -568,14 +618,14 @@ func (t *transpiler) rangeStmt(s *ast.RangeStmt) {
 			t.fail(value.Pos(), "%s has no resolved type", value.Name)
 			return
 		}
-		elem := t.ctype(obj.Type(), value.Pos())
-		head = fmt.Sprintf("%s %s = %s[%s];", elem, cname(value.Name), t.expr(s.X).at(precPostfix), name)
+		elem := t.cdecl(obj.Type(), cname(value.Name), value.Pos())
+		head = fmt.Sprintf("%s = %s[%s];", elem, t.expr(s.X).at(precPostfix), name)
 	}
 
 	// The limit becomes the right operand of a comparison, so anything binding
 	// looser than one has to be parenthesised: `i < a & b` would otherwise
 	// compare first and mask afterwards.
-	t.line("for (int %s = 0; %s < %s; %s++)", name, name, limit.at(precRel+1), name)
+	t.line("for (%s %s = 0; %s < %s; %s++)", counter, name, name, limit.at(precRel+1), name)
 	t.loopBody(s.Body, head, lbl)
 }
 
@@ -724,6 +774,16 @@ func (t *transpiler) chainSwitch(s *ast.SwitchStmt) {
 		if typ == nil {
 			return
 		}
+		// Each arm becomes `switch_tag == <case>`, which never passes through
+		// binary() and so would slip past the refusal there. Go compares a
+		// struct or an array field by field and C++ gives a plain aggregate no
+		// operator== at all, so this reached NVRTC as an error about generated
+		// code instead of being refused with a position.
+		switch typ.Underlying().(type) {
+		case *types.Struct, *types.Array:
+			t.fail(s.Tag.Pos(), "cannot switch on %s: each case would compare it field by field in Go, which C cannot do; switch on the field you mean", typ)
+			return
+		}
 		tag = t.reserve("switch_tag")
 		defer t.release(tag)
 		t.line("{")
@@ -732,7 +792,7 @@ func (t *transpiler) chainSwitch(s *ast.SwitchStmt) {
 			t.ind--
 			t.line("}")
 		}()
-		t.line("%s %s = %s;", t.ctype(typ, s.Tag.Pos()), tag, t.expr(s.Tag).s)
+		t.line("%s = %s;", t.cdecl(typ, tag, s.Tag.Pos()), t.expr(s.Tag).s)
 	}
 
 	var dflt *ast.CaseClause

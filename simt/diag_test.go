@@ -100,12 +100,16 @@ func TestSignatureRefusalIsAlone(t *testing.T) {
 // TestSingleDiagnosticTextIsUnchanged pins the rendering that every existing
 // test and every log line already depends on.
 func TestSingleDiagnosticTextIsUnchanged(t *testing.T) {
-	src := diagPrelude + "func K(ctx gpu.Ctx, a []float64) { a[0] = 1 }\n"
+	// The subject is the rendering -- "simt: file:line:col: msg" -- not this
+	// particular refusal, so the fixture only has to be something still
+	// refused. It was []float64 until //gocuda:float64 made that a question
+	// about a directive rather than about a type.
+	src := diagPrelude + "func K(ctx gpu.Ctx, a []int8) { a[0] = 1 }\n"
 	_, err := simt.Transpile(fstest.MapFS{"k.go": &fstest.MapFile{Data: []byte(src)}}, "K")
 	if err == nil {
 		t.Fatal("expected an error")
 	}
-	const want = "simt: k.go:5:21: unsupported type float64 on the device (kernels are float32/int32 only)"
+	const want = "simt: k.go:5:21: unsupported type int8 on the device: Go computes int8 arithmetic in 8 bits and C promotes it to int, so the two would disagree; use int32"
 	if err.Error() != want {
 		t.Errorf("got  %q\nwant %q", err.Error(), want)
 	}

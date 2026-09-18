@@ -24,9 +24,93 @@ func TestUnsupported(t *testing.T) {
 		body: "func K(ctx gpu.Ctx, a []float32) float32 { return a[0] }",
 		want: "must not return values",
 	}, {
-		name: "float64",
+		name: "float64 without the directive",
 		body: "func K(ctx gpu.Ctx, a []float64) { a[0] = 1 }",
-		want: "float32/int32 only",
+		want: "float64 needs //gocuda:float64 on kernel K",
+	}, {
+		name: "//gocuda:float64 on a device function",
+		body: "//gocuda:float64\nfunc half(x float32) float32 { return x / 2 }\n\nfunc K(ctx gpu.Ctx, a []float32) { a[0] = half(a[1]) }",
+		want: "belongs on the kernel, not on device function half",
+	}, {
+		name: "int8",
+		body: "func K(ctx gpu.Ctx, a []int8) { a[0] = 1 }",
+		want: "C promotes it to int, so the two would disagree",
+	}, {
+		name: "uint16",
+		body: "func K(ctx gpu.Ctx, a []uint16) { a[0] = 1 }",
+		want: "C promotes it to int, so the two would disagree",
+	}, {
+		name: "uint",
+		body: "func K(ctx gpu.Ctx, n uint, a []float32) { a[0] = float32(n) }",
+		want: "use uint32 or uint64",
+	}, {
+		// The one that was lowering cleanly and returning wrong numbers: Go's
+		// int is 8 bytes, the emitted C int is 4, and cuda.Upload copies the
+		// Go layout, so the kernel strode half the buffer.
+		name: "[]int",
+		body: "func K(ctx gpu.Ctx, a []int) { a[0] = 1 }",
+		want: "cannot cross to the device",
+	}, {
+		name: "an array parameter",
+		body: "func K(ctx gpu.Ctx, y []float32, taps [4]float32) { y[0] = taps[0] }",
+		want: "Go passes an array by value and C would pass a pointer to it",
+	}, {
+		name: "an array result",
+		body: "//gocuda:ignore\nfunc pair() [2]float32 { var a [2]float32; return a }\n\nfunc K(ctx gpu.Ctx, y []float32) { y[0] = pair()[0] }",
+		want: "C cannot return an array",
+	}, {
+		name: "whole-array assignment",
+		body: "func K(ctx gpu.Ctx, y []float32) { var a, b [2]float32; a = b; y[0] = a[0] }",
+		want: "cannot be assigned",
+	}, {
+		// The same move spelled as a declaration. `:=` and `=` both refused it;
+		// an explicit `var` with an initialiser went straight through and
+		// emitted `float a[2] = b;`, which C++ will not initialise either.
+		name: "whole-array var initialiser",
+		body: "func K(ctx gpu.Ctx, y []float32) { var b [2]float32; var a [2]float32 = b; y[0] = a[0] }",
+		want: "cannot be assigned",
+	}, {
+		name: "struct equality",
+		body: "type P struct{ X, Y float32 }\n\nfunc K(ctx gpu.Ctx, y []float32, a, b []P) { if a[0] == b[0] { y[0] = 1 } }",
+		want: "field by field in Go, which C cannot do",
+	}, {
+		name: "an int field in a struct",
+		body: "type P struct{ N int }\n\nfunc K(ctx gpu.Ctx, y []float32, ps []P) { y[0] = float32(ps[0].N) }",
+		want: "cannot cross to the device",
+	}, {
+		name: "an array field in a struct",
+		body: "type P struct{ Taps [4]float32 }\n\nfunc K(ctx gpu.Ctx, y []float32, ps []P) { y[0] = ps[0].Taps[0] }",
+		want: "a device struct holds scalars",
+	}, {
+		name: "an embedded field",
+		body: "type Inner struct{ X float32 }\ntype Outer struct{ Inner }\n\nfunc K(ctx gpu.Ctx, y []float32, os []Outer) { y[0] = os[0].X }",
+		want: "embedded field",
+	}, {
+		// Two blank fields are one Go name and two C++ ones: both were emitted
+		// as `int _;` and NVRTC refused the redeclaration.
+		name: "a blank struct field",
+		body: "type P struct {\n\t_, _ int32\n\tX float32\n}\n\nfunc K(ctx gpu.Ctx, y []float32, ps []P) { y[0] = ps[0].X }",
+		want: "has a blank field",
+	}, {
+		name: "an anonymous struct type",
+		body: "func K(ctx gpu.Ctx, y []float32) { p := struct{ X float32 }{1}; y[0] = p.X }",
+		want: "unsupported type struct{X float32} on the device",
+	}, {
+		name: "a method call",
+		body: "type P struct{ X float32 }\n\nfunc (p P) Twice() float32 { return p.X * 2 }\n\nfunc K(ctx gpu.Ctx, y []float32, ps []P) { y[0] = ps[0].Twice() }",
+		want: "methods are not supported in kernels",
+	}, {
+		name: "a switch over a struct",
+		body: "type P struct{ X, Y float32 }\n\nfunc K(ctx gpu.Ctx, y []float32, ps []P) {\n\tswitch ps[0] {\n\tcase P{X: 1}:\n\t\ty[0] = 1\n\t}\n}",
+		want: "cannot switch on kernels.P",
+	}, {
+		name: "a zero-length array",
+		body: "func K(ctx gpu.Ctx, y []float32) { var a [0]float32; y[0] = float32(len(a)) }",
+		want: "has no elements",
+	}, {
+		name: "int(x) from int64",
+		body: "func K(ctx gpu.Ctx, a []float32, n int64) { a[int(n)] = 1 }",
+		want: "truncates on the device",
 	}, {
 		name: "non-constant shared memory",
 		body: "func K(ctx gpu.Ctx, a []float32) { s := ctx.SharedF32(len(a)); s[0] = 1 }",

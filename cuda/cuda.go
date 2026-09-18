@@ -29,6 +29,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"unsafe"
 )
 
 // ErrNoCUDA is returned by every operation when the module was built without
@@ -130,6 +131,61 @@ func ArgF32(v float32) Arg {
 	return Arg{b: b[:]}
 }
 
+// ArgU32 passes a 32-bit unsigned integer.
+func ArgU32(v uint32) Arg {
+	var b [4]byte
+	binary.LittleEndian.PutUint32(b[:], v)
+	return Arg{b: b[:]}
+}
+
+// ArgI64 passes a 64-bit integer, which the kernel receives as a long long.
+func ArgI64(v int64) Arg {
+	var b [8]byte
+	binary.LittleEndian.PutUint64(b[:], uint64(v))
+	return Arg{b: b[:]}
+}
+
+// ArgU64 passes a 64-bit unsigned integer.
+func ArgU64(v uint64) Arg {
+	var b [8]byte
+	binary.LittleEndian.PutUint64(b[:], v)
+	return Arg{b: b[:]}
+}
+
+// ArgF64 passes a double, which only a kernel carrying //gocuda:float64 can
+// declare a parameter for.
+func ArgF64(v float64) Arg {
+	var b [8]byte
+	binary.LittleEndian.PutUint64(b[:], math.Float64bits(v))
+	return Arg{b: b[:]}
+}
+
+// ArgBool passes a bool. CUDA's bool is one byte, which the generated C
+// asserts, so this is one byte too.
+func ArgBool(v bool) Arg {
+	var b [1]byte
+	if v {
+		b[0] = 1
+	}
+	return Arg{b: b[:]}
+}
+
+// ArgOf passes any value whose Go layout is what the kernel's generated C
+// declares -- in practice a struct of scalars.
+//
+// It is explicit rather than something BuildArgs infers, because deciding
+// whether a struct is one the device can take means checking every field
+// against the supported set, and that rule lives in internal/lower. A second
+// copy of it here would be a second opinion about the subset, and the two would
+// eventually differ. The caller asserting the layout is safe because the
+// generated C carries a static_assert on the type's size and alignment, so a
+// disagreement is a compile error rather than wrong numbers.
+func ArgOf[T any](v T) Arg {
+	b := make([]byte, unsafe.Sizeof(v))
+	copy(b, unsafe.Slice((*byte)(unsafe.Pointer(&v)), len(b)))
+	return Arg{b: b}
+}
+
 // Argser is implemented by values that expand to one or more kernel
 // parameters. A device slice expands to two: a pointer and a length.
 type Argser interface {
@@ -139,6 +195,9 @@ type Argser interface {
 // BuildArgs converts a call written in terms of Go values into the flat
 // parameter list the generated kernel expects, so a launch can be written to
 // mirror the Go kernel's own signature.
+//
+// A struct parameter is passed as cuda.ArgOf(v) rather than as itself: see
+// ArgOf for why that is deliberate.
 func BuildArgs(vals ...any) ([]Arg, error) {
 	var out []Arg
 	for i, v := range vals {
@@ -150,7 +209,21 @@ func BuildArgs(vals ...any) ([]Arg, error) {
 		case int32:
 			out = append(out, ArgI32(v))
 		case int:
+			// The one narrowing the subset documents: a kernel's int parameter
+			// is C's 32-bit int, and an index is bounded by the grid. It is
+			// only safe here, for a value passed on its own -- []int is refused
+			// by the transpiler, because there the narrowing is a stride.
 			out = append(out, ArgI32(int32(v)))
+		case uint32:
+			out = append(out, ArgU32(v))
+		case int64:
+			out = append(out, ArgI64(v))
+		case uint64:
+			out = append(out, ArgU64(v))
+		case float64:
+			out = append(out, ArgF64(v))
+		case bool:
+			out = append(out, ArgBool(v))
 		case Arg:
 			out = append(out, v)
 		default:
