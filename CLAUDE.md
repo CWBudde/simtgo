@@ -4,8 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A proof of concept for writing CUDA kernels in Go, answering NVIDIA's *CUDA
-Rust* post with two Go analogues: a **SIMT track** (`simt`) that lowers a Go
+A proof of concept for writing CUDA kernels in Go, answering NVIDIA's _CUDA
+Rust_ post with two Go analogues: a **SIMT track** (`simt`) that lowers a Go
 subset to CUDA C at the source level, and a **tile track** (`tile`) that
 records a graph of ops and fuses it into one generated kernel. `README.md` is
 the full design rationale; `PLAN.md` is the roadmap from PoC to 1.0 and tracks
@@ -81,7 +81,7 @@ analyzer — put it in `lower` and both get it.
   transpile.
 - A kernel is any function whose first parameter is `gpu.Ctx`. `//gocuda:ignore`
   in a doc comment (or a file's package comment) opts out.
-- `Unit.SourceHash` hashes the *generated CUDA C*, not the Go source. That is
+- `Unit.SourceHash` hashes the _generated CUDA C_, not the Go source. That is
   the whole staleness story: a prebuilt is filed under it, so an artifact built
   from anything else is simply not found and `Build` falls back to NVRTC.
 
@@ -96,7 +96,7 @@ catch — edited but never regenerated — is covered by `TestPrebuiltIsCurrent`
 kernel package itself (it is type-checked as one unit and may import only `gpu`);
 `generate` refuses `-out == -pkg`.
 
-**Build/launch path.** `simt.Build` transpiles *even when a prebuilt exists* —
+**Build/launch path.** `simt.Build` transpiles _even when a prebuilt exists_ —
 lowering is what produces the hash, and it keeps `RequiredBlock`/`SharedBytes`
 derived from the source in hand. `internal/jit` then either loads registered
 PTX or calls NVRTC, caching modules per `cuda.Context` (never package-global —
@@ -150,12 +150,12 @@ reference, so a shared misunderstanding cannot pass as agreement.
 6. Add a CPU/GPU parity test in `simt/parity_test.go` with an independent Go
    reference.
 
-Changing the emitter changes every `SourceHash`, so goldens *and*
+Changing the emitter changes every `SourceHash`, so goldens _and_
 `kernels/prebuilt/` both need regenerating.
 
 ## Writing
 
-Technical content is English. Comments here explain *why* a thing is the way it
+Technical content is English. Comments here explain _why_ a thing is the way it
 is — including honest limits — rather than restating the code; match that
 register. `README.md` and `PLAN.md` state measured numbers and explicit
 non-goals; do not let a claim drift from what the code does.
