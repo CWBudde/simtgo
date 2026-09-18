@@ -1,11 +1,20 @@
 # Emitter defects, and what catches them now
 
-Every entry here is a case where valid Go lowered to CUDA C that **compiled,
-launched and computed something else**. That is the failure
+The record of what this emitter has got wrong, in four groups.
+
+**Live defects** come first, and they are the ones the page exists for: valid Go
+lowered to CUDA C that **compiled, launched and computed something else**. That
+is precisely the failure
 ["refuse, never mistranslate"](decisions.md#refuse-never-mistranslate) exists to
-rule out, and the useful part of each entry is not the embarrassment but the
-last line: what would catch it today, and whether anything would have caught it
-then.
+rule out. After them, **latent defects**, correct only because nothing reached
+them yet — including generated C++ that would not have compiled at all;
+**infrastructure defects** in the repository's own tooling and tests; and
+defects in the **oracles**, kept separate because a differential that reports a
+mismatch has named a finding about one of its two backends without yet saying
+which.
+
+The useful part of each entry is not the embarrassment but the last line: what
+would catch it today, and whether anything would have caught it then.
 
 The pattern across the list is worth naming up front. A golden test pins the
 bytes the emitter produced; a parity test pins that two backends agree. Neither
@@ -247,8 +256,15 @@ smuggle one in to prove it.
 
 Worth its own heading, because it is the reason the differential fuzzer's
 failure message says a mismatch is **a finding about one of the two backends and
-not a verdict about which**. Seven defects came out of roughly half an hour of
-searching: five in the emitter, two in the oracle.
+not a verdict about which**.
+
+The ratio is what to take from it. One burst of searching, roughly half an hour,
+produced seven defects — five in the emitter and two in the oracle — and an
+oracle this young goes on having its own. The four below were collected across
+the whole fuzzing effort rather than in that half hour, and two of them are in
+the **harness** rather than in a comparison, which is a third thing again: a
+generator that produces an input neither backend was asked about, and a runner
+that never comes back.
 
 - **`tolerance.Agree` settled a NaN for a `float32` and let a `float64` fall
   through to `reflect.DeepEqual`**, which compares them with `==`, so two NaNs in

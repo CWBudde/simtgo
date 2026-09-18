@@ -5,8 +5,10 @@ checks what, and — the part that matters more — **what each layer cannot see
 because every defect in [`emitter-defects.md`](emitter-defects.md) slipped
 past at least one of them.
 
-The layers are ordered by cost. The first five need no GPU and most need no
-CUDA toolkit; the last three need hardware that CI does not have yet.
+The layers are ordered by cost. **The first six need no GPU** — of those, only
+layer 4 needs a CUDA toolkit and layer 5 a host C++ compiler, and the rest need
+nothing but Go. Only layers 7 and 8 need a device, which is what CI does not
+have yet.
 
 ## 1. Golden files — the exact bytes the emitter produced
 

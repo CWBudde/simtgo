@@ -173,7 +173,7 @@ blocker in the whole plan.
         Linux/Windows × supported Go versions. One green runner first — a matrix
         over a runner that does not exist is a queue.
 
-## Phase 2 — Language coverage (L) — 10 of 12
+## Phase 2 — Language coverage (L) — 14 of 16
 
 The subset went from `float32`-and-`int32` scalars to structs, arrays, six
 shared-tile types, a dynamic tile, atomics, the warp vocabulary, device
@@ -248,7 +248,7 @@ Two remain.
         statement before `expr` runs, which is where `ctx.SharedF32(n)` is
         special-cased.
 
-## Phase 3 — Correctness at scale (L) — 3 of 7
+## Phase 3 — Correctness at scale (L) — 4 of 8
 
 A transpiler is trusted through evidence, not review. This phase built the
 evidence: a written contract checked against the implementation in both
@@ -449,8 +449,8 @@ Naming these keeps the scope honest:
 | 1.2 Portability       | M    | 4 of 5   | —          | Windows cannot be claimed without a host to claim it on       |
 | 1.3 Error model & API | S    | done     | 1.1        | —                                                             |
 | 1.4 GPU CI            | M    | 1 of 2   | —          | hardware access and cost                                      |
-| 2 Language coverage   | L    | 10 of 12 | 1.1, 1.4   | fast math changes what a prebuilt artifact means              |
-| 3 Correctness         | L    | 3 of 7   | 1.4, 2     | the open oracles all need a device                            |
+| 2 Language coverage   | L    | 14 of 16 | 1.1, 1.4   | fast math changes what a prebuilt artifact means              |
+| 3 Correctness         | L    | 4 of 8   | 1.4, 2     | the open oracles all need a device                            |
 | 4 Host runtime        | M    | 0 of 8   | 1.3        | streams change ownership semantics; the context bug is live   |
 | 5 Performance         | M    | 0 of 4   | 2, 4       | may expose NVRTC as the ceiling → revisit the PTX decision    |
 | 6 Tile maturity       | L    | 0 of 7   | 2, 4       | reductions and 2-D tiling are a rewrite of the code generator |
