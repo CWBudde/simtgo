@@ -739,3 +739,137 @@ func TileProbe(ctx gpu.Ctx, out []float32) {
 	}
 	assertEqual(t, "total", got, []float32{blocks * block})
 }
+
+// TestGrayParity is the narrow storage types end to end: []uint8 in, []uint8
+// out, every arithmetic step at int32.
+//
+// The reference is written out here rather than taken from the emulator run,
+// and it is exact. Integer weights are what make that possible: a float32
+// pipeline would need a tolerance, and a tolerance is where a one-bit
+// disagreement in how the two languages truncated a byte would hide. The whole
+// point of this kernel is that no byte is ever an operand, so nothing here may
+// be approximately right.
+func TestGrayParity(t *testing.T) {
+	ctx := device(t)
+	const n, block = 1 << 14, 256
+
+	rgb := make([]uint8, 3*n)
+	for i := range rgb {
+		// 37 is coprime with 256, so every channel takes every value; the
+		// second term keeps the three channels of a pixel from moving in step.
+		rgb[i] = uint8((i*37 + i/251) % 256)
+	}
+	// The two pixels the weights have to land on exactly. White is where a sum
+	// that did not round, or weights that did not add up to 1<<GrayShift, comes
+	// back as 254; black is where anything that carried a stray term shows.
+	for c := 0; c < 3; c++ {
+		rgb[c], rgb[3+c] = 255, 0
+	}
+
+	want := make([]uint8, n)
+	gpu.RunCPU((n+block-1)/block, block, func(c gpu.Ctx) { kernels.Gray(c, want, rgb) })
+
+	ref := make([]uint8, n)
+	for i := range ref {
+		r, g, b := int(rgb[3*i]), int(rgb[3*i+1]), int(rgb[3*i+2])
+		v := (kernels.GrayWeightR*r + kernels.GrayWeightG*g + kernels.GrayWeightB*b + 1<<(kernels.GrayShift-1)) >> kernels.GrayShift
+		ref[i] = uint8(v)
+	}
+	assertEqual(t, "cpu luma", want, ref)
+
+	k, err := simt.Build(ctx, gocuda.Kernels(), "Gray")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	dout, _ := cuda.NewSlice[uint8](ctx, n)
+	drgb, _ := cuda.Upload(ctx, rgb)
+	defer dout.Free()
+	defer drgb.Free()
+
+	if err := k.LaunchN(n, block, dout, drgb); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	got, err := dout.Download()
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	assertEqual(t, "luma", got, want)
+}
+
+// TestNarrowStorageRoundTrip pins the stride rather than the arithmetic.
+//
+// Gray covers a []uint8 computing something. What it cannot cover is the
+// other three widths, and the question they raise is the one []int leaves
+// behind: cuda.Upload copies Go's bytes, so if the device read an element at a
+// different width every value after the first would be wrong. Each buffer here
+// holds a pattern whose elements differ in every byte, and the kernel copies
+// element i of each into its own output slot, so a stride that disagreed comes
+// back as another element's value rather than as something merely close.
+//
+// The probe kernel is inline rather than committed to kernels/, for the reason
+// TestStructLayoutRoundTrip gives: it tests a rule, not a kernel anyone would
+// launch.
+func TestNarrowStorageRoundTrip(t *testing.T) {
+	ctx := device(t)
+
+	const probe = `package kernels
+
+import "github.com/CWBudde/gocuda/gpu"
+
+func NarrowProbe(ctx gpu.Ctx, out []int32, a []int8, b []uint8, c []int16, d []uint16) {
+	i := ctx.GlobalID()
+	if i >= len(a) {
+		return
+	}
+	out[4*i+0] = int32(a[i])
+	out[4*i+1] = int32(b[i])
+	out[4*i+2] = int32(c[i])
+	out[4*i+3] = int32(d[i])
+}
+`
+	src := fstest.MapFS{"probe.go": &fstest.MapFile{Data: []byte(probe)}}
+	k, err := simt.Build(ctx, src, "NarrowProbe")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	const n = 64
+	a := make([]int8, n)
+	b := make([]uint8, n)
+	c := make([]int16, n)
+	d := make([]uint16, n)
+	want := make([]int32, 4*n)
+	for i := range a {
+		// Both signs and both rails, so a signed element read as unsigned --
+		// or a "char" whose signedness the compiler chose for itself -- is a
+		// wrong number and not a coincidence.
+		a[i] = int8(i - 100)
+		b[i] = uint8(200 - i)
+		c[i] = int16(i*517 - 20000)
+		d[i] = uint16(60000 - i*601)
+		want[4*i+0] = int32(a[i])
+		want[4*i+1] = int32(b[i])
+		want[4*i+2] = int32(c[i])
+		want[4*i+3] = int32(d[i])
+	}
+
+	dout, _ := cuda.NewSlice[int32](ctx, 4*n)
+	da, _ := cuda.Upload(ctx, a)
+	db, _ := cuda.Upload(ctx, b)
+	dc, _ := cuda.Upload(ctx, c)
+	dd, _ := cuda.Upload(ctx, d)
+	defer dout.Free()
+	defer da.Free()
+	defer db.Free()
+	defer dc.Free()
+	defer dd.Free()
+
+	if err := k.LaunchN(n, 32, dout, da, db, dc, dd); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	got, err := dout.Download()
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	assertEqual(t, "elements", got, want)
+}

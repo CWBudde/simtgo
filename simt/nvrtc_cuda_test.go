@@ -78,10 +78,10 @@ func TestGeneratedCCompiles(t *testing.T) {
 	}, {
 		// The struct emission is the C++ furthest from anything the author
 		// wrote, and the static_asserts in it are the layout guarantee: they
-		// state what Go believes and let NVRTC refuse it. A padded struct is
-		// the interesting case -- Count at 4, four bytes of padding, Bias at 8,
-		// size 16, align 8 -- because that is where the two could disagree.
-		name: "a padded struct, by value and as a slice element",
+		// state what Go believes and let NVRTC refuse it. Shape is Floor at 0,
+		// Count at 4 and Bias at 8, for 16 bytes in all, which is where the two
+		// could part company.
+		name: "a mixed-width struct, by value and as a slice element",
 		body: "type Shape struct {\n\tFloor float32\n\tCount int32\n\tBias  float64\n}\n\n" +
 			"type Band struct{ Upper, Gain float32 }\n\n" +
 			"//gocuda:float64\n" +
@@ -92,6 +92,20 @@ func TestGeneratedCCompiles(t *testing.T) {
 			"\tfor _, b := range bands {\n" +
 			"\t\tif x[i] <= b.Upper {\n\t\t\tbest = b\n\t\t\tbreak\n\t\t}\n\t}\n" +
 			"\ty[i] = float32(float64(x[i])*float64(best.Gain)+cfg.Bias) + float32(cfg.Count)\n}",
+	}, {
+		// The narrow types as storage: all four widths as slice elements, an
+		// array of them as a local, arithmetic done in int32 and the result
+		// converted back. Whether "signed char" and "unsigned short" are even
+		// spellings NVRTC accepts as pointer element types with no header
+		// included is a measurement, not a claim.
+		name: "narrow integer storage with the arithmetic done in int32",
+		body: "func K(ctx gpu.Ctx, out []uint8, a []int8, b []uint16, c []int16) {\n" +
+			"\ti := ctx.GlobalID()\n" +
+			"\tif i >= len(out) {\n\t\treturn\n\t}\n" +
+			"\tvar buf [4]uint8\n" +
+			"\tbuf[0] = out[i]\n" +
+			"\tv := int32(a[i]) + int32(b[i]) + int32(c[i]) + int32(buf[0])\n" +
+			"\tout[i] = uint8(v & 255)\n}",
 	}, {
 		name: "a struct literal with keyed fields, some of them left out",
 		body: "type P struct{ X, Y, Z float32 }\n\n" +
@@ -220,7 +234,7 @@ func TestGeneratedCCompiles(t *testing.T) {
 
 	// The committed kernels go through the same gate, so a kernel that stops
 	// compiling is caught here and not at some later launch.
-	for _, name := range []string{"VecAdd", "Magnitude", "Scale", "FIR", "Classify", "Softclip", "Transpose", "Quantize", "BandGain"} {
+	for _, name := range []string{"VecAdd", "Magnitude", "Scale", "FIR", "Classify", "Softclip", "Transpose", "Quantize", "BandGain", "Gray"} {
 		t.Run(name, func(t *testing.T) {
 			u, err := simt.Transpile(gocuda.Kernels(), name)
 			if err != nil {

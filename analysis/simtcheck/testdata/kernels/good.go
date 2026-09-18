@@ -60,3 +60,16 @@ func Float64Math(ctx gpu.Ctx, y []float64) {
 		y[i] = gpu.Hypot64(gpu.Sqrt64(y[i]), 1)
 	}
 }
+
+// Luma is the accepted half of the narrow storage rule, and the half that
+// matters: the analyzer and the transpiler have to agree that a []uint8 with
+// its arithmetic done in int32 lowers, not merely that everything else is
+// refused.
+func Luma(ctx gpu.Ctx, out, rgb []uint8) {
+	i := ctx.GlobalID()
+	if i >= len(out) || 3*i+2 >= len(rgb) {
+		return
+	}
+	v := int32(rgb[3*i]) + int32(rgb[3*i+1]) + int32(rgb[3*i+2])
+	out[i] = uint8(v / 3)
+}

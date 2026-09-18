@@ -17,6 +17,9 @@ const Classify Lowered = "Classify"
 // FIR reports that the kernel of that name lowered to CUDA C.
 const FIR Lowered = "FIR"
 
+// Gray reports that the kernel of that name lowered to CUDA C.
+const Gray Lowered = "Gray"
+
 // VecAdd reports that the kernel of that name lowered to CUDA C.
 const VecAdd Lowered = "VecAdd"
 
@@ -43,6 +46,9 @@ var ptxClassify []byte
 
 //go:embed FIR.compute_75.ptx
 var ptxFIR []byte
+
+//go:embed Gray.compute_75.ptx
+var ptxGray []byte
 
 //go:embed VecAdd.compute_75.ptx
 var ptxVecAdd []byte
@@ -82,6 +88,12 @@ func init() {
 		PTX:           ptxFIR,
 		RequiredBlock: 256,
 		SharedBytes:   1280,
+	})
+	simt.RegisterPrebuilt(simt.Prebuilt{
+		Name:         "Gray",
+		SourceSHA256: "61cfb417958377ae0687f234b15091ca78e907da05d70d304f276ed2db84856a",
+		Arch:         "compute_75",
+		PTX:          ptxGray,
 	})
 	simt.RegisterPrebuilt(simt.Prebuilt{
 		Name:         "VecAdd",

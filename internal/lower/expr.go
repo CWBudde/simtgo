@@ -138,6 +138,11 @@ func (t *transpiler) expr(e ast.Expr) cexpr {
 	case *ast.BinaryExpr:
 		return t.binary(e)
 	case *ast.UnaryExpr:
+		if typ := t.narrowOperand(e.X); typ != "" {
+			t.fail(e.Pos(), "%s, so `%s` on one can give a different answer; write %sint32(x) and convert back with %s(...) when you store the result",
+				narrowWhy(typ), e.Op, e.Op, typ)
+			return atom("")
+		}
 		switch e.Op {
 		case token.SUB, token.ADD, token.NOT:
 			return cexpr{fmt.Sprintf("%s%s", e.Op, t.expr(e.X).at(precPrefix)), precPrefix}
@@ -175,6 +180,9 @@ func (t *transpiler) expr(e ast.Expr) cexpr {
 }
 
 func (t *transpiler) binary(e *ast.BinaryExpr) cexpr {
+	if t.refuseNarrowBinary(e.X, e.Y, e.Op, e.Pos()) {
+		return atom("")
+	}
 	if e.Op == token.EQL || e.Op == token.NEQ {
 		// Go compares a struct or an array field by field. C++ gives a plain
 		// aggregate no operator== at all, so emitting the same spelling would
@@ -201,6 +209,64 @@ func (t *transpiler) binary(e *ast.BinaryExpr) cexpr {
 	return atom("")
 }
 
+// narrowOperand reports e's Go type when it is one of the storage-only narrow
+// integers, and "" otherwise. It is asked at every position that would compute
+// with the value rather than move it.
+func (t *transpiler) narrowOperand(e ast.Expr) string {
+	tv, ok := t.info.Types[e]
+	if !ok || tv.Type == nil {
+		return ""
+	}
+	if _, ok := narrowCType(tv.Type); !ok {
+		return ""
+	}
+	return tv.Type.String()
+}
+
+// narrowWhy is the one reason every narrow-operand refusal gives. It is written
+// once so that the messages cannot drift apart while describing one rule.
+func narrowWhy(typ string) string {
+	return fmt.Sprintf("%s is storage only on the device: Go computes %s arithmetic in its own width and C promotes it to int", typ, typ)
+}
+
+// narrowAnyway is the tail of the refusals for the shapes that, taken one at a
+// time, do agree.
+//
+// It is worth being exact about which those are, because a message claiming a
+// disagreement the reader cannot reproduce would be the same kind of thing this
+// package refuses. A compound assignment and a ++ truncate straight back into
+// the narrow slot, and every operator they can carry agrees under that
+// truncation: the additive and bitwise ones are congruent modulo the narrow
+// width, and the two that are not -- / and % -- take operands that already fit,
+// so promoting them changes nothing. Comparisons agree as well, since promoting
+// both sides cannot change which is larger. What does not agree is an operator
+// whose result feeds another one, because the intermediate is 8 or 16 bits in
+// Go and 32 in C: `a, b := int8(100), int8(3); a*b/2` is 22 in Go and -106 in
+// C. There is no way to tell those apart at the operator without deciding what
+// the surrounding expression may be, so the rule is every operator -- which a
+// reader can hold -- instead of every operator but the ones that happen to be
+// safe, which they would have to trust. Relaxing this later costs a line;
+// retracting it would cost somebody a kernel that worked.
+const narrowAnyway = "is refused anyway, because the subset refuses every operator on a narrow value rather than a list of the safe ones:"
+
+// refuseNarrowBinary refuses an operator with a narrow operand on either side.
+//
+// Both sides, so `n << count` with a narrow count goes as well. That one is
+// harmless -- a shift count is promoted without changing the result -- and it
+// goes for the reason above.
+func (t *transpiler) refuseNarrowBinary(x, y ast.Expr, op token.Token, pos token.Pos) bool {
+	typ := t.narrowOperand(x)
+	if typ == "" {
+		typ = t.narrowOperand(y)
+	}
+	if typ == "" {
+		return false
+	}
+	t.fail(pos, "%s, so `%s` on one can give a different answer; write int32(a) %s int32(b) and convert back with %s(...) when you store the result",
+		narrowWhy(typ), op, op, typ)
+	return true
+}
+
 func (t *transpiler) call(c *ast.CallExpr) cexpr {
 	fun := unparen(c.Fun)
 
@@ -213,7 +279,18 @@ func (t *transpiler) call(c *ast.CallExpr) cexpr {
 			return atom("")
 		}
 		t.checkNarrowing(tv.Type, c.Args[0], c.Pos())
-		return cexpr{fmt.Sprintf("(%s)(%s)", t.ctype(tv.Type, c.Pos()), t.expr(c.Args[0]).s), precPrefix}
+		// A conversion is the one place a narrow type is legal as a value,
+		// which is what makes it usable at all: uint8(v) is how a computed
+		// int32 gets back into a byte, and int32(b[i]) is how a byte gets out.
+		// Both languages truncate a conversion to the low bits of the target,
+		// so the two spellings mean the same thing -- for the signed targets
+		// that is C++20's wording, and every C++ compiler NVRTC can be, as well
+		// as every earlier standard in practice, already wrapped.
+		cast, ok := narrowCType(tv.Type)
+		if !ok {
+			cast = t.ctype(tv.Type, c.Pos())
+		}
+		return cexpr{fmt.Sprintf("(%s)(%s)", cast, t.expr(c.Args[0]).s), precPrefix}
 	}
 
 	switch f := fun.(type) {
@@ -226,7 +303,19 @@ func (t *transpiler) call(c *ast.CallExpr) cexpr {
 			}
 			return t.lengthOf(c.Args[0])
 		case "min", "max":
-			// CUDA provides overloaded min/max for int and float.
+			// CUDA provides overloaded min/max for int and float. Not for the
+			// narrow types: a `min(unsigned char, unsigned char)` would either
+			// find no overload or silently pick the int one and hand back an
+			// int, and either way it is an answer about generated code. The
+			// result would happen to agree, since min of two values changes
+			// neither, but it is refused for the reason the comparisons are.
+			for _, a := range c.Args {
+				if typ := t.narrowOperand(a); typ != "" {
+					t.fail(c.Pos(), "%s, so %s has no overload for it; write %s(int32(a), int32(b)) and convert back with %s(...)",
+						narrowWhy(typ), f.Name, f.Name, typ)
+					return atom("")
+				}
+			}
 			return atom("%s(%s)", f.Name, t.args(c))
 		}
 		if obj, ok := t.info.Uses[f].(*types.Func); ok {
