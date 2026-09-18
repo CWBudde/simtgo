@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math"
 	"math/rand/v2"
+	"os"
 	"testing"
 	"testing/fstest"
 
@@ -24,6 +25,12 @@ import (
 func device(t *testing.T) *cuda.Context {
 	t.Helper()
 	if !cuda.Available() {
+		// A sanitizer run that launches nothing is green and means nothing,
+		// so a job that has promised a device says so and fails instead of
+		// skipping. See .github/workflows/sanitizer.yml.
+		if os.Getenv("GOCUDA_REQUIRE_DEVICE") != "" {
+			t.Fatal("GOCUDA_REQUIRE_DEVICE is set, but no CUDA device is available")
+		}
 		t.Skip("no CUDA device available")
 	}
 	ctx, err := cuda.NewContext(0)

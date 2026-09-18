@@ -32,7 +32,24 @@ go generate ./...                    # regenerate kernels/prebuilt (needs NVRTC)
 go run ./cmd/gocuda generate -pkg ./kernels -out ./kernels/prebuilt -no-ptx   # no toolkit
 
 go run -tags cuda ./examples/fir     # also: vecadd, magnitude, tilefir
+
+# compute-sanitizer over every kernel, one tool at a time. Needs a device.
+GOCUDA_REQUIRE_DEVICE=1 go test -tags cuda -count=1 -timeout 0 \
+  -exec "compute-sanitizer --tool=memcheck --error-exitcode 1 --report-api-errors no --target-processes application-only" \
+  ./simt/ ./tile/ ./cuda/   # also: racecheck, initcheck, synccheck
 ```
+
+The sanitizer sweep is three flags and an environment variable, and each of
+them is load-bearing. `--error-exitcode` is what makes it a gate:
+`compute-sanitizer` exits 0 on findings otherwise, so without it a clean run
+and a dirty one are the same result. `--report-api-errors no` drops a class
+this repository tests better than the sanitizer does — `cuda`'s error tests
+hand `cuModuleLoadData` deliberate garbage and assert the `CUresult` that comes
+back, which the default counts as errors. `GOCUDA_REQUIRE_DEVICE` turns the
+test helpers' "no CUDA device available" skip into a failure, because a sweep
+that launched nothing is green and means nothing. And note that a clean run
+prints **nothing**: `go test` discards a passing binary's stdout, so the
+`ERROR SUMMARY` lines show up only on a failure, or under `-v`.
 
 Linting is `golangci-lint run ./...` (`.golangci.yml`) and formatting is
 `treefmt` (`treefmt.toml`: gofmt for Go, prettier for Markdown, YAML and JSON);

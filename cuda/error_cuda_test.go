@@ -13,9 +13,7 @@ import (
 // the string one, since the two are now derived from the same pair of numbers
 // and a mismatch would mean one of them is invented.
 func TestComputeCapability(t *testing.T) {
-	if !cuda.Available() {
-		t.Skip("no CUDA device available")
-	}
+	requireDevice(t)
 	ctx, err := cuda.NewContext(0)
 	if err != nil {
 		t.Fatalf("NewContext: %v", err)
@@ -43,9 +41,7 @@ func TestComputeCapability(t *testing.T) {
 // recognises as PTX and then chokes on comes back as CUDA_ERROR_INVALID_PTX.
 // Observed on a T550 with driver 580 and CUDA 12.8.
 func TestLoadPTXError(t *testing.T) {
-	if !cuda.Available() {
-		t.Skip("no CUDA device available")
-	}
+	requireDevice(t)
 	ctx, err := cuda.NewContext(0)
 	if err != nil {
 		t.Fatalf("NewContext: %v", err)
@@ -79,9 +75,7 @@ func TestLoadPTXError(t *testing.T) {
 // with its log intact: the log is the only thing that says what the generated
 // CUDA got wrong, and it used to be reachable only by reading the message.
 func TestCompileError(t *testing.T) {
-	if !cuda.Available() {
-		t.Skip("no CUDA device available")
-	}
+	requireDevice(t)
 	_, err := cuda.Compile("__global__ void k(){ nope; }", "k.cu", "compute_75")
 	if err == nil {
 		t.Fatal("Compile of a kernel with an undefined identifier succeeded")

@@ -5,6 +5,7 @@ package tile_test
 import (
 	"math"
 	"math/rand/v2"
+	"os"
 	"strings"
 	"testing"
 
@@ -16,6 +17,12 @@ import (
 func device(t *testing.T) *cuda.Context {
 	t.Helper()
 	if !cuda.Available() {
+		// A sanitizer run that launches nothing is green and means nothing,
+		// so a job that has promised a device says so and fails instead of
+		// skipping. See .github/workflows/sanitizer.yml.
+		if os.Getenv("GOCUDA_REQUIRE_DEVICE") != "" {
+			t.Fatal("GOCUDA_REQUIRE_DEVICE is set, but no CUDA device is available")
+		}
 		t.Skip("no CUDA device available")
 	}
 	ctx, err := cuda.NewContext(0)
@@ -111,4 +118,38 @@ func TestChainedWindowRejected(t *testing.T) {
 	if _, err := out.Materialize(); err == nil || !strings.Contains(err.Error(), "chaining windowed") {
 		t.Fatalf("got %v, want a chaining error", err)
 	}
+}
+
+// TestStepwiseSharesOneBufferBetweenTwoInputs is the live case for the
+// launch-time aliasing check, and it is an accepted one.
+//
+// MaterializeStepwise caches a materialised node's buffer, so a node feeding
+// both operands of a binary op is handed to the kernel twice: p0 and p1 are
+// one allocation. Both are read-only and the output is a fresh buffer, which
+// is exactly what restrict allows, so the launch must go through and compute
+// the right numbers rather than be refused for looking suspicious. The fused
+// path cannot reach this at all -- generate emits one parameter per distinct
+// node -- so stepwise is the only way to ask the question.
+func TestStepwiseSharesOneBufferBetweenTwoInputs(t *testing.T) {
+	ctx := device(t)
+	const n = 1 << 12
+	xs := signal(n, 7)
+
+	g := tile.New(ctx)
+	doubled := tile.Scale(g.Input(xs), 2)
+	out := tile.Mul(doubled, doubled)
+
+	got, launches, err := out.MaterializeStepwise()
+	if err != nil {
+		t.Fatalf("MaterializeStepwise: %v", err)
+	}
+	if launches != 2 {
+		t.Errorf("launched %d kernels, want 2 (the scale, then the square)", launches)
+	}
+
+	want := make([]float32, n)
+	for i, x := range xs {
+		want[i] = (2 * x) * (2 * x)
+	}
+	tolerance.AssertClose(t, "square of a scaled signal", want, got, 1e-6)
 }
