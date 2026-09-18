@@ -359,6 +359,19 @@ func TestUnsupported(t *testing.T) {
 		name: "range with a value, assigned rather than declared",
 		body: "func K(ctx gpu.Ctx, y, x []float32) { var i int; var v float32; for i, v = range x { y[i] = v } }",
 		want: "only `for i := range x` and `for i, v := range x` are supported",
+	}, {
+		// CUDA reads every lane argument as unsigned, so -1 is not the lane
+		// below but lane 4294967295, which the built-in then wraps or clamps.
+		// The CPU emulator has a definite answer for it -- the caller's own
+		// value -- so it is a spelling that means one thing where it is read
+		// and another where it runs.
+		name: "a negative source lane",
+		body: "func K(ctx gpu.Ctx, y []float32) { y[0] = ctx.ShuffleF32(y[1], -1) }",
+		want: "takes a lane offset and -1 is negative",
+	}, {
+		name: "a negative shuffle delta",
+		body: "func K(ctx gpu.Ctx, y []float32) { y[0] = ctx.ShuffleDownF32(y[1], -2) }",
+		want: "takes a lane offset and -2 is negative",
 	}}
 
 	for _, tc := range cases {

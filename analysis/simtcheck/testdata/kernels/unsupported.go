@@ -102,3 +102,10 @@ func Float64Tile(ctx gpu.Ctx, y []float32) {
 	s := ctx.SharedF64(4) // want `float64 needs //gocuda:float64`
 	y[0] = float32(s[0])
 }
+
+// NegativeLane is refused because CUDA reads a lane offset as unsigned: -1 is
+// not the lane below but lane 4294967295, and the CPU emulator has an answer
+// for it that the device does not.
+func NegativeLane(ctx gpu.Ctx, y []float32) {
+	y[0] = ctx.ShuffleUpF32(y[1], -1) // want `takes a lane offset and -1 is negative`
+}
