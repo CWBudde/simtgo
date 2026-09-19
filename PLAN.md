@@ -22,18 +22,18 @@ Roughly 11,500 lines of library and tool, 7,100 of fuzzing infrastructure and
 11,400 of tests; twelve kernels, each with a golden file, an NVRTC compile test
 and a CPU/GPU parity test.
 
-| Verified                                                                  | Missing                                         |
-| ------------------------------------------------------------------------- | ----------------------------------------------- |
-| Both tracks, against independent Go references                            | on **one** GPU: T550, `sm_75`, CUDA 12.8, Linux |
-| The subset, as a contract checked in both directions                      | —                                               |
-| A differential fuzzer: the host and NVRTC oracles in CI daily, 4h weekly  | the device oracle; a GPU runner to host it      |
-| `compute-sanitizer` clean on all four tools                               | it runs by hand, not in CI                      |
-| A kernel that cannot be lowered fails `go build`                          | —                                               |
-| Builds and ships with no CUDA installed, no cgo anywhere                  | Windows                                         |
-| 1-D/2-D/3-D grids, structs, arrays, atomics, warp vocabulary              | tuple returns                                   |
-| Opt-in fast math, with the hash split that keeps it honest                | a timing harness to say it is faster            |
-| Driver API: 18 calls, fully synchronous, safe to share between goroutines | streams, events, async copies, pinned memory    |
-| Tile track: 7 ops, 1-D `float32`, one windowed                            | reductions, 2-D, fusion planning                |
+| Verified                                                                 | Missing                                         |
+| ------------------------------------------------------------------------ | ----------------------------------------------- |
+| Both tracks, against independent Go references                           | on **one** GPU: T550, `sm_75`, CUDA 12.8, Linux |
+| The subset, as a contract checked in both directions                     | —                                               |
+| A differential fuzzer: the host and NVRTC oracles in CI daily, 4h weekly | the device oracle; a GPU runner to host it      |
+| `compute-sanitizer` clean on all four tools                              | it runs by hand, not in CI                      |
+| A kernel that cannot be lowered fails `go build`                         | —                                               |
+| Builds and ships with no CUDA installed, no cgo anywhere                 | Windows                                         |
+| 1-D/2-D/3-D grids, structs, arrays, atomics, warp vocabulary             | tuple returns                                   |
+| Opt-in fast math, with the hash split that keeps it honest               | a timing harness to say it is faster            |
+| Driver API: 31 calls, streams, events, async copies, page-locked memory  | managed memory, buffer pooling, multi-GPU       |
+| Tile track: 7 ops, 1-D `float32`, one windowed                           | reductions, 2-D, fusion planning                |
 
 The single largest gap is **a GPU in CI** (Phase 1.4). It blocks the fuzzer's
 device leg, the sanitizer workflow, every parity test written since 2026-09-18,
@@ -144,9 +144,10 @@ Findings: the `_v2` symbol trap and the search policy are in
       refusal sites were all fine and the gaps were all in `Transpile` itself:
       `go/types` stopped at the first error unless given an `Error` callback,
       and the import refusal had no position of its own.
-- [x] One deliberate pass over the exported surface. `context.Context` is
-      deliberately **not** added anywhere until Phase 4 —
-      [why](docs/decisions.md#the-driver-api-is-synchronous-so-there-is-no-contextcontext).
+- [x] One deliberate pass over the exported surface. `context.Context` was
+      deliberately **not** added anywhere until Phase 4, and arrived there on
+      `cuda.Stream.Wait` —
+      [why, and what a cancelled wait does not do](docs/decisions.md#contextcontext-cancels-the-wait-and-says-so).
 
 ### 1.4 CI on real hardware (M) — 1 of 2
 
@@ -399,17 +400,38 @@ The machinery is described in
         those bytes already; the marker line covers the kernel that indexes
         nothing, whose two builds would otherwise be identical.
 
-## Phase 4 — Host runtime for real workloads (M) — 1 of 8
+## Phase 4 — Host runtime for real workloads (M) — 3 of 8
 
 The measurement that should drive this: the FIR example spends **1.0 ms in the
 kernel and 9.5 ms moving data**. Speed lives here, not in kernel
 micro-optimisation — and the `runtime.Pinner` work already confirmed that the
-launch path is not where the time goes.
+launch path is not where the time goes. Streams are the first tool aimed at
+it: they do not make a copy faster, they stop the copies being a queue.
 
-- [ ] Streams, events, async `HtoD`/`DtoH`; overlap copy with compute. This is
+- [x] Streams, events, async `HtoD`/`DtoH`; overlap copy with compute. This is
       also what makes `context.Context` meaningful, since `cuStreamQuery` can
-      genuinely `select` on `ctx.Done()`.
-- [ ] Pinned (page-locked) host memory; optionally managed memory.
+      genuinely `select` on `ctx.Done()`. (2026-09-19) — `cuda.Stream` and
+      `cuda.Event`, `Slice.UploadAsync`/`DownloadAsync`, `Function.Launch` and
+      `simt.Kernel.LaunchOn`. 64 MiB up and back in sixteen chunks: 52.3 ms
+      serial, 31.8 ms over four streams, **1.65×**. `Stream.Wait(ctx)` is the
+      one entry point taking a `context.Context`; cancelling it stops the wait
+      and not the device, so the stream is marked and `Close` then refuses
+      with a `*BusyStreamError` rather than letting a `Free` land on memory
+      the device is still reading.
+      [What was measured](docs/toolchain.md#streams-overlap-the-copies-with-the-compute),
+      [what a cancelled wait does not do](docs/decisions.md#contextcontext-cancels-the-wait-and-says-so).
+- [x] Pinned (page-locked) host memory; optionally managed memory.
+      (2026-09-19) — `cuda.HostSlice`, and the expectation it was taken on was
+      wrong: page-locking is worth about **5%** on a synchronous copy here,
+      not the textbook factor of two. It earns its place anyway, because an
+      asynchronous copy is not available without it at all — `cuMemcpyHtoDAsync`
+      falls back to a synchronous transfer for pageable memory, and Go's
+      `runtime.Pinner` cannot hold a slice still past the end of the call. So
+      `UploadAsync`/`DownloadAsync` take a `*HostSlice` and refuse a `[]T`.
+      Managed memory, the item's optional half, was **not** done: nothing here
+      needs it and unified memory is a separate ownership story.
+      [The 5%](docs/toolchain.md#page-locked-host-memory-buys-little-bandwidth-here-and-is-still-required),
+      [why a `[]T` is refused](docs/decisions.md#an-asynchronous-copy-does-not-take-a-go-slice).
 - [ ] **Device-resident values.** `tile.Materialize` always downloads; results
       must be able to stay on the GPU between operations. This is also what
       first makes the tile track's aliasing check able to fail — see
@@ -458,7 +480,14 @@ launch path is not where the time goes.
         reach needs the same care as any other shared memory. `README.md`'s
         "not safe to share between goroutines" went with it.
 
-- [ ] Buffer pooling and leak detection.
+- [ ] An asynchronous `LaunchShared`. `simt.Kernel.LaunchOn` refuses a kernel
+      that declares a dynamic shared tile: a dynamic tile and a stream are two
+      new things at once and nothing has needed both yet. Noted rather than
+      done, so the gap is a decision instead of an omission.
+- [ ] Buffer pooling and leak detection. The stream work made the lifetime
+      question concrete: a buffer an asynchronous copy is reading must outlive
+      the copy, and today the only thing that says so is a doc comment plus
+      `Stream.Close` refusing after a cancelled `Wait`.
 - [ ] CUDA graphs for launch-bound workloads (later, measure first).
 
 ## Phase 5 — Performance parity (M)
@@ -561,7 +590,7 @@ Naming these keeps the scope honest:
 | 1.4 GPU CI            | M    | 1 of 2   | —          | hardware access and cost                                      |
 | 2 Language coverage   | L    | 14 of 16 | 1.1, 1.4   | fast math changes what a prebuilt artifact means              |
 | 3 Correctness         | L    | 5 of 8   | 1.4, 2     | the one oracle still open needs a device                      |
-| 4 Host runtime        | M    | 1 of 8   | 1.3        | streams change ownership semantics                            |
+| 4 Host runtime        | M    | 3 of 8   | 1.3        | streams changed ownership semantics; buffer lifetime is next  |
 | 5 Performance         | M    | 0 of 4   | 2, 4       | may expose NVRTC as the ceiling → revisit the PTX decision    |
 | 6 Tile maturity       | L    | 0 of 7   | 2, 4       | reductions and 2-D tiling are a rewrite of the code generator |
 | 7 Release             | S–M  | 5 of 9   | all        | —                                                             |
