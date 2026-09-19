@@ -270,7 +270,7 @@ second, wrong diagnostic for one mistake.
 
 ### `parseArchLocal` was the worse of two implementations
 
-`cmd/gocuda` carried its own arch parser. Any trailing `a` or `f` was read as an
+`cmd/simtgo` carried its own arch parser. Any trailing `a` or `f` was read as an
 arch-conditional target without looking at what preceded it, so `compute_a` was
 refused with advice naming a string the function itself rejects. It is gone;
 every case its test pinned behaves identically under `cuda.ParseArch`.

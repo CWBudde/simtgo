@@ -8,9 +8,9 @@ import (
 	"os"
 	"testing"
 
-	"github.com/CWBudde/gocuda/cuda"
-	"github.com/CWBudde/gocuda/internal/tolerance"
-	"github.com/CWBudde/gocuda/kernels"
+	"github.com/CWBudde/simtgo/cuda"
+	"github.com/CWBudde/simtgo/internal/tolerance"
+	"github.com/CWBudde/simtgo/kernels"
 )
 
 // The kernel sources are read from disk rather than through kernelSources,
@@ -38,8 +38,8 @@ func freshDevice(t testing.TB) *cuda.Context {
 		// A sanitizer run that launches nothing is green and means nothing,
 		// so a job that has promised a device says so and fails instead of
 		// skipping. See .github/workflows/sanitizer.yml.
-		if os.Getenv("GOCUDA_REQUIRE_DEVICE") != "" {
-			t.Fatal("GOCUDA_REQUIRE_DEVICE is set, but no CUDA device is available")
+		if os.Getenv("SIMTGO_REQUIRE_DEVICE") != "" {
+			t.Fatal("SIMTGO_REQUIRE_DEVICE is set, but no CUDA device is available")
 		}
 		t.Skip("no CUDA device available")
 	}
@@ -266,7 +266,7 @@ func BenchmarkBuild(b *testing.B) {
 	// developer cache nor the cost of writing into a real one -- and so that
 	// the "nvrtc" case below is NVRTC, which it stopped being the moment the
 	// disk cache went in and started answering the second iteration.
-	b.Setenv("GOCUDA_PTX_CACHE", b.TempDir())
+	b.Setenv("SIMTGO_PTX_CACHE", b.TempDir())
 	// One context is held open for the whole benchmark. Releasing the last
 	// reference to a device's primary context destroys it, and retaining it
 	// again costs upwards of 150 ms -- a hundred times what is being measured

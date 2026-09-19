@@ -41,18 +41,18 @@ go test -race ./gpu/                 # the emulator must be race-clean
 go test -tags cuda ./...             # CPU/GPU parity on a real device
 CGO_ENABLED=0 go build -tags cuda ./...   # the driver must build without cgo or a toolkit
 go test -run TestGolden ./simt/      # a single test
-GOCUDA_UPDATE=1 go test -run TestGolden ./simt/   # refresh simt/testdata/*.cu goldens
+SIMTGO_UPDATE=1 go test -run TestGolden ./simt/   # refresh simt/testdata/*.cu goldens
 
-go run ./cmd/gocuda vet ./kernels    # refuse kernels that cannot be lowered
-go vet -vettool=$(which gocuda) ./...
-go run ./cmd/gocuda generate -check  # is the committed CUDA C current? (CI check)
+go run ./cmd/simtgo vet ./kernels    # refuse kernels that cannot be lowered
+go vet -vettool=$(which simtgo) ./...
+go run ./cmd/simtgo generate -check  # is the committed CUDA C current? (CI check)
 go generate ./...                    # regenerate kernels/prebuilt (needs NVRTC)
-go run ./cmd/gocuda generate -pkg ./kernels -out ./kernels/prebuilt -no-ptx   # no toolkit
+go run ./cmd/simtgo generate -pkg ./kernels -out ./kernels/prebuilt -no-ptx   # no toolkit
 
 go run -tags cuda ./examples/fir     # also: vecadd, magnitude, tilefir
 
 # compute-sanitizer over every kernel, one tool at a time. Needs a device.
-GOCUDA_REQUIRE_DEVICE=1 go test -tags cuda -count=1 -timeout 0 \
+SIMTGO_REQUIRE_DEVICE=1 go test -tags cuda -count=1 -timeout 0 \
   -exec "compute-sanitizer --tool=memcheck --error-exitcode 1 --report-api-errors no --target-processes application-only" \
   ./simt/ ./tile/ ./cuda/   # also: racecheck, initcheck, synccheck
 ```
@@ -63,7 +63,7 @@ them is load-bearing. `--error-exitcode` is what makes it a gate:
 and a dirty one are the same result. `--report-api-errors no` drops a class
 this repository tests better than the sanitizer does — `cuda`'s error tests
 hand `cuModuleLoadData` deliberate garbage and assert the `CUresult` that comes
-back, which the default counts as errors. `GOCUDA_REQUIRE_DEVICE` turns the
+back, which the default counts as errors. `SIMTGO_REQUIRE_DEVICE` turns the
 test helpers' "no CUDA device available" skip into a failure, because a sweep
 that launched nothing is green and means nothing. And note that a clean run
 prints **nothing**: `go test` discards a passing binary's stdout, so the
@@ -78,9 +78,9 @@ the context's, so it needs a test binary nobody else is sharing.
 
 Three checks reach a decision model instead of parsing, and all three are
 **off unless asked for**, so nothing above changes without an environment
-variable. `GOCUDA_WARNING_TRIAGE=1` gives the fuzzer's NVRTC oracle a second
+variable. `SIMTGO_WARNING_TRIAGE=1` gives the fuzzer's NVRTC oracle a second
 look at the warnings its allowlist suppressed — it may only put a warning
-back, never drop one — and `GOCUDA_DOC_REVIEW=1` enables two advisory reviews
+back, never drop one — and `SIMTGO_DOC_REVIEW=1` enables two advisory reviews
 that log and cannot fail (`just review-spec`, `just review-docs`, or
 `just review` for all three). Each needs `TYPESAFE_API_KEY` and skips without
 it. `internal/typesafe` is stdlib only and imported from tests alone, so
@@ -123,16 +123,16 @@ run without a GPU. **Anything added to the driver needs a matching stub**, and
 
 Which library file is opened is decided in `cuda/library.go`, which is
 deliberately untagged and free of any loading so the path policy is testable
-with no CUDA present (`cuda/library_test.go`). `GOCUDA_LIBCUDA` and
-`GOCUDA_LIBNVRTC` replace the respective search outright. `CUDA_PATH`/
+with no CUDA present (`cuda/library_test.go`). `SIMTGO_LIBCUDA` and
+`SIMTGO_LIBNVRTC` replace the respective search outright. `CUDA_PATH`/
 `CUDA_HOME` apply to **NVRTC only**, ahead of the system library: the driver
 ships with the driver, not the toolkit, so a toolkit root says nothing about
 where it lives.
 
-`cmd/gocuda` depends on `internal/lower` and never on `simt`. It calls
-`cuda.Compile` directly, in process; the `cmd/gocuda-nvrtc` child that used to
+`cmd/simtgo` depends on `internal/lower` and never on `simt`. It calls
+`cuda.Compile` directly, in process; the `cmd/simtgo-nvrtc` child that used to
 speak JSON on stdin/stdout is gone, because the reason for it — `simt` was cgo
-and `cmd/gocuda` had to build without a toolkit — went with cgo. `package
+and `cmd/simtgo` had to build without a toolkit — went with cgo. `package
 cuda` carries the tag split internally, so the tool still builds and runs
 untagged, where `Compile` is `cuda/stub.go`'s and returns `ErrNoCUDA`. That is
 why the `//go:generate` line in `kernels.go` carries `-tags cuda`: untagged it
@@ -159,16 +159,16 @@ analyzer — put it in `lower` and both get it.
   compares it against the real package: **adding anything to `gpu` means
   adding it to `gpupkg.go` too**, or kernels can call it in Go and fail to
   transpile.
-- A kernel is any function whose first parameter is `gpu.Ctx`. `//gocuda:device`
+- A kernel is any function whose first parameter is `gpu.Ctx`. `//simtgo:device`
   in a doc comment says it is a helper rather than a kernel, and is refused on a
-  function taking no `gpu.Ctx`; `//gocuda:ignore`, in a doc comment or a file's
+  function taking no `gpu.Ctx`; `//simtgo:ignore`, in a doc comment or a file's
   package comment, opts out entirely.
 - `Unit.SourceHash` hashes the _generated CUDA C_, not the Go source. That is
   the whole staleness story: a prebuilt is filed under it, so an artifact built
   from anything else is simply not found and `Build` falls back to NVRTC.
 
 **Ahead-of-time pipeline.** `go generate` (line in `kernels.go`) runs
-`gocuda generate`, which writes `kernels/prebuilt/`: the `.cu`, the
+`simtgo generate`, which writes `kernels/prebuilt/`: the `.cu`, the
 `.compute_75.ptx`, and `prebuilt_gen.go` with one `Lowered` constant per kernel
 that lowered plus an `init` calling `simt.RegisterPrebuilt`. Hand-written
 `kernels/prebuilt/gate.go` lists those constants, so a kernel that stops
@@ -183,7 +183,7 @@ lowering is what produces the hash, and it keeps the launch contracts
 (`RequiredBlock`, `SharedBytes`, `DynSharedWidth`, `Params`) derived from the
 source in hand rather than trusted from an artifact. `internal/jit` then either loads registered
 PTX or calls NVRTC, caching modules per `cuda.Context` (never package-global —
-a module dies with its context). `.gocuda-cache/` receives the `.cu`/`.ptx`
+a module dies with its context). `.simtgo-cache/` receives the `.cu`/`.ptx`
 that were actually used, for inspection; it is gitignored, and per-`Build`
 via `simt.WithCacheDir`.
 
@@ -228,8 +228,8 @@ reference, so a shared misunderstanding cannot pass as agreement.
   emitted into the same translation unit as a `__device__` function. That is
   why `lower.Kernel` takes the package's files and not just the entry point.
   Recursion is refused, and so is calling a kernel — a function taking a
-  `gpu.Ctx` is one, unless it carries `//gocuda:device` or `//gocuda:ignore`.
-- Kernel packages may import **only** `github.com/CWBudde/gocuda/gpu`. The
+  `gpu.Ctx` is one, unless it carries `//simtgo:device` or `//simtgo:ignore`.
+- Kernel packages may import **only** `github.com/CWBudde/simtgo/gpu`. The
   device types are `float32`, `float64` (opt-in), `int32`, `int64`, `uint32`,
   `uint64` and `bool`, plus named structs and fixed-size arrays of those.
   `int8`/`int16`/`uint8`/`uint16` are **storage only** — legal as a slice
@@ -237,7 +237,7 @@ reference, so a shared misunderstanding cannot pass as agreement.
   because Go's 8- and 16-bit arithmetic wraps where C's promotes to `int`. Go's
   `int` is refused anywhere a layout is involved: as a value it narrows, as an
   element it is a different stride.
-- A struct's holes are emitted as `gocuda_padN` members, the trailing one
+- A struct's holes are emitted as `simtgo_padN` members, the trailing one
   included. That is what makes the `sizeof` assertion imply the field offsets
   rather than merely agree with them — NVRTC has no `offsetof` to assert them
   directly.
@@ -258,9 +258,9 @@ reference, so a shared misunderstanding cannot pass as agreement.
 3. Add it to the list in `kernels/prebuilt/prebuilt_test.go`'s
    `TestGateListsEveryKernel`, which is what catches a kernel missing from the
    gate.
-4. `go generate ./...` (or `gocuda generate -no-ptx` without a toolkit).
+4. `go generate ./...` (or `simtgo generate -no-ptx` without a toolkit).
 5. Add it to the list in `simt/transpile_test.go`'s `TestGolden` and run with
-   `GOCUDA_UPDATE=1` to create `simt/testdata/<Name>.cu`.
+   `SIMTGO_UPDATE=1` to create `simt/testdata/<Name>.cu`.
 6. Add it to the list in `simt/nvrtc_cuda_test.go`'s `TestGeneratedCCompiles`.
 7. Add a CPU/GPU parity test in `simt/parity_test.go` with an independent Go
    reference.

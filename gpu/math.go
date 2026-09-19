@@ -85,7 +85,7 @@ func isNaN(x float32) bool { return x != x }
 
 func signbit(x float32) bool { return math.Signbit(float64(x)) }
 
-// Float64 math, legal only in a kernel carrying //gocuda:float64. Each maps to
+// Float64 math, legal only in a kernel carrying //simtgo:float64. Each maps to
 // the unsuffixed CUDA built-in, which is the double one -- sqrt rather than
 // sqrtf -- and NVRTC provides those without a header too.
 //

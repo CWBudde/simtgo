@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/CWBudde/gocuda/cuda"
+	"github.com/CWBudde/simtgo/cuda"
 )
 
 // Both halves of the __restrict__ promise the tile track makes, tested without

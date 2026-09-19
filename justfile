@@ -1,4 +1,4 @@
-# gocuda justfile
+# simtgo justfile
 #
 # One local entry point for the checks that otherwise live in five remembered
 # command lines. It *mirrors* .github/workflows/ci.yml rather than being called
@@ -89,15 +89,15 @@ test-golden:
 
 # Does each SPEC.md refusal sentence still describe the rule its test pins?
 review-spec:
-    GOCUDA_DOC_REVIEW=1 go test -v -count=1 -run TestSpecProseDescribesTheRule ./simt/
+    SIMTGO_DOC_REVIEW=1 go test -v -count=1 -run TestSpecProseDescribesTheRule ./simt/
 
 # Is each section of docs/ filed under the subject docs/README.md gives it?
 review-docs:
-    GOCUDA_DOC_REVIEW=1 go test -v -count=1 -run TestDocSectionsAreFiledBySubject ./internal/docreview/
+    SIMTGO_DOC_REVIEW=1 go test -v -count=1 -run TestDocSectionsAreFiledBySubject ./internal/docreview/
 
 # Both, plus the corpus that pins the NVRTC warning triage the fuzzer uses.
 review: review-spec review-docs
-    GOCUDA_WARNING_TRIAGE=1 go test -v -count=1 -tags cuda -run TestTriageSeparatesNoiseFromMistranslation ./simt/
+    SIMTGO_WARNING_TRIAGE=1 go test -v -count=1 -tags cuda -run TestTriageSeparatesNoiseFromMistranslation ./simt/
 
 #################################
 # Generated artifacts
@@ -105,7 +105,7 @@ review: review-spec review-docs
 
 # Is the committed CUDA C current?
 check-generated:
-    go run ./cmd/gocuda generate -check
+    go run ./cmd/simtgo generate -check
 
 # Regenerate kernels/prebuilt -- needs NVRTC
 generate:
@@ -113,15 +113,15 @@ generate:
 
 # Regenerate it without a toolkit: refreshes the gate, never calls NVRTC
 generate-no-ptx:
-    go run ./cmd/gocuda generate -pkg ./kernels -out ./kernels/prebuilt -no-ptx
+    go run ./cmd/simtgo generate -pkg ./kernels -out ./kernels/prebuilt -no-ptx
 
 # Refresh simt/testdata/*.cu after an emitter change
 golden-update:
-    GOCUDA_UPDATE=1 go test -run TestGolden ./simt/
+    SIMTGO_UPDATE=1 go test -run TestGolden ./simt/
 
 # Refuse kernels that cannot be lowered
 vet-kernels:
-    go run ./cmd/gocuda vet ./kernels
+    go run ./cmd/simtgo vet ./kernels
 
 #################################
 # Checks
@@ -130,7 +130,7 @@ vet-kernels:
 # Everything CI decides without a device, in CI's order
 check: build vet test test-race build-nocgo check-generated test-cuda lint fmt-check
 
-# GOCUDA_REQUIRE_DEVICE turns the "no CUDA device" skip into a failure, because
+# SIMTGO_REQUIRE_DEVICE turns the "no CUDA device" skip into a failure, because
 # a sweep that launched nothing is green and means nothing; --error-exitcode is
 # what makes it a gate at all. A clean run prints nothing: go test discards a
 # passing binary's stdout.
@@ -144,7 +144,7 @@ check: build vet test test-race build-nocgo check-generated test-cuda lint fmt-c
 # back, put the toolkit's own directory first:
 #   PATH=/usr/local/cuda-12.8/compute-sanitizer:$PATH just sanitize-all
 sanitize tool="memcheck":
-    GOCUDA_REQUIRE_DEVICE=1 go test -tags cuda -count=1 -timeout 0 \
+    SIMTGO_REQUIRE_DEVICE=1 go test -tags cuda -count=1 -timeout 0 \
         -exec "compute-sanitizer --tool={{tool}} --error-exitcode 1 --report-api-errors no --target-processes application-only" \
         ./simt/ ./tile/ ./cuda/
 

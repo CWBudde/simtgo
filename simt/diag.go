@@ -4,7 +4,7 @@ import (
 	"go/token"
 	"strings"
 
-	"github.com/CWBudde/gocuda/internal/lower"
+	"github.com/CWBudde/simtgo/internal/lower"
 )
 
 // A Diagnostic is one reason a kernel could not be lowered, with its position

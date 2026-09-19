@@ -1,6 +1,6 @@
 package kernels
 
-import "github.com/CWBudde/gocuda/gpu"
+import "github.com/CWBudde/simtgo/gpu"
 
 // FIRBlock is the block size FIR must be launched with: the shared tile is
 // sized for it, and a __shared__ array needs a compile-time extent.

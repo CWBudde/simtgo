@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/CWBudde/gocuda/cuda"
-	"github.com/CWBudde/gocuda/internal/tolerance"
-	"github.com/CWBudde/gocuda/tile"
+	"github.com/CWBudde/simtgo/cuda"
+	"github.com/CWBudde/simtgo/internal/tolerance"
+	"github.com/CWBudde/simtgo/tile"
 )
 
 func device(t *testing.T) *cuda.Context {
@@ -20,8 +20,8 @@ func device(t *testing.T) *cuda.Context {
 		// A sanitizer run that launches nothing is green and means nothing,
 		// so a job that has promised a device says so and fails instead of
 		// skipping. See .github/workflows/sanitizer.yml.
-		if os.Getenv("GOCUDA_REQUIRE_DEVICE") != "" {
-			t.Fatal("GOCUDA_REQUIRE_DEVICE is set, but no CUDA device is available")
+		if os.Getenv("SIMTGO_REQUIRE_DEVICE") != "" {
+			t.Fatal("SIMTGO_REQUIRE_DEVICE is set, but no CUDA device is available")
 		}
 		t.Skip("no CUDA device available")
 	}

@@ -12,7 +12,7 @@ import (
 	"fmt"
 	"io/fs"
 
-	"github.com/CWBudde/gocuda/internal/lower"
+	"github.com/CWBudde/simtgo/internal/lower"
 )
 
 // Unit is one transpiled kernel: the generated CUDA C together with what its

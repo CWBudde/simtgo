@@ -1,6 +1,6 @@
 package kernels
 
-import "github.com/CWBudde/gocuda/gpu"
+import "github.com/CWBudde/simtgo/gpu"
 
 // A Band is one entry of a gain curve: everything at or below Upper takes Gain.
 //
@@ -38,7 +38,7 @@ const BandGainTaps = 4
 // different magnitudes, and the point of the directive is that paying for that
 // is a decision somebody wrote down rather than something that happened.
 //
-//gocuda:float64
+//simtgo:float64
 func BandGain(ctx gpu.Ctx, y, x []float32, bands []Band, cfg Shape) {
 	i := ctx.GlobalID()
 	if i >= len(y) {

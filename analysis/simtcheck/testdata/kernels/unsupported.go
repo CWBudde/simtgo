@@ -1,8 +1,8 @@
 package kernels
 
-import "github.com/CWBudde/gocuda/gpu"
+import "github.com/CWBudde/simtgo/gpu"
 
-func Float64Slice(ctx gpu.Ctx, a []float64) { // want `float64 needs //gocuda:float64`
+func Float64Slice(ctx gpu.Ctx, a []float64) { // want `float64 needs //simtgo:float64`
 	a[0] = 1
 }
 
@@ -10,7 +10,7 @@ func Float64Slice(ctx gpu.Ctx, a []float64) { // want `float64 needs //gocuda:fl
 // and the transpiler have to agree that the directive works, not just that its
 // absence is refused. Nothing else makes them.
 //
-//gocuda:float64
+//simtgo:float64
 func Float64Allowed(ctx gpu.Ctx, a []float64) {
 	a[0] = a[1] * 2
 }
@@ -72,7 +72,7 @@ func AtomicOnAnExpression(ctx gpu.Ctx, h []int32) {
 // Float64MathWithoutTheDirective is refused on the call rather than on a type,
 // because there is no float64 in the signature to refuse.
 func Float64MathWithoutTheDirective(ctx gpu.Ctx, a []float32) {
-	a[0] = float32(gpu.Sqrt64(2)) // want `is double precision and needs //gocuda:float64`
+	a[0] = float32(gpu.Sqrt64(2)) // want `is double precision and needs //simtgo:float64`
 }
 
 // A kernel has one dynamic __shared__ block, so a second name for it would be
@@ -86,7 +86,7 @@ func TwoDynamicTiles(ctx gpu.Ctx, y []float32) {
 // The dynamic tile's length is a parameter of the kernel, which a device
 // function cannot see. A statically sized tile there is fine.
 //
-//gocuda:ignore
+//simtgo:ignore
 func dynStage(ctx gpu.Ctx) float32 {
 	s := ctx.SharedDynF32() // want `may only be declared in a kernel`
 	return s[0]
@@ -99,7 +99,7 @@ func DynamicTileInADeviceFunction(ctx gpu.Ctx, y []float32) {
 // A tile of doubles is double-precision vocabulary like any other, so it needs
 // the directive even though the kernel writes no float64 down.
 func Float64Tile(ctx gpu.Ctx, y []float32) {
-	s := ctx.SharedF64(4) // want `float64 needs //gocuda:float64`
+	s := ctx.SharedF64(4) // want `float64 needs //simtgo:float64`
 	y[0] = float32(s[0])
 }
 
@@ -114,8 +114,8 @@ func NegativeLane(ctx gpu.Ctx, y []float32) {
 // been a kernel to begin with. Nothing calls it either, which is the point --
 // the check is package-wide, not part of the lowering.
 //
-//gocuda:device
-func Marked(x float32) float32 { return x } // want `//gocuda:device does nothing on Marked`
+//simtgo:device
+func Marked(x float32) float32 { return x } // want `//simtgo:device does nothing on Marked`
 
 // blend writes through one of its two buffers, so passing it the same one
 // twice makes two __restrict__ pointers alias inside the generated C.
@@ -152,7 +152,7 @@ func DivergentLoopBarrier(ctx gpu.Ctx, y []float32) {
 
 // stagedTile is where the barrier the kernel below never spells lives.
 //
-//gocuda:ignore
+//simtgo:ignore
 func stagedTile(ctx gpu.Ctx) float32 {
 	s := ctx.SharedF32(4)
 	ctx.SyncThreads()

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/CWBudde/gocuda/cuda"
+	"github.com/CWBudde/simtgo/cuda"
 )
 
 // TestNoNVRTCIsExplained covers the path a machine without a toolkit takes.

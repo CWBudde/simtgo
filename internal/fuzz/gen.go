@@ -5,7 +5,7 @@ import (
 	"go/token"
 	"math/rand/v2"
 
-	"github.com/CWBudde/gocuda/gpu"
+	"github.com/CWBudde/simtgo/gpu"
 )
 
 // Generate builds one program from a seed.
@@ -259,7 +259,7 @@ func (g *gen) params(k *Func) {
 // to.
 //
 // They are worth generating for what the emitter does with the *type* rather
-// than with the values: every hole becomes a gocuda_padN member and the whole
+// than with the values: every hole becomes a simtgo_padN member and the whole
 // struct gets a sizeof assertion, which is what stands in for the field offsets
 // NVRTC has no offsetof to check. So the test is mostly that NVRTC accepts the
 // declaration at all, and that is why a struct earns its place even in a

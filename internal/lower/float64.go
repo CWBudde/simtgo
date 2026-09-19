@@ -8,7 +8,7 @@ import (
 // built-ins, which are the unsuffixed names: sqrt rather than sqrtf.
 //
 // They are a separate table from gpuFuncs rather than more rows in it because
-// membership here is what requires //gocuda:float64. Keeping that structural
+// membership here is what requires //simtgo:float64. Keeping that structural
 // means the permission cannot be forgotten for a name added later, which a
 // second list of "the ones that need the directive" would eventually allow.
 var gpuFuncs64 = map[string]string{

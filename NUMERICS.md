@@ -31,7 +31,7 @@ below carries its provenance:
 `nvrtcOptions` (`cuda/error.go`). `--gpu-architecture=<arch>` is always there
 and is the only one a caller cannot influence; `--use_fast_math` is added when
 the caller passes `cuda.WithFastMath()`, which `simt` does for a kernel
-carrying `//gocuda:fastmath` and for no other reason. There is no third option
+carrying `//simtgo:fastmath` and for no other reason. There is no third option
 and no other place in this repository where a numerical flag is set.
 
 Every numerical property below is therefore a default that nobody chose —
@@ -72,7 +72,7 @@ times in `FIR` and once each in `Classify`, `Magnitude` and `Quantize`,
 `grep approx` over those twelve return nothing.
 
 `MagnitudeFast.compute_75.ptx` is the thirteenth and is deliberately the
-exception — it carries `//gocuda:fastmath`, and every one of those greps finds
+exception — it carries `//simtgo:fastmath`, and every one of those greps finds
 it. That is the point of it existing.
 
 **[unverified]** All of this is **PTX, and PTX is not what runs**. The driver
@@ -167,7 +167,7 @@ than something the repository has confirmed.
 
 ## Fast math, when it is asked for
 
-A kernel carrying `//gocuda:fastmath` is compiled with `--use_fast_math`.
+A kernel carrying `//simtgo:fastmath` is compiled with `--use_fast_math`.
 Nothing else in the repository sets a numerical flag, and no kernel acquires
 this one by being called from one that has it — the directive is refused on a
 device function, because NVRTC takes the option for a compilation and not for a

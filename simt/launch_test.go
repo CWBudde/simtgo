@@ -5,7 +5,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/CWBudde/gocuda/cuda"
+	"github.com/CWBudde/simtgo/cuda"
 )
 
 // The launch contract that can be checked without a device: how many arguments

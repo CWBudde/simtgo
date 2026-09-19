@@ -8,15 +8,15 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/CWBudde/gocuda/cuda"
-	"github.com/CWBudde/gocuda/simt"
+	"github.com/CWBudde/simtgo/cuda"
+	"github.com/CWBudde/simtgo/simt"
 )
 
 // probe indexes a slice with the thread's own id and nothing else, so a launch
 // wider than the buffer puts every thread above it out of range.
 const probe = `package kernels
 
-import "github.com/CWBudde/gocuda/gpu"
+import "github.com/CWBudde/simtgo/gpu"
 
 func Overrun(ctx gpu.Ctx, y []float32) {
 	y[ctx.GlobalID()] = 1
@@ -30,8 +30,8 @@ func Overrun(ctx gpu.Ctx, y []float32) {
 func device(t *testing.T) *cuda.Context {
 	t.Helper()
 	if !cuda.Available() {
-		if os.Getenv("GOCUDA_REQUIRE_DEVICE") != "" {
-			t.Fatal("GOCUDA_REQUIRE_DEVICE is set, but no CUDA device is available")
+		if os.Getenv("SIMTGO_REQUIRE_DEVICE") != "" {
+			t.Fatal("SIMTGO_REQUIRE_DEVICE is set, but no CUDA device is available")
 		}
 		t.Skip("no CUDA device available")
 	}

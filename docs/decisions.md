@@ -169,7 +169,7 @@ Go's `int` is refused wherever a layout is involved for a different reason —
 see [`emitter-defects.md`](emitter-defects.md#int-read-at-a-different-stride),
 where it is a live defect rather than a design choice.
 
-## `//gocuda:float64` is checked on the call, not on a declared type
+## `//simtgo:float64` is checked on the call, not on a declared type
 
 Double precision is opt-in because the cost is invisible in the source: the
 device runs a double at a fraction of the `float32` rate, so a kernel that
@@ -279,7 +279,7 @@ programs since; nothing pins that mapping, and the test that does pin
 determinism — same seed, same program — still holds.
 
 The seven `redefines-builtin-id` sites were not bugs and are worth naming
-anyway: `cmd/gocuda`'s `renderGen` declared `any := len(compiled) > 0` and used
+anyway: `cmd/simtgo`'s `renderGen` declared `any := len(compiled) > 0` and used
 it twice, thirty lines apart, in a repository whose entire subject is which
 type a value has.
 
@@ -339,13 +339,13 @@ from a pinned tag.
 the emitter can name. Four alternatives were considered, and each is rejected
 for a reason this repository has already had to learn once.
 
-**A `//gocuda:debug` source directive**, read the way `//gocuda:float64` and
-`//gocuda:fastmath` are. Rejected because it puts the choice in the kernel,
+**A `//simtgo:debug` source directive**, read the way `//simtgo:float64` and
+`//simtgo:fastmath` are. Rejected because it puts the choice in the kernel,
 where it gets committed, generated into `kernels/prebuilt/` and shipped.
 Those two directives are properties of _what the kernel computes_ — a
 precision, a set of compiler licences. Bounds checking is a property of _this
 build_, and the roadmap's own wording is the distinction: "so the released
-path pays nothing". For the same reason `gocuda generate` has no debug mode
+path pays nothing". For the same reason `simtgo generate` has no debug mode
 at all; a bounds-checked artifact in `kernels/prebuilt/` would be the release
 path.
 
@@ -397,14 +397,14 @@ kernel carry on computing with wrong data, which is the opposite of what a
 panic is for. The trap ships first, as the roadmap asked; this is recorded so
 that adding it later is a decision with its trade already written down.
 
-### The `gocuda_` prefix is reserved, in every build
+### The `simtgo_` prefix is reserved, in every build
 
-The emitter writes two names of its own into the generated C: `gocuda_padN`,
-the explicit padding a struct's holes become, and `gocuda_bounds`, the range
+The emitter writes two names of its own into the generated C: `simtgo_padN`,
+the explicit padding a struct's holes become, and `simtgo_bounds`, the range
 check `WithBoundsChecks` emits. Both are fixed spellings at file scope, and
 both are perfectly legal Go identifiers — so a kernel package can declare
 them, and then the emitter's definition and the author's are one C symbol. A
-local named `gocuda_bounds` shadows the helper and NVRTC rejects the call it
+local named `simtgo_bounds` shadows the helper and NVRTC rejects the call it
 cannot resolve; a device function of that name redefines it.
 
 Neither is a mistranslation, which is the only reason this is a refusal rather
@@ -414,11 +414,11 @@ is a message about code the author never wrote.
 Two ways out were available. **Pick an unspellable helper name** — there is
 none: every C identifier is a legal Go identifier, so any fixed spelling is
 reachable. **Refuse the spelling** — which is what the field check for
-`gocuda_pad` already did, generalised to the prefix.
+`simtgo_pad` already did, generalised to the prefix.
 
 It is refused **unconditionally**, not only when the checks are on, and that is
 the part worth recording. A build option must not move the subset: a kernel
-that `gocuda vet` accepts and `simt.Build(WithBoundsChecks())` then refuses
+that `simtgo vet` accepts and `simt.Build(WithBoundsChecks())` then refuses
 would make the analyzer wrong about what builds, and the analyzer has no build
 options to be told about. The cost is that a name nobody would choose is
 refused in release builds too, where nothing would have collided.
@@ -490,7 +490,7 @@ Two other candidates were considered.
 Push/pop is the polite form: it gives a thread back whatever context was
 current on it before. Nothing needs that today, because Go's threads are Go's
 and no host application shares them, and it costs a second driver call on
-every operation. If gocuda is ever called on a thread it did not create, this
+every operation. If simtgo is ever called on a thread it did not create, this
 is the row to revisit.
 
 ### What it costs, and what the measurement actually was
@@ -540,7 +540,7 @@ The persistent cache in `internal/jit/diskcache.go` is on unless a caller says
 asked for — taking NVRTC out of process start — because the programs that
 would most benefit are the ones that never learn the option exists.
 
-`GOCUDA_PTX_CACHE` moves the directory, and that is not the environment
+`SIMTGO_PTX_CACHE` moves the directory, and that is not the environment
 variable this file
 [rejected for bounds checks](#bounds-checks-are-a-build-option-and-the-checks-are-their-own-marker).
 The objection there was that a process-wide switch expressed in one corner of a
@@ -548,7 +548,7 @@ program silently changes what an unrelated library _builds_: different bytes,
 different behaviour, and nothing at the call site saying so. A location says
 where bytes are kept and never what is compiled, so no program's output changes
 because another part of it set the variable. `internal/fuzz/hostrun` already
-does the same thing one layer down with `GOCUDA_HOSTRUN_CACHE`.
+does the same thing one layer down with `SIMTGO_HOSTRUN_CACHE`.
 
 Whether the cache is consulted at all stays a build option, for exactly the
 rejected reason: that one _is_ about whether a compiler runs.
@@ -557,7 +557,7 @@ rejected reason: that one _is_ about whether a compiler runs.
 
 Two caches, deliberately separate, and conflating them was the first design.
 
-|           | `WithCacheDir` / `.gocuda-cache`  | the PTX cache                       |
+|           | `WithCacheDir` / `.simtgo-cache`  | the PTX cache                       |
 | --------- | --------------------------------- | ----------------------------------- |
 | For       | a human to read                   | the next process                    |
 | Named     | after the kernel                  | after a hash of what produced it    |
@@ -681,7 +681,7 @@ on the behaviour without the triage, the way every CUDA test lands on a skip
 without a device. A check nobody can reach must not be able to turn a passing
 build red.
 
-**It is off unless asked for.** `GOCUDA_WARNING_TRIAGE=1` is set in the
+**It is off unless asked for.** `SIMTGO_WARNING_TRIAGE=1` is set in the
 nightly fuzz workflow and nowhere else; `ci.yml` runs on a machine with no
 toolkit, no device and no reason to reach a service.
 
@@ -699,3 +699,52 @@ drifted one does, and the filing check agrees with the record about three
 times in four, so a red result from either would mean "somebody look" while
 looking like "something is wrong". `simt/spec_test.go` remains the gate, and
 it is still exact.
+
+## The name is `simtgo`
+
+**`gocuda` was a name a dozen repositories share.** Twelve others carry it on
+GitHub. None is load-bearing — the most-starred has six — but one describes
+itself as a "high-performance CUDA + Go framework", which is close enough to be
+mistaken for this. `go-cuda` was considered and is worse: four repositories
+hold that exact spelling, plus `go-cudart`, `go-cuda-toolkit`, `GoCUDA` and
+`cudaGo`, and Go's own naming guidance discourages the prefix.
+
+`simtgo` was free on GitHub as both a repository and an account name. Of the
+candidates that were also free, it is the one that describes the whole project
+rather than a part or a road not taken: SIMT is the hardware's execution model,
+not merely track 1's label, so both tracks emit SIMT kernels and the name
+covers them. `ptxgo` and `goptx` were rejected on accuracy — this emitter
+produces CUDA C and [deliberately does not emit PTX](#cuda-c-through-nvrtc-not-ptx-or-llvm-ir),
+so the name would have advertised the alternative that was declined. `gokern`,
+`kernl`, `cugo`, `cugen`, `warpgo`, `kernelgen`, `kernelforge`, `gpukit`,
+`gokernel` and `kernelgo` were all taken, several by active projects in this
+same field.
+
+The GitHub repository was renamed to match in the same sitting, so
+`github.com/CWBudde/simtgo` is the path and resolves. GitHub redirects the old
+one, which keeps existing clones and the open pull requests working, but a
+redirect is not a second name: it lapses the moment anybody creates a
+repository called `CWBudde/gocuda`, so nothing here should be left depending on
+it.
+
+**The cost was paid now because it only grows.** The rename reached the module
+path, `cmd/`, the `//simtgo:` pragmas, the `SIMTGO_*` environment variables,
+the `.simtgo-cache/` directory and the `simtgo_pad`/`simtgo_bounds` identifiers
+the emitter writes into generated C — about 700 occurrences, all of it
+user-facing contract surface described in [`../SPEC.md`](../SPEC.md). At two
+days old with no dependents that is a mechanical substitution; with one
+dependent it is a breaking change, and with a tagged release it is a `/v2`.
+
+One consequence is worth recording because it is not obvious. The emitter
+writes the module path into a header comment, and `SourceHash` hashes the
+generated C **including that comment** — so renaming changed every kernel's
+hash and orphaned every prebuilt. The PTX itself was unaffected, because
+nothing in the name reaches PTX, but `generate` re-files artifacts by hash and
+`reusePTX` matches an on-disk `.cu` against the freshly lowered source **byte
+for byte**. Renaming the sources first and regenerating second would therefore
+have found no match, dropped all thirteen `//go:embed` registrations, and left
+the committed PTX on disk but unreferenced — a silent fall back to run-time
+NVRTC that nothing in the test suite would have caught. Rewriting the header
+line in the committed `.cu` files _before_ running `generate -no-ptx` is what
+kept the artifacts attached. Any future change to that header line has the same
+shape.

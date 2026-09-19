@@ -53,7 +53,7 @@ func LoadPackage(fsys fs.FS) (*Package, []Diagnostic, error) {
 		if err != nil {
 			return nil, nil, fmt.Errorf("reading %s: %w", name, err)
 		}
-		// Comments are parsed because //gocuda:ignore lives in one, and an
+		// Comments are parsed because //simtgo:ignore lives in one, and an
 		// opt-out the analyzer honours but the generator does not is worse
 		// than no opt-out at all: it passes the check and then fails the
 		// build. The analysis framework hands over a commented AST, so this is
@@ -104,7 +104,7 @@ func LoadPackage(fsys fs.FS) (*Package, []Diagnostic, error) {
 		}
 		return &Package{Fset: fset, Files: files}, tidy(diags), nil
 	}
-	// A pointless //gocuda:device is a property of the package rather than of
+	// A pointless //simtgo:device is a property of the package rather than of
 	// any one kernel, exactly as an offending import is: the function carrying
 	// it may be one nothing lowers, and it is still a marker that does not do
 	// what it says.

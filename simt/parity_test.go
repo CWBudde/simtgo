@@ -10,12 +10,12 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/CWBudde/gocuda"
-	"github.com/CWBudde/gocuda/cuda"
-	"github.com/CWBudde/gocuda/gpu"
-	"github.com/CWBudde/gocuda/internal/tolerance"
-	"github.com/CWBudde/gocuda/kernels"
-	"github.com/CWBudde/gocuda/simt"
+	"github.com/CWBudde/simtgo"
+	"github.com/CWBudde/simtgo/cuda"
+	"github.com/CWBudde/simtgo/gpu"
+	"github.com/CWBudde/simtgo/internal/tolerance"
+	"github.com/CWBudde/simtgo/kernels"
+	"github.com/CWBudde/simtgo/simt"
 )
 
 // These tests are the point of the SIMT track: the same Go function is run by
@@ -28,8 +28,8 @@ func device(t *testing.T) *cuda.Context {
 		// A sanitizer run that launches nothing is green and means nothing,
 		// so a job that has promised a device says so and fails instead of
 		// skipping. See .github/workflows/sanitizer.yml.
-		if os.Getenv("GOCUDA_REQUIRE_DEVICE") != "" {
-			t.Fatal("GOCUDA_REQUIRE_DEVICE is set, but no CUDA device is available")
+		if os.Getenv("SIMTGO_REQUIRE_DEVICE") != "" {
+			t.Fatal("SIMTGO_REQUIRE_DEVICE is set, but no CUDA device is available")
 		}
 		t.Skip("no CUDA device available")
 	}
@@ -64,7 +64,7 @@ func TestVecAddParity(t *testing.T) {
 	want := make([]float32, n)
 	gpu.RunCPU((n+block-1)/block, block, func(c gpu.Ctx) { kernels.VecAdd(c, want, a, b) })
 
-	k, err := simt.Build(ctx, gocuda.Kernels(), "VecAdd")
+	k, err := simt.Build(ctx, simtgo.Kernels(), "VecAdd")
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestScaleParity(t *testing.T) {
 	want := make([]float32, n)
 	gpu.RunCPU((n+block-1)/block, block, func(c gpu.Ctx) { kernels.Scale(c, want, x, factor) })
 
-	k, err := simt.Build(ctx, gocuda.Kernels(), "Scale")
+	k, err := simt.Build(ctx, simtgo.Kernels(), "Scale")
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestMagnitudeParity(t *testing.T) {
 	want := make([]float32, n)
 	gpu.RunCPU((n+block-1)/block, block, func(c gpu.Ctx) { kernels.Magnitude(c, want, re, im) })
 
-	k, err := simt.Build(ctx, gocuda.Kernels(), "Magnitude")
+	k, err := simt.Build(ctx, simtgo.Kernels(), "Magnitude")
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestFIRParity(t *testing.T) {
 	}
 	tolerance.AssertClose(t, "cpu vs reference", want, ref, 1e-5)
 
-	k, err := simt.Build(ctx, gocuda.Kernels(), "FIR")
+	k, err := simt.Build(ctx, simtgo.Kernels(), "FIR")
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -225,7 +225,7 @@ func TestClassifyParity(t *testing.T) {
 	}
 	tolerance.AssertClose(t, "cpu vs reference", want, ref, 1e-6)
 
-	k, err := simt.Build(ctx, gocuda.Kernels(), "Classify")
+	k, err := simt.Build(ctx, simtgo.Kernels(), "Classify")
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -272,7 +272,7 @@ func TestSoftclipParity(t *testing.T) {
 	}
 	tolerance.AssertClose(t, "cpu vs reference", want, ref, 1e-6)
 
-	k, err := simt.Build(ctx, gocuda.Kernels(), "Softclip")
+	k, err := simt.Build(ctx, simtgo.Kernels(), "Softclip")
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -323,7 +323,7 @@ func TestTransposeParity(t *testing.T) {
 	}
 	tolerance.AssertEqual(t, "cpu vs reference", want, ref)
 
-	k, err := simt.Build(ctx, gocuda.Kernels(), "Transpose")
+	k, err := simt.Build(ctx, simtgo.Kernels(), "Transpose")
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -347,7 +347,7 @@ func TestTransposeParity(t *testing.T) {
 // satisfies a kernel that asked for 256 and a 16x8 one does not.
 func TestLaunchDimCountsTheWholeBlock(t *testing.T) {
 	ctx := device(t)
-	k, err := simt.Build(ctx, gocuda.Kernels(), "Transpose")
+	k, err := simt.Build(ctx, simtgo.Kernels(), "Transpose")
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -396,7 +396,7 @@ func TestQuantizeParity(t *testing.T) {
 		}
 	}
 
-	k, err := simt.Build(ctx, gocuda.Kernels(), "Quantize")
+	k, err := simt.Build(ctx, simtgo.Kernels(), "Quantize")
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -431,7 +431,7 @@ func TestQuantizeParity(t *testing.T) {
 
 // TestBandGainParity covers the struct half: a []Band read as a slice of
 // structs, a Shape passed by value, a fixed-size array local, and float64
-// accumulation under //gocuda:float64.
+// accumulation under //simtgo:float64.
 //
 // The Shape by value is also what the fixed 8-byte parameter slot could not
 // carry: at 16 bytes it used to overwrite nothing, because nothing that wide
@@ -476,7 +476,7 @@ func TestBandGainParity(t *testing.T) {
 	}
 	tolerance.AssertClose(t, "cpu vs reference", want, ref, 1e-6)
 
-	k, err := simt.Build(ctx, gocuda.Kernels(), "BandGain")
+	k, err := simt.Build(ctx, simtgo.Kernels(), "BandGain")
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -517,7 +517,7 @@ func TestStructLayoutRoundTrip(t *testing.T) {
 
 	const probe = `package kernels
 
-import "github.com/CWBudde/gocuda/gpu"
+import "github.com/CWBudde/simtgo/gpu"
 
 type Band struct {
 	Upper float32
@@ -530,7 +530,7 @@ type Shape struct {
 	Bias  float64
 }
 
-//gocuda:float64
+//simtgo:float64
 func StructProbe(ctx gpu.Ctx, out []float32, bands []Band, cfg Shape) {
 	if ctx.GlobalID() != 0 {
 		return
@@ -588,7 +588,7 @@ func TestAtomicHistogramParity(t *testing.T) {
 
 	const probe = `package kernels
 
-import "github.com/CWBudde/gocuda/gpu"
+import "github.com/CWBudde/simtgo/gpu"
 
 func AtomicProbe(ctx gpu.Ctx, bins []int32, x []int32) {
 	i := ctx.GlobalID()
@@ -646,7 +646,7 @@ func TestAtomicCASParity(t *testing.T) {
 
 	const probe = `package kernels
 
-import "github.com/CWBudde/gocuda/gpu"
+import "github.com/CWBudde/simtgo/gpu"
 
 func CASProbe(ctx gpu.Ctx, out []int32) {
 	i := ctx.GlobalID()
@@ -696,7 +696,7 @@ func TestAtomicSharedTileParity(t *testing.T) {
 
 	const probe = `package kernels
 
-import "github.com/CWBudde/gocuda/gpu"
+import "github.com/CWBudde/simtgo/gpu"
 
 func TileProbe(ctx gpu.Ctx, out []float32) {
 	s := ctx.SharedF32(1)
@@ -769,7 +769,7 @@ func TestGrayParity(t *testing.T) {
 	}
 	tolerance.AssertEqual(t, "cpu luma", want, ref)
 
-	k, err := simt.Build(ctx, gocuda.Kernels(), "Gray")
+	k, err := simt.Build(ctx, simtgo.Kernels(), "Gray")
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -806,7 +806,7 @@ func TestNarrowStorageRoundTrip(t *testing.T) {
 
 	const probe = `package kernels
 
-import "github.com/CWBudde/gocuda/gpu"
+import "github.com/CWBudde/simtgo/gpu"
 
 func NarrowProbe(ctx gpu.Ctx, out []int32, a []int8, b []uint8, c []int16, d []uint16) {
 	i := ctx.GlobalID()
@@ -897,7 +897,7 @@ func TestArrayFieldLayoutRoundTrip(t *testing.T) {
 
 	const probe = `package kernels
 
-import "github.com/CWBudde/gocuda/gpu"
+import "github.com/CWBudde/simtgo/gpu"
 
 type Taps struct {
 	N    uint8
@@ -906,7 +906,7 @@ type Taps struct {
 	Tag  uint8
 }
 
-//gocuda:float64
+//simtgo:float64
 func ArrayFieldProbe(ctx gpu.Ctx, out []float32, ts []Taps) {
 	if ctx.GlobalID() != 0 {
 		return
@@ -964,7 +964,7 @@ func ArrayFieldProbe(ctx gpu.Ctx, out []float32, ts []Taps) {
 // pointer. A check that refused every repeat would forbid `dot(x, x)`.
 func TestAliasedLaunchIsRefused(t *testing.T) {
 	ctx := device(t)
-	k, err := simt.Build(ctx, gocuda.Kernels(), "VecAdd")
+	k, err := simt.Build(ctx, simtgo.Kernels(), "VecAdd")
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -1008,7 +1008,7 @@ func TestParallelAssignmentParity(t *testing.T) {
 	ctx := device(t)
 
 	const probe = "package kernels\n\n" +
-		"import \"github.com/CWBudde/gocuda/gpu\"\n\n" +
+		"import \"github.com/CWBudde/simtgo/gpu\"\n\n" +
 		"func ReverseProbe(ctx gpu.Ctx, y []float32) {\n" +
 		"\tif ctx.GlobalID() != 0 {\n\t\treturn\n\t}\n" +
 		"\ti := 0\n\tj := len(y) - 1\n" +
@@ -1081,7 +1081,7 @@ func TestMathHelperParity(t *testing.T) {
 
 	const probe = `package kernels
 
-import "github.com/CWBudde/gocuda/gpu"
+import "github.com/CWBudde/simtgo/gpu"
 
 func MathProbe(ctx gpu.Ctx, out, a, b []float32) {
 	i := ctx.GlobalID()
@@ -1199,7 +1199,7 @@ func TestFminFmaxParity(t *testing.T) {
 
 	const probe = `package kernels
 
-import "github.com/CWBudde/gocuda/gpu"
+import "github.com/CWBudde/simtgo/gpu"
 
 func MinMaxProbe(ctx gpu.Ctx, out, a, b []float32) {
 	i := ctx.GlobalID()
@@ -1329,7 +1329,7 @@ func TestMagnitudeFastParity(t *testing.T) {
 	}
 	tolerance.AssertClose(t, "cpu vs reference", want, ref, 1e-6)
 
-	k, err := simt.Build(ctx, gocuda.Kernels(), "MagnitudeFast")
+	k, err := simt.Build(ctx, simtgo.Kernels(), "MagnitudeFast")
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -1387,9 +1387,9 @@ func TestFastMathChangesTheAnswer(t *testing.T) {
 		"\t}\n}"
 
 	run := func(fast bool) []float32 {
-		src := "package kernels\n\nimport \"github.com/CWBudde/gocuda/gpu\"\n\n"
+		src := "package kernels\n\nimport \"github.com/CWBudde/simtgo/gpu\"\n\n"
 		if fast {
-			src += "//gocuda:fastmath\n"
+			src += "//simtgo:fastmath\n"
 		}
 		src += body + "\n"
 
@@ -1450,7 +1450,7 @@ func TestBoundsChecksAgreeInRange(t *testing.T) {
 
 	const probe = `package kernels
 
-import "github.com/CWBudde/gocuda/gpu"
+import "github.com/CWBudde/simtgo/gpu"
 
 func BoundsProbe(ctx gpu.Ctx, y, x []float32) {
 	tile := ctx.SharedF32(64)

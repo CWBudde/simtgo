@@ -23,7 +23,7 @@ import "sync"
 //     64-bit variants would each need a different reinterpret cast and the
 //     one-Go-name-to-one-built-in table would stop holding.
 //   - atomicAdd(double*) does exist at compute_75, but float64 is opt-in
-//     behind //gocuda:float64 and package gpu has no float64 vocabulary to
+//     behind //simtgo:float64 and package gpu has no float64 vocabulary to
 //     add it to.
 
 // atomicMu serialises every read-modify-write the functions below perform.

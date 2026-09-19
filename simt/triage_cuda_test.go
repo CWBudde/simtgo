@@ -14,13 +14,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/CWBudde/gocuda/internal/typesafe"
+	"github.com/CWBudde/simtgo/internal/typesafe"
 )
 
 // TriageEnv turns the warning triage on. It is off by default and wired into
 // the nightly fuzz workflow rather than ci.yml, because it reaches a network
 // service and ci.yml must keep running on a machine with nothing installed.
-const TriageEnv = "GOCUDA_WARNING_TRIAGE"
+const TriageEnv = "SIMTGO_WARNING_TRIAGE"
 
 // triageContext is how many lines either side of a mention are shown.
 //

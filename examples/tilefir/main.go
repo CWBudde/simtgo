@@ -11,8 +11,8 @@ import (
 	"math/rand/v2"
 	"time"
 
-	"github.com/CWBudde/gocuda/cuda"
-	"github.com/CWBudde/gocuda/tile"
+	"github.com/CWBudde/simtgo/cuda"
+	"github.com/CWBudde/simtgo/tile"
 )
 
 const n = 1 << 22

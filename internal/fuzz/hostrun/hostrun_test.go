@@ -12,13 +12,13 @@ import (
 	"testing/fstest"
 	"time"
 
-	gocuda "github.com/CWBudde/gocuda"
-	"github.com/CWBudde/gocuda/gpu"
-	"github.com/CWBudde/gocuda/internal/fuzz/hostrun"
-	"github.com/CWBudde/gocuda/internal/lower"
-	"github.com/CWBudde/gocuda/internal/tolerance"
-	"github.com/CWBudde/gocuda/kernels"
-	"github.com/CWBudde/gocuda/simt"
+	simtgo "github.com/CWBudde/simtgo"
+	"github.com/CWBudde/simtgo/gpu"
+	"github.com/CWBudde/simtgo/internal/fuzz/hostrun"
+	"github.com/CWBudde/simtgo/internal/lower"
+	"github.com/CWBudde/simtgo/internal/tolerance"
+	"github.com/CWBudde/simtgo/kernels"
+	"github.com/CWBudde/simtgo/simt"
 )
 
 // TestMain points the driver cache at a directory of its own.
@@ -28,12 +28,12 @@ import (
 // ran. Here every run starts with nothing, so the cost this file logs is the
 // cost a fuzzer pays on its first case.
 func TestMain(m *testing.M) {
-	dir, err := os.MkdirTemp("", "gocuda-hostrun-test-")
+	dir, err := os.MkdirTemp("", "simtgo-hostrun-test-")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	if err := os.Setenv("GOCUDA_HOSTRUN_CACHE", dir); err != nil {
+	if err := os.Setenv("SIMTGO_HOSTRUN_CACHE", dir); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
@@ -46,7 +46,7 @@ func TestMain(m *testing.M) {
 
 func transpile(t *testing.T, name string) *lower.Unit {
 	t.Helper()
-	u, err := simt.Transpile(gocuda.Kernels(), name)
+	u, err := simt.Transpile(simtgo.Kernels(), name)
 	if err != nil {
 		t.Fatalf("transpiling %s: %v", name, err)
 	}
@@ -379,7 +379,7 @@ func TestArgumentsAreChecked(t *testing.T) {
 func TestOneBinaryServesEveryCase(t *testing.T) {
 	requireCompiler(t)
 	u := transpile(t, "VecAdd")
-	dir := os.Getenv("GOCUDA_HOSTRUN_CACHE")
+	dir := os.Getenv("SIMTGO_HOSTRUN_CACHE")
 	before := cacheEntries(t, dir)
 
 	for _, g := range []struct{ n, block int }{{0, 8}, {1, 64}, {100, 7}} {
@@ -411,7 +411,7 @@ func BenchmarkWarmRun(b *testing.B) {
 	if err := hostrun.Available(); err != nil {
 		b.Skipf("%v", err)
 	}
-	u, err := simt.Transpile(gocuda.Kernels(), "VecAdd")
+	u, err := simt.Transpile(simtgo.Kernels(), "VecAdd")
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -546,14 +546,14 @@ func TestFminFmaxAgreeOnTheZeros(t *testing.T) {
 	if err := hostrun.Available(); err != nil {
 		t.Skipf("no host C++ compiler: %v", err)
 	}
-	const prelude = "package kernels\n\nimport \"github.com/CWBudde/gocuda/gpu\"\n\n"
+	const prelude = "package kernels\n\nimport \"github.com/CWBudde/simtgo/gpu\"\n\n"
 	const single = prelude +
 		"func Zeros(ctx gpu.Ctx, y []float32, a, b float32) {\n" +
 		"\ty[0] = gpu.Fmin(a, b)\n" +
 		"\ty[1] = gpu.Fmax(a, b)\n" +
 		"\ty[2] = gpu.Fmin(b, a)\n" +
 		"\ty[3] = gpu.Fmax(b, a)\n}\n"
-	const double = prelude + "//gocuda:float64\n" +
+	const double = prelude + "//simtgo:float64\n" +
 		"func Zeros(ctx gpu.Ctx, y []float64, a, b float64) {\n" +
 		"\ty[0] = gpu.Fmin64(a, b)\n" +
 		"\ty[1] = gpu.Fmax64(a, b)\n" +

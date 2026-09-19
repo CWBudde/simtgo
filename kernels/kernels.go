@@ -6,7 +6,7 @@
 // device.
 package kernels
 
-import "github.com/CWBudde/gocuda/gpu"
+import "github.com/CWBudde/simtgo/gpu"
 
 // VecAdd computes c = a + b elementwise.
 func VecAdd(ctx gpu.Ctx, c, a, b []float32) {

@@ -1,4 +1,4 @@
-// Package gocuda is a library for writing CUDA kernels in Go.
+// Package simtgo is a library for writing CUDA kernels in Go.
 //
 // It follows the two tracks NVIDIA describes for CUDA Rust:
 //
@@ -10,7 +10,7 @@
 //
 // Both compile through NVRTC at run time and launch through the CUDA driver
 // API; see package cuda.
-package gocuda
+package simtgo
 
 import (
 	"embed"
@@ -19,19 +19,19 @@ import (
 	// Linking the generated package is what runs its init and registers the
 	// ahead-of-time PTX. It is imported here, beside the embed that feeds the
 	// transpiler, so that anything using Kernels() gets both halves.
-	_ "github.com/CWBudde/gocuda/kernels/prebuilt"
+	_ "github.com/CWBudde/simtgo/kernels/prebuilt"
 )
 
 // Regenerating writes kernels/prebuilt: the CUDA C, the PTX, and the constants
 // that make a kernel which cannot be lowered fail "go build". It needs NVRTC;
-// without a toolkit, "gocuda generate -no-ptx" refreshes everything but the
+// without a toolkit, "simtgo generate -no-ptx" refreshes everything but the
 // PTX.
 //
 // The "cuda" tag is what puts NVRTC in the generator at all. Untagged it
 // reaches the stub, and this line's whole point is the PTX, so it refuses the
 // run rather than quietly writing artifacts with none.
 //
-//go:generate go run -tags cuda ./cmd/gocuda generate -pkg ./kernels -out ./kernels/prebuilt -arch compute_75
+//go:generate go run -tags cuda ./cmd/simtgo generate -pkg ./kernels -out ./kernels/prebuilt -arch compute_75
 
 // Kernel sources are embedded rather than read from disk so that a binary
 // carries everything the transpiler needs, in the same spirit as CUDA Rust

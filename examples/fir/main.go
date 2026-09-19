@@ -13,10 +13,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/CWBudde/gocuda"
-	"github.com/CWBudde/gocuda/cuda"
-	"github.com/CWBudde/gocuda/kernels"
-	"github.com/CWBudde/gocuda/simt"
+	"github.com/CWBudde/simtgo"
+	"github.com/CWBudde/simtgo/cuda"
+	"github.com/CWBudde/simtgo/kernels"
+	"github.com/CWBudde/simtgo/simt"
 )
 
 const (
@@ -60,7 +60,7 @@ func run() error {
 	fmt.Printf("signal: %d samples, %d taps, block %d\n\n", n, taps, block)
 
 	t0 = time.Now()
-	k, err := simt.Build(ctx, gocuda.Kernels(), "FIR")
+	k, err := simt.Build(ctx, simtgo.Kernels(), "FIR")
 	if err != nil {
 		return err
 	}

@@ -12,7 +12,7 @@ import (
 // The persistent PTX cache, end to end: what internal/jit tests as a store,
 // tested here as the thing that takes NVRTC out of a build.
 //
-// Every test below redirects GOCUDA_PTX_CACHE at a directory of its own, so
+// Every test below redirects SIMTGO_PTX_CACHE at a directory of its own, so
 // nothing here reads or writes the developer's real cache, and each starts
 // cold. t.Setenv forbids t.Parallel, which is correct: the directory is
 // process-wide.
@@ -39,7 +39,7 @@ func cacheEntries(t *testing.T, dir string) []string {
 func TestDiskCacheServesTheSecondBuild(t *testing.T) {
 	swapRegistry(t)
 	dir := t.TempDir()
-	t.Setenv("GOCUDA_PTX_CACHE", dir)
+	t.Setenv("SIMTGO_PTX_CACHE", dir)
 
 	first := freshDevice(t)
 	k1, err := Build(first, kernelSources, "FIR", WithoutPrebuilt(), WithCacheDir(""))
@@ -91,7 +91,7 @@ func TestDiskCacheServesTheSecondBuild(t *testing.T) {
 func TestWithoutDiskCacheIsANegativeControl(t *testing.T) {
 	swapRegistry(t)
 	dir := t.TempDir()
-	t.Setenv("GOCUDA_PTX_CACHE", dir)
+	t.Setenv("SIMTGO_PTX_CACHE", dir)
 
 	dev := freshDevice(t)
 	if _, err := Build(dev, kernelSources, "FIR",
@@ -148,7 +148,7 @@ func TestWithoutDiskCacheIsANegativeControl(t *testing.T) {
 func TestWithoutDiskCacheOnAWarmContext(t *testing.T) {
 	swapRegistry(t)
 	dir := t.TempDir()
-	t.Setenv("GOCUDA_PTX_CACHE", dir)
+	t.Setenv("SIMTGO_PTX_CACHE", dir)
 
 	// Populate the disk cache, in a context that is then dropped.
 	populate := freshDevice(t)
@@ -206,7 +206,7 @@ func TestWithoutDiskCacheOnAWarmContext(t *testing.T) {
 func TestDiskCacheRecoversFromAnUnloadableEntry(t *testing.T) {
 	swapRegistry(t)
 	dir := t.TempDir()
-	t.Setenv("GOCUDA_PTX_CACHE", dir)
+	t.Setenv("SIMTGO_PTX_CACHE", dir)
 
 	warm := freshDevice(t)
 	good, err := Build(warm, kernelSources, "FIR", WithoutPrebuilt(), WithCacheDir(""))

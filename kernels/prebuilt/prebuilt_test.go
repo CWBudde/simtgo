@@ -3,9 +3,9 @@ package prebuilt_test
 import (
 	"testing"
 
-	gocuda "github.com/CWBudde/gocuda"
-	"github.com/CWBudde/gocuda/kernels/prebuilt"
-	"github.com/CWBudde/gocuda/simt"
+	simtgo "github.com/CWBudde/simtgo"
+	"github.com/CWBudde/simtgo/kernels/prebuilt"
+	"github.com/CWBudde/simtgo/simt"
 )
 
 // TestPrebuiltIsCurrent is the half of the build gate that the generated
@@ -18,7 +18,7 @@ import (
 // compiled from source instead. This test closes that, needs no GPU, and runs
 // under a plain "go test ./...".
 func TestPrebuiltIsCurrent(t *testing.T) {
-	if err := simt.VerifyPrebuilt(gocuda.Kernels(), prebuilt.Names()...); err != nil {
+	if err := simt.VerifyPrebuilt(simtgo.Kernels(), prebuilt.Names()...); err != nil {
 		t.Errorf("%v", err)
 	}
 }

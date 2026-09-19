@@ -40,25 +40,25 @@ places**, and conflating them is the mistake the policy exists to prevent.
 
 | Library    | Ships with  | Search order                                                                                                 |
 | ---------- | ----------- | ------------------------------------------------------------------------------------------------------------ |
-| `libcuda`  | the driver  | `GOCUDA_LIBCUDA`, else `libcuda.so.1`, `libcuda.so` from the linker path                                     |
-| `libnvrtc` | the toolkit | `GOCUDA_LIBNVRTC`, else `$CUDA_PATH`/`$CUDA_HOME`, then the linker path, then `/usr/local/cuda`, `/opt/cuda` |
+| `libcuda`  | the driver  | `SIMTGO_LIBCUDA`, else `libcuda.so.1`, `libcuda.so` from the linker path                                     |
+| `libnvrtc` | the toolkit | `SIMTGO_LIBNVRTC`, else `$CUDA_PATH`/`$CUDA_HOME`, then the linker path, then `/usr/local/cuda`, `/opt/cuda` |
 
 `CUDA_PATH` and `CUDA_HOME` apply to **NVRTC only**. The driver ships with the
 driver, not the toolkit, so a toolkit root says nothing about where it lives.
 The toolkit's own `lib64/stubs/libcuda.so` is deliberately never a candidate: it
 exists to satisfy a linker and fails every call.
 
-`GOCUDA_LIBCUDA` and `GOCUDA_LIBNVRTC` each name a file outright and **replace**
+`SIMTGO_LIBCUDA` and `SIMTGO_LIBNVRTC` each name a file outright and **replace**
 the respective search rather than heading it. When nothing is found, the error
 is a `*LibraryError` naming every candidate tried — not a link failure the
 caller could never have recovered from.
 
 The two libraries load **independently**, and that is what lets a kernel with
-prebuilt PTX run with **no toolkit present at all**: with `GOCUDA_LIBNVRTC`
+prebuilt PTX run with **no toolkit present at all**: with `SIMTGO_LIBNVRTC`
 pointed at a file that does not exist, `examples/fir` still computes on the GPU.
 
 That independence paid off somewhere it was not designed for. `libnvrtc` needs
-neither a driver nor a device, so pointing `GOCUDA_LIBNVRTC` at a downloaded
+neither a driver nor a device, so pointing `SIMTGO_LIBNVRTC` at a downloaded
 toolkit made `TestGeneratedCCompiles` runnable for the first time on a machine
 with no GPU — which is how most of the next section got measured.
 
@@ -115,7 +115,7 @@ given the wrong answer about what NVRTC can do — the two are not
 interchangeable for questions like this.
 
 This is why the emitter asserts `sizeof` and `alignof` and declares **every hole
-Go leaves** as a `gocuda_padN` member, the trailing one included. With every
+Go leaves** as a `simtgo_padN` member, the trailing one included. With every
 hole spelled out the members account for exactly Go's size, and C++ lays each
 member at or after the end of the one before it, so `sizeof` can only match if
 nothing further was inserted — and then every field sits where Go put it. The
@@ -162,7 +162,7 @@ before regenerating: check what `nvrtcVersion` reports, not what is on `PATH`.
 ## The compile options are one option, plus the one a kernel asks for
 
 `cuda.Compile` passes `--gpu-architecture` always and `--use_fast_math` when
-the caller asks, which `simt` does for a kernel carrying `//gocuda:fastmath`
+the caller asks, which `simt` does for a kernel carrying `//simtgo:fastmath`
 and never otherwise. **Every other numerical setting is a default nobody
 chose**, which is a different claim from "we chose the defaults" and is the
 reason [`../NUMERICS.md`](../NUMERICS.md) exists.
@@ -294,7 +294,7 @@ The module cache on `*cuda.Context` dies with the context and so with the
 process, so a kernel with no prebuilt artifact paid NVRTC at every start. The
 persistent cache in `internal/jit/diskcache.go` keys compiled PTX on
 `(source, architecture, NVRTC version)` and keeps it under
-`$XDG_CACHE_HOME/gocuda/ptx`.
+`$XDG_CACHE_HOME/simtgo/ptx`.
 
 `BenchmarkBuild` in `simt/prebuilt_cuda_test.go` measures a whole
 `simt.Build` — transpile, pick a path, load the module — in a context of its

@@ -52,8 +52,8 @@ func (e *LibraryError) Is(target error) bool {
 
 // The environment variables that override the search outright.
 const (
-	envLibCUDA  = "GOCUDA_LIBCUDA"
-	envLibNVRTC = "GOCUDA_LIBNVRTC"
+	envLibCUDA  = "SIMTGO_LIBCUDA"
+	envLibNVRTC = "SIMTGO_LIBNVRTC"
 )
 
 // driverCandidates lists the files to try for the CUDA driver library.
@@ -92,7 +92,7 @@ func nvrtcCandidates() []string {
 	//
 	// CUDA 11.0 and 11.1 predate the freeze and carry their own MAJOR.MINOR
 	// sonames; they are old enough not to be worth a candidate each, and
-	// GOCUDA_LIBNVRTC names one outright.
+	// SIMTGO_LIBNVRTC names one outright.
 	sonames := []string{"libnvrtc.so.13", "libnvrtc.so.12", "libnvrtc.so.11.2", "libnvrtc.so"}
 
 	var out []string

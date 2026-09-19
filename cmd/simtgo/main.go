@@ -1,8 +1,8 @@
-// Command gocuda is the build-time half of the toolchain: it reports kernels
+// Command simtgo is the build-time half of the toolchain: it reports kernels
 // that cannot be lowered, before they are built at run time.
 //
-//	gocuda vet ./...                     # check the kernels in a package
-//	go vet -vettool=$(which gocuda) ./...  # the same check, through go vet
+//	simtgo vet ./...                     # check the kernels in a package
+//	go vet -vettool=$(which simtgo) ./...  # the same check, through go vet
 //
 // It is deliberately free of cgo. Package simt imports the CUDA driver
 // bindings, so a tool that imported simt would need a CUDA toolchain to build
@@ -18,7 +18,7 @@ import (
 
 	"golang.org/x/tools/go/analysis/singlechecker"
 
-	"github.com/CWBudde/gocuda/analysis/simtcheck"
+	"github.com/CWBudde/simtgo/analysis/simtcheck"
 )
 
 func main() {
@@ -43,23 +43,23 @@ func main() {
 	case len(args) == 0, args[0] == "help", args[0] == "-h", args[0] == "--help":
 		usage(os.Stdout)
 	default:
-		fmt.Fprintf(os.Stderr, "gocuda: unknown subcommand %q\n\n", args[0])
+		fmt.Fprintf(os.Stderr, "simtgo: unknown subcommand %q\n\n", args[0])
 		usage(os.Stderr)
 		os.Exit(2)
 	}
 }
 
 func usage(w *os.File) {
-	fmt.Fprint(w, `gocuda is the build-time toolchain for Go CUDA kernels.
+	fmt.Fprint(w, `simtgo is the build-time toolchain for Go CUDA kernels.
 
 Usage:
 
-	gocuda vet [packages]    report kernels that cannot be lowered to CUDA C
-	gocuda generate [flags]  lower kernels ahead of time and embed their PTX
+	simtgo vet [packages]    report kernels that cannot be lowered to CUDA C
+	simtgo generate [flags]  lower kernels ahead of time and embed their PTX
 
 It also implements the go vet tool protocol:
 
-	go vet -vettool=$(which gocuda) ./...
+	go vet -vettool=$(which simtgo) ./...
 
 A bare package pattern is not accepted without a subcommand, so that it can
 never be mistaken for the .cfg file go vet passes.

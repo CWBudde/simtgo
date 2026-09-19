@@ -1,4 +1,4 @@
-# gocuda — writing CUDA kernels in Go
+# simtgo — writing CUDA kernels in Go
 
 A Go answer to NVIDIA's [_Introducing CUDA Rust: Two Tracks for Writing GPU
 Kernels_](https://developer.nvidia.com/blog/introducing-cuda-rust-two-tracks-for-writing-gpu-kernels/).
@@ -20,8 +20,8 @@ verified, and on what, is stated below.
 | **SIMT track**          | A custom `rustc` codegen backend lowers `#[kernel]` functions through MIR and LLVM IR to PTX          | `go/ast` + `go/types` lower a Go subset to CUDA C, which NVRTC compiles to PTX at run time (package `simt`)                |
 | **Tile track**          | A `#[cutile::module]` proc macro embeds the kernel AST in the host binary and JITs it through Tile IR | The graph is recorded at run time by ordinary Go calls, then fused into one generated kernel (package `tile`)              |
 | **Safety**              | `DisjointSlice<T>`, launch contracts, const generics                                                  | Runtime shape checks; the CPU emulator plus `go test -race`                                                                |
-| **When errors surface** | `rustc` rejects the kernel                                                                            | `gocuda vet` rejects it, and `go generate` makes an unlowerable kernel fail `go build`                                     |
-| **Toolchain**           | Pinned nightly Rust, custom LLVM                                                                      | Plain `go1.26`, no cgo, NVRTC loaded at run time. One dependency, purego; the `gocuda` tool also uses `golang.org/x/tools` |
+| **When errors surface** | `rustc` rejects the kernel                                                                            | `simtgo vet` rejects it, and `go generate` makes an unlowerable kernel fail `go build`                                     |
+| **Toolchain**           | Pinned nightly Rust, custom LLVM                                                                      | Plain `go1.26`, no cgo, NVRTC loaded at run time. One dependency, purego; the `simtgo` tool also uses `golang.org/x/tools` |
 
 ### Why Go cannot take Rust's route
 
@@ -118,7 +118,7 @@ extern "C" __global__ void FIR(float* __restrict__ y, int y_len, const float* __
 Launching mirrors the Go signature, minus the `gpu.Ctx`:
 
 ```go
-k, _ := simt.Build(dev, gocuda.Kernels(), "FIR")
+k, _ := simt.Build(dev, simtgo.Kernels(), "FIR")
 k.LaunchN(n, kernels.FIRBlock, dy, dx, dh)
 ```
 
@@ -184,7 +184,7 @@ silent mistranslation the rest of this section exists to rule out.
 
 Shared memory comes in one tile per element type — `ctx.SharedF32(n)`,
 `SharedF64`, `SharedI32`, `SharedI64`, `SharedU32`, `SharedU64` — each becoming
-a `__shared__` array of that type. `SharedF64` needs `//gocuda:float64` like
+a `__shared__` array of that type. `SharedF64` needs `//simtgo:float64` like
 any other double. There is no `SharedBool`: nothing wanted one, and a
 vocabulary is easier to widen than to narrow.
 
@@ -269,10 +269,10 @@ refused — there is no stack depth on the device to spend on it — and so are
 methods, generics, variadics, more than one result, and a _named_ result,
 which would be a local the body assigns to and a bare return that carries it.
 A function taking a `gpu.Ctx` **is** a kernel by the rule above, so calling one
-is refused unless it says otherwise. `//gocuda:device` is the spelling to
+is refused unless it says otherwise. `//simtgo:device` is the spelling to
 reach for: it says what the helper _is_, and it is checked — on a function
 taking no `gpu.Ctx` it is refused, so it cannot become decoration.
-`//gocuda:ignore` still works and still means "not a kernel"; the `Ctx` then vanishes from the C signature as the kernel's
+`//simtgo:ignore` still works and still means "not a kernel"; the `Ctx` then vanishes from the C signature as the kernel's
 own does. A device function may declare a shared tile of its own — that is
 block-scoped storage, which CUDA allocates once per function, and the bytes are
 accounted onto the kernel that reaches it. `AssumeBlockDim` stays refused
@@ -302,7 +302,7 @@ code the device compiles.
 The 64-bit types are `long long` and never `long`, which is 8 bytes on Linux
 and 4 on Windows.
 
-`float64` needs `//gocuda:float64` on the kernel, or on its file's package
+`float64` needs `//simtgo:float64` on the kernel, or on its file's package
 comment. The cost is invisible in the source — the device runs a double at a
 fraction of the float32 rate, so a kernel that acquired one by accident would
 be correct and far slower — and the opt-in makes that something somebody wrote
@@ -351,15 +351,15 @@ struct Shape
 	int Count;
 	double Bias;
 };
-static_assert(sizeof(Shape) == 16, "gocuda: Shape is a different size in CUDA than in Go");
-static_assert(alignof(Shape) == 8, "gocuda: Shape is differently aligned in CUDA than in Go");
+static_assert(sizeof(Shape) == 16, "simtgo: Shape is a different size in CUDA than in Go");
+static_assert(alignof(Shape) == 8, "simtgo: Shape is differently aligned in CUDA than in Go");
 ```
 
 The emitter never models the C ABI. It states Go's numbers and lets the C++
 compiler refuse them, so the guarantee holds wherever the kernel is built
 rather than where it was written.
 
-**Every hole Go leaves is declared**, as an `unsigned char gocuda_padN[k]`
+**Every hole Go leaves is declared**, as an `unsigned char simtgo_padN[k]`
 member, the trailing one included. That is what makes the size assertion
 enough to pin the offsets, and the argument is short: with every hole spelled
 out the members already account for exactly Go's size, and C++ lays each member
@@ -417,13 +417,13 @@ A kernel is ordinary Go, so the compiler has no opinion about whether it can
 run on a device. Three things give it one:
 
 ```sh
-go install github.com/CWBudde/gocuda/cmd/gocuda@latest
-gocuda vet ./kernels                   # or: go vet -vettool=$(which gocuda) ./...
+go install github.com/CWBudde/simtgo/cmd/simtgo@latest
+simtgo vet ./kernels                   # or: go vet -vettool=$(which simtgo) ./...
 ```
 
 ```text
-kernels/bad.go:4:2: kernels may not import math (only github.com/CWBudde/gocuda/gpu is available on the device)
-kernels/bad.go:10:23: float64 needs //gocuda:float64 on kernel Bad, or on its file's package comment: the device runs double at a fraction of the float32 rate, so it is opt-in
+kernels/bad.go:4:2: kernels may not import math (only github.com/CWBudde/simtgo/gpu is available on the device)
+kernels/bad.go:10:23: float64 needs //simtgo:float64 on kernel Bad, or on its file's package comment: the device runs double at a fraction of the float32 rate, so it is opt-in
 kernels/bad.go:10:38: []int cannot cross to the device: Go's int is 8 bytes and CUDA's int is 4, so the elements would not line up; use int32 or int64
 kernels/bad.go:11:2: a, b := f() is not supported in kernels: a device function lowers to one C return type
 ```
@@ -431,8 +431,8 @@ kernels/bad.go:11:2: a, b := f() is not supported in kernels: a device function 
 The analyzer runs the **same lowering** the transpiler does, rather than a
 second opinion about it, so what it accepts and what `simt.Build` accepts
 cannot drift apart. A function whose first parameter is a `gpu.Ctx` is a
-kernel; `//gocuda:device` in its doc comment says it is a helper instead, and
-`//gocuda:ignore` opts it out entirely.
+kernel; `//simtgo:device` in its doc comment says it is a helper instead, and
+`//simtgo:ignore` opts it out entirely.
 
 `go generate` writes `kernels/prebuilt/`: the generated CUDA C, its PTX, and one
 constant per kernel that lowered. A hand-written `gate.go` lists the constants
@@ -449,7 +449,7 @@ that needs no GPU:
 
 ```go
 func TestPrebuiltIsCurrent(t *testing.T) {
-	if err := simt.VerifyPrebuilt(gocuda.Kernels(), prebuilt.Names()...); err != nil {
+	if err := simt.VerifyPrebuilt(simtgo.Kernels(), prebuilt.Names()...); err != nil {
 		t.Error(err)
 	}
 }
@@ -466,7 +466,7 @@ NVRTC is skipped when one matches:
 
 PTX is forward compatible, so one `compute_75` artifact serves every newer
 device; an older one falls back to NVRTC. A machine with no CUDA toolkit builds
-and runs from the committed PTX, and `gocuda generate -no-ptx` refreshes
+and runs from the committed PTX, and `simtgo generate -no-ptx` refreshes
 everything but the PTX there.
 
 ## Track 2 — tile
@@ -486,7 +486,7 @@ it stages a shared tile, _including its halo computed through the same fused
 expression_, and leaves its result in a local:
 
 ```cuda
-// generated by github.com/CWBudde/gocuda/tile: 6 operations fused into one kernel
+// generated by github.com/CWBudde/simtgo/tile: 6 operations fused into one kernel
 extern "C" __global__ void fused(float* __restrict__ out, int out_len, const float* __restrict__ p0, int p0_len, ...)
 {
 	int base = (int)(blockIdx.x * blockDim.x);
@@ -631,8 +631,8 @@ gpu/           kernel vocabulary + CPU grid emulator
 simt/          transpile, build and launch             (track 1)
 tile/          lazy graph -> one fused kernel          (track 2)
 internal/lower/   Go AST -> CUDA C; the one definition of the subset
-analysis/simtcheck/  the go/analysis Analyzer behind "gocuda vet"
-cmd/gocuda/    vet and generate; calls NVRTC in process, no driver needed
+analysis/simtcheck/  the go/analysis Analyzer behind "simtgo vet"
+cmd/simtgo/    vet and generate; calls NVRTC in process, no driver needed
 kernels/       the example kernels, embedded as source
 kernels/prebuilt/  generated: CUDA C, PTX, and the build gate
 internal/jit/  compile, cache and load, shared by both tracks
@@ -658,8 +658,8 @@ go test -race ./gpu/          # the emulator must be race-clean
 go test -tags cuda ./...      # CPU/GPU parity on a real device
 go run -tags cuda ./examples/fir
 
-go run ./cmd/gocuda vet ./kernels        # refuse kernels that cannot be lowered
-go run ./cmd/gocuda generate -check      # are the committed artifacts current?
+go run ./cmd/simtgo vet ./kernels        # refuse kernels that cannot be lowered
+go run ./cmd/simtgo generate -check      # are the committed artifacts current?
 go generate ./...                        # regenerate them (needs NVRTC)
 ```
 
@@ -670,7 +670,7 @@ has the rest. It mirrors `.github/workflows/ci.yml`; the workflow is not
 written in terms of it, so that a CI runner needs no `just` and a red job names
 the step that failed.
 
-Generated `.cu` and `.ptx` land in `.gocuda-cache/` for inspection. Pass
+Generated `.cu` and `.ptx` land in `.simtgo-cache/` for inspection. Pass
 `simt.WithCacheDir("elsewhere")` to `simt.Build` to point it somewhere else, or
 `simt.WithCacheDir("")` to turn it off.
 
@@ -689,6 +689,6 @@ satisfy a linker and fails every call. **NVRTC** is part of the toolkit, so
 installation wins over the system one), then the linker's default path, then
 `/usr/local/cuda` and `/opt/cuda`.
 
-`GOCUDA_LIBCUDA` and `GOCUDA_LIBNVRTC` each name a file outright and replace
+`SIMTGO_LIBCUDA` and `SIMTGO_LIBNVRTC` each name a file outright and replace
 that search rather than heading it. When nothing is found, the error lists
 every path tried.

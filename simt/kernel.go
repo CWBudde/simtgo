@@ -6,9 +6,9 @@ import (
 	"io/fs"
 	"math"
 
-	"github.com/CWBudde/gocuda/cuda"
-	"github.com/CWBudde/gocuda/internal/jit"
-	"github.com/CWBudde/gocuda/internal/lower"
+	"github.com/CWBudde/simtgo/cuda"
+	"github.com/CWBudde/simtgo/internal/jit"
+	"github.com/CWBudde/simtgo/internal/lower"
 )
 
 // Kernel is a Go kernel that has been transpiled, compiled and loaded.
@@ -76,7 +76,7 @@ func (o buildOptions) lowerOptions() []lower.Option {
 
 // WithCacheDir chooses where the generated .cu and the PTX that was loaded are
 // written for inspection. Empty disables the dump. The default is
-// ".gocuda-cache".
+// ".simtgo-cache".
 //
 // This replaces a package-level setter, which wrote a package-level variable
 // unsynchronised, for the whole process, and reached the tile track as well: a
@@ -102,7 +102,7 @@ func WithoutPrebuilt() BuildOption {
 // That cache is on by default, because an opt-in one does not do the thing it
 // is for: taking NVRTC out of process start. This is the way to measure what
 // it saves, and the way for a caller who would rather not have a library
-// writing to their user cache directory to say so. GOCUDA_PTX_CACHE moves the
+// writing to their user cache directory to say so. SIMTGO_PTX_CACHE moves the
 // directory; only this turns the cache off, because whether a compiler runs is
 // not something one corner of a program should decide for the rest of it.
 func WithoutDiskCache() BuildOption {

@@ -8,7 +8,7 @@ import (
 	"golang.org/x/tools/go/packages"
 )
 
-const pkgPath = "github.com/CWBudde/gocuda/cuda"
+const pkgPath = "github.com/CWBudde/simtgo/cuda"
 
 // TestBuildTagSurfacesMatch keeps stub.go in step with the real driver.
 //

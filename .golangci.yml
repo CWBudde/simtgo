@@ -80,7 +80,7 @@ linters:
   exclusions:
     generated: lax
     paths:
-      # Written by `gocuda generate`; its shape is the generator's business.
+      # Written by `simtgo generate`; its shape is the generator's business.
       - kernels/prebuilt/prebuilt_gen\.go
     rules:
       # gocritic's ifElseChain is a style rule, and kernel sources are the one

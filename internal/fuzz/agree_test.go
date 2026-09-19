@@ -5,7 +5,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/CWBudde/gocuda/gpu"
+	"github.com/CWBudde/simtgo/gpu"
 )
 
 // TestRenderersAgree is the foundation the whole differential test rests on.

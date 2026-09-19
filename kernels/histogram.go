@@ -1,6 +1,6 @@
 package kernels
 
-import "github.com/CWBudde/gocuda/gpu"
+import "github.com/CWBudde/simtgo/gpu"
 
 // HistogramBins is how many bins Histogram counts into, and the extent of its
 // shared tile: a __shared__ array needs a compile-time extent.

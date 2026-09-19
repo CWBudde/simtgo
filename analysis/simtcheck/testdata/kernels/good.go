@@ -1,6 +1,6 @@
 package kernels
 
-import "github.com/CWBudde/gocuda/gpu"
+import "github.com/CWBudde/simtgo/gpu"
 
 // VecAdd lowers cleanly and must draw no diagnostics at all.
 func VecAdd(ctx gpu.Ctx, c, a, b []float32) {
@@ -53,7 +53,7 @@ func Accumulate(ctx gpu.Ctx, y []float32, x []float32) {
 // Float64Math is the accepted half: with the directive the double-precision
 // helpers are ordinary vocabulary.
 //
-//gocuda:float64
+//simtgo:float64
 func Float64Math(ctx gpu.Ctx, y []float64) {
 	i := ctx.GlobalID()
 	if i < len(y) {
@@ -82,7 +82,7 @@ func Privatise(ctx gpu.Ctx, bins, x []int32) {
 // is legal CUDA -- block-scoped storage that the compiler allocates once for
 // the function -- and was refused until this round.
 //
-//gocuda:ignore
+//simtgo:ignore
 func staged(ctx gpu.Ctx) int32 {
 	scratch := ctx.SharedI64(4)
 	scratch[ctx.ThreadIdx()%4] = 1
@@ -154,12 +154,12 @@ func WarpSum(ctx gpu.Ctx, out, x []float32) {
 	}
 }
 
-// Position is the helper the //gocuda:device marker exists for: it takes a
+// Position is the helper the //simtgo:device marker exists for: it takes a
 // gpu.Ctx because it wants the thread's index, and it is not a kernel. The
 // analyzer has to agree with the transpiler about that, or vet reports a
 // kernel the generator never emits.
 //
-//gocuda:device
+//simtgo:device
 func Position(ctx gpu.Ctx, xs []float32) int {
 	return ctx.GlobalID() % len(xs)
 }

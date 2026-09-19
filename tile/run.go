@@ -1,8 +1,8 @@
 package tile
 
 import (
-	"github.com/CWBudde/gocuda/cuda"
-	"github.com/CWBudde/gocuda/internal/jit"
+	"github.com/CWBudde/simtgo/cuda"
+	"github.com/CWBudde/simtgo/internal/jit"
 )
 
 // Source returns the CUDA kernel this tensor would be computed by, without

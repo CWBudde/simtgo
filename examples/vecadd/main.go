@@ -7,11 +7,11 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/CWBudde/gocuda"
-	"github.com/CWBudde/gocuda/cuda"
-	"github.com/CWBudde/gocuda/gpu"
-	"github.com/CWBudde/gocuda/kernels"
-	"github.com/CWBudde/gocuda/simt"
+	"github.com/CWBudde/simtgo"
+	"github.com/CWBudde/simtgo/cuda"
+	"github.com/CWBudde/simtgo/gpu"
+	"github.com/CWBudde/simtgo/kernels"
+	"github.com/CWBudde/simtgo/simt"
 )
 
 const (
@@ -45,7 +45,7 @@ func run() error {
 	fmt.Printf("device: %s (%s)\n\n", ctx.Name(), ctx.Arch())
 
 	// The GPU path transpiles that same function and compiles it with NVRTC.
-	k, err := simt.Build(ctx, gocuda.Kernels(), "VecAdd")
+	k, err := simt.Build(ctx, simtgo.Kernels(), "VecAdd")
 	if err != nil {
 		return err
 	}

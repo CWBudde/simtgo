@@ -9,9 +9,9 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/CWBudde/gocuda"
-	"github.com/CWBudde/gocuda/cuda"
-	"github.com/CWBudde/gocuda/simt"
+	"github.com/CWBudde/simtgo"
+	"github.com/CWBudde/simtgo/cuda"
+	"github.com/CWBudde/simtgo/simt"
 )
 
 // requireNVRTC skips a test that needs libnvrtc, or fails it when the caller
@@ -22,12 +22,12 @@ import (
 // covers both "no toolkit installed" and "the library is somewhere the search
 // does not look".
 //
-// GOCUDA_REQUIRE_NVRTC is GOCUDA_REQUIRE_DEVICE's twin, for the half of the
+// SIMTGO_REQUIRE_NVRTC is SIMTGO_REQUIRE_DEVICE's twin, for the half of the
 // tagged suite that needs the toolkit and no device: NVRTC compiles to PTX and
 // nothing is launched. A job that went to the trouble of installing the library
 // is saying the point of the run is that NVRTC answered, and there a silent
 // skip is the worst outcome available. It was measured rather than supposed --
-// with GOCUDA_LIBNVRTC pointed at a file that does not exist, a 20-minute
+// with SIMTGO_LIBNVRTC pointed at a file that does not exist, a 20-minute
 // fuzz leg passes in three milliseconds having compiled nothing.
 // See .github/workflows/fuzz.yml.
 func requireNVRTC(tb testing.TB) {
@@ -39,8 +39,8 @@ func requireNVRTC(tb testing.TB) {
 	if !errors.Is(err, cuda.ErrNoCUDA) {
 		tb.Fatalf("NVRTCVersion: %v", err)
 	}
-	if os.Getenv("GOCUDA_REQUIRE_NVRTC") != "" {
-		tb.Fatalf("GOCUDA_REQUIRE_NVRTC is set, but no CUDA toolkit is available: %v", err)
+	if os.Getenv("SIMTGO_REQUIRE_NVRTC") != "" {
+		tb.Fatalf("SIMTGO_REQUIRE_NVRTC is set, but no CUDA toolkit is available: %v", err)
 	}
 	tb.Skipf("no CUDA toolkit available: %v", err)
 }
@@ -61,7 +61,7 @@ func requireNVRTC(tb testing.TB) {
 // answer, so the test skips rather than fails -- an absent libnvrtc says
 // nothing about the emitter, and reporting it as a failure would train readers
 // to ignore the one signal this test exists to give. A job that installed the
-// library on purpose sets GOCUDA_REQUIRE_NVRTC and gets the other behaviour.
+// library on purpose sets SIMTGO_REQUIRE_NVRTC and gets the other behaviour.
 func TestGeneratedCCompiles(t *testing.T) {
 	requireNVRTC(t)
 
@@ -73,7 +73,7 @@ func TestGeneratedCCompiles(t *testing.T) {
 		// because Go's propagate a NaN and CUDA's ignore one -- and a comment
 		// claiming CUDA provides the double overloads is not a measurement.
 		name: "float64 arithmetic, fmin/fmax on doubles, and 64-bit literals",
-		body: "//gocuda:float64\n" +
+		body: "//simtgo:float64\n" +
 			"func K(ctx gpu.Ctx, out, a, b []float64) {\n" +
 			"\ti := ctx.GlobalID()\n" +
 			"\tif i < len(out) {\n" +
@@ -123,7 +123,7 @@ func TestGeneratedCCompiles(t *testing.T) {
 		name: "a mixed-width struct, by value and as a slice element",
 		body: "type Shape struct {\n\tFloor float32\n\tCount int32\n\tBias  float64\n}\n\n" +
 			"type Band struct{ Upper, Gain float32 }\n\n" +
-			"//gocuda:float64\n" +
+			"//simtgo:float64\n" +
 			"func K(ctx gpu.Ctx, y, x []float32, bands []Band, cfg Shape) {\n" +
 			"\ti := ctx.GlobalID()\n" +
 			"\tif i >= len(y) {\n\t\treturn\n\t}\n" +
@@ -140,7 +140,7 @@ func TestGeneratedCCompiles(t *testing.T) {
 		// produce a wrong answer to ask it with.
 		name: "a struct with a hole before a field and slack after the last",
 		body: "type S struct {\n\tA int32\n\tB float64\n\tC uint8\n}\n\n" +
-			"//gocuda:float64\n" +
+			"//simtgo:float64\n" +
 			"func K(ctx gpu.Ctx, y []float32, ss []S, one S) {\n" +
 			"\ts := S{1, 2, 3}\n" +
 			"\ty[0] = float32(s.A) + float32(ss[0].B) + float32(int32(one.C))\n}",
@@ -150,7 +150,7 @@ func TestGeneratedCCompiles(t *testing.T) {
 		// padding around both is what NVRTC is asked about.
 		name: "a struct with an array field and a narrow field",
 		body: "type Taps struct {\n\tN    uint8\n\tW    [3]float32\n\tGain float64\n}\n\n" +
-			"//gocuda:float64\n" +
+			"//simtgo:float64\n" +
 			"func K(ctx gpu.Ctx, y []float32, ts []Taps) {\n" +
 			"\tsum := float32(0)\n" +
 			"\tfor _, w := range ts[0].W {\n\t\tsum += w\n\t}\n" +
@@ -226,7 +226,7 @@ func TestGeneratedCCompiles(t *testing.T) {
 			"func K(ctx gpu.Ctx, y, x []float32) { y[0] = outer(x[0]) + inner(x[1]) }",
 	}, {
 		name: "a device function taking a slice, and gpu.Ctx",
-		body: "//gocuda:device\nfunc where(ctx gpu.Ctx) int { return ctx.GlobalID() }\n\n" +
+		body: "//simtgo:device\nfunc where(ctx gpu.Ctx) int { return ctx.GlobalID() }\n\n" +
 			"func total(xs []float32) float32 { s := float32(0)\n\tfor _, v := range xs { s += v }\n\treturn s }\n\n" +
 			"func K(ctx gpu.Ctx, y, x []float32) { i := where(ctx); if i < len(y) { y[i] = total(x) } }",
 	}, {
@@ -286,7 +286,7 @@ func TestGeneratedCCompiles(t *testing.T) {
 			"\t}\n}",
 	}, {
 		name: "the float64 gpu helpers with no headers included",
-		body: "//gocuda:float64\n" +
+		body: "//simtgo:float64\n" +
 			"func K(ctx gpu.Ctx, out, a, b []float64) {\n" +
 			"\ti := ctx.GlobalID()\n" +
 			"\tif i < len(out) {\n" +
@@ -318,7 +318,7 @@ func TestGeneratedCCompiles(t *testing.T) {
 		// rather than written down, so whether "unsigned long long s[8]" is
 		// something CUDA has at all is a measurement and not a claim.
 		name: "a shared tile of every element type",
-		body: "//gocuda:float64\n" +
+		body: "//simtgo:float64\n" +
 			"func K(ctx gpu.Ctx, y []float64) {\n" +
 			"\ta := ctx.SharedF32(8)\n" +
 			"\tb := ctx.SharedF64(8)\n" +
@@ -365,7 +365,7 @@ func TestGeneratedCCompiles(t *testing.T) {
 		// that CUDA allocates once for the function, and the only thing that
 		// settles whether NVRTC accepts it is NVRTC.
 		name: "a shared tile inside a device function",
-		body: "//gocuda:ignore\n" +
+		body: "//simtgo:ignore\n" +
 			"func stage(ctx gpu.Ctx, x []float32) float32 {\n" +
 			"\ttile := ctx.SharedF32(256)\n" +
 			"\ttile[ctx.ThreadIdx()%256] = x[0]\n" +
@@ -374,7 +374,7 @@ func TestGeneratedCCompiles(t *testing.T) {
 			"func K(ctx gpu.Ctx, y, x []float32) { y[0] = stage(ctx, x) + stage(ctx, x) }",
 	}, {
 		name: "an atomic on a shared tile, and one across a device function",
-		body: "//gocuda:ignore\n" +
+		body: "//simtgo:ignore\n" +
 			"func bump(h []int32, i int) { gpu.AtomicAddI32(h, i, 1) }\n\n" +
 			"func K(ctx gpu.Ctx, y []float32, h []int32) {\n" +
 			"\ts := ctx.SharedF32(256)\n" +
@@ -412,7 +412,7 @@ func TestGeneratedCCompiles(t *testing.T) {
 		// the Ctx vanishes from the C signature: the built-ins are globals, so
 		// nothing has to be passed for them to work.
 		name: "a warp primitive inside a device function",
-		body: "//gocuda:ignore\n" +
+		body: "//simtgo:ignore\n" +
 			"func warpSum(ctx gpu.Ctx, v float32) float32 {\n" +
 			"\tfor off := gpu.WarpSize / 2; off > 0; off /= 2 {\n" +
 			"\t\tv += ctx.ShuffleDownF32(v, off)\n\t}\n" +
@@ -425,7 +425,7 @@ func TestGeneratedCCompiles(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			src := "package kernels\n\nimport \"github.com/CWBudde/gocuda/gpu\"\n\n" + tc.body + "\n"
+			src := "package kernels\n\nimport \"github.com/CWBudde/simtgo/gpu\"\n\n" + tc.body + "\n"
 			u, err := simt.Transpile(fstest.MapFS{"k.go": &fstest.MapFile{Data: []byte(src)}}, "K")
 			if err != nil {
 				t.Fatalf("Transpile: %v", err)
@@ -440,7 +440,7 @@ func TestGeneratedCCompiles(t *testing.T) {
 	// compiling is caught here and not at some later launch.
 	for _, name := range []string{"VecAdd", "Magnitude", "MagnitudeFast", "Scale", "FIR", "Classify", "Softclip", "Transpose", "Quantize", "BandGain", "Gray", "Histogram", "WarpReduceSum"} {
 		t.Run(name, func(t *testing.T) {
-			u, err := simt.Transpile(gocuda.Kernels(), name)
+			u, err := simt.Transpile(simtgo.Kernels(), name)
 			if err != nil {
 				t.Fatalf("Transpile: %v", err)
 			}
@@ -457,7 +457,7 @@ func TestGeneratedCCompiles(t *testing.T) {
 			// for every place a subscript was wrapped in it. The one thing
 			// the untagged emitter tests cannot say is whether a compiler
 			// accepts the result.
-			d, err := simt.Transpile(gocuda.Kernels(), name, simt.WithBoundsChecks())
+			d, err := simt.Transpile(simtgo.Kernels(), name, simt.WithBoundsChecks())
 			if err != nil {
 				t.Fatalf("Transpile(WithBoundsChecks): %v", err)
 			}
@@ -502,12 +502,12 @@ func TestEmittedPaddingIsMeasured(t *testing.T) {
 		t.Errorf("NVRTC refused a struct whose hole it inserts itself, so the premise of this test is wrong: %v", err)
 	}
 
-	declared := "struct S { int A; unsigned char gocuda_pad0[4]; double B; };\nstatic_assert(sizeof(S) == 16, \"size\");" + entry
+	declared := "struct S { int A; unsigned char simtgo_pad0[4]; double B; };\nstatic_assert(sizeof(S) == 16, \"size\");" + entry
 	if _, err := cuda.Compile(declared, "S.cu", arch); err != nil {
 		t.Errorf("NVRTC refused the struct the emitter would write: %v", err)
 	}
 
-	wrong := "struct S { int A; unsigned char gocuda_pad0[5]; double B; };\nstatic_assert(sizeof(S) == 16, \"size\");" + entry
+	wrong := "struct S { int A; unsigned char simtgo_pad0[5]; double B; };\nstatic_assert(sizeof(S) == 16, \"size\");" + entry
 	if _, err := cuda.Compile(wrong, "S.cu", arch); err == nil {
 		t.Error("NVRTC accepted a struct with one byte too much padding, so sizeof is not measuring the padding and the offsets are not pinned by it")
 	}
@@ -593,7 +593,7 @@ func TestNVRTCDeclaresTrapAndPrintf(t *testing.T) {
 		if forceinline {
 			attr = "__forceinline__ "
 		}
-		return "__device__ " + attr + "long long gocuda_probe(long long i) { return i; }\n"
+		return "__device__ " + attr + "long long simtgo_probe(long long i) { return i; }\n"
 	}
 
 	for _, tc := range cases {
@@ -601,7 +601,7 @@ func TestNVRTCDeclaresTrapAndPrintf(t *testing.T) {
 			force := tc.name == "__forceinline__"
 			src := prelude(force) +
 				"extern \"C\" __global__ void K(float* y)\n{\n\t" + tc.body +
-				"\n\ty[0] = (float)gocuda_probe(1);\n}\n"
+				"\n\ty[0] = (float)simtgo_probe(1);\n}\n"
 
 			_, err := cuda.Compile(src, "probe.cu", arch)
 			switch {

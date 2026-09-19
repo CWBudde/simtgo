@@ -51,7 +51,7 @@ jobs:
       - run: nvidia-smi
       - run: compute-sanitizer --version
 
-      # GOCUDA_REQUIRE_DEVICE turns the test helpers' "no CUDA device
+      # SIMTGO_REQUIRE_DEVICE turns the test helpers' "no CUDA device
       # available" skip into a failure. Without it this job's worst outcome is
       # available: green, having launched nothing.
       #
@@ -67,7 +67,7 @@ jobs:
       # is when they are worth reading. Add -v to see them either way.
       - name: ${{ matrix.tool }}
         env:
-          GOCUDA_REQUIRE_DEVICE: "1"
+          SIMTGO_REQUIRE_DEVICE: "1"
         run: |
           go test -tags cuda -count=1 -timeout 0 \
             -exec "compute-sanitizer --tool=${{ matrix.tool }} --error-exitcode 1 --report-api-errors no --target-processes application-only" \

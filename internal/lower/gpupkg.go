@@ -11,7 +11,7 @@ import (
 )
 
 // GPUPkgPath is the import path of the kernel vocabulary package.
-const GPUPkgPath = "github.com/CWBudde/gocuda/gpu"
+const GPUPkgPath = "github.com/CWBudde/simtgo/gpu"
 
 // GPUPackage builds a types.Package describing package gpu by hand.
 //
@@ -223,7 +223,7 @@ func importRefusal(path string) string {
 
 // IgnoreDirective opts a declaration, or a whole file, out of being treated as
 // a kernel.
-const IgnoreDirective = "//gocuda:ignore"
+const IgnoreDirective = "//simtgo:ignore"
 
 // DeviceDirective marks a gpu.Ctx-taking function as a device function rather
 // than a kernel.
@@ -234,9 +234,9 @@ const IgnoreDirective = "//gocuda:ignore"
 // IgnoreDirective, which says what the function is *not* -- it opts out of
 // being generated, which is also what a Ctx-taking function nobody lowers
 // wants. The two now mean different things, and the difference is legible at
-// the declaration: //gocuda:ignore is "leave this alone", //gocuda:device is
+// the declaration: //simtgo:ignore is "leave this alone", //simtgo:device is
 // "this runs on the device, as a __device__ function".
-const DeviceDirective = "//gocuda:device"
+const DeviceDirective = "//simtgo:device"
 
 // Float64Directive opts a kernel into double precision.
 //
@@ -245,7 +245,7 @@ const DeviceDirective = "//gocuda:device"
 // a double by accident -- an untyped constant binding wider than intended, say
 // -- would still be correct and thirty times slower. The directive makes that
 // a decision somebody wrote down.
-const Float64Directive = "//gocuda:float64"
+const Float64Directive = "//simtgo:float64"
 
 // FastMathDirective opts a kernel into NVRTC's --use_fast_math.
 //
@@ -255,7 +255,7 @@ const Float64Directive = "//gocuda:float64"
 // so a kernel that acquired it by accident would still compile, still run, and
 // quietly answer differently. The directive makes that a decision somebody
 // wrote down, and Unit.FastMath carries it as far as the compiler.
-const FastMathDirective = "//gocuda:fastmath"
+const FastMathDirective = "//simtgo:fastmath"
 
 // Ignored reports whether doc carries the opt-out directive.
 //
@@ -272,7 +272,7 @@ func Ignored(doc *ast.CommentGroup) bool { return hasDirective(doc, IgnoreDirect
 //
 // Unlike Ignored it is not honoured on a file's package comment. A file-wide
 // "everything here takes a Ctx and none of it is a kernel" is what
-// //gocuda:ignore already says; the point of this directive is that it names
+// //simtgo:ignore already says; the point of this directive is that it names
 // one declaration.
 func DeviceMarked(doc *ast.CommentGroup) bool { return hasDirective(doc, DeviceDirective) }
 
@@ -325,7 +325,7 @@ func CheckImports(f *ast.File) []Diagnostic {
 // comment is deliberate: an opt-in directive that someone forgets restores
 // exactly the "compiles fine, dies in main()" failure this phase removes. The
 // two directives that take it back both say so at the declaration:
-// //gocuda:ignore means "never lowered", //gocuda:device means "lowered, but
+// //simtgo:ignore means "never lowered", //simtgo:device means "lowered, but
 // as a __device__ function a kernel calls".
 func IsKernelDecl(info *types.Info, fd *ast.FuncDecl) bool {
 	if Ignored(fd.Doc) || DeviceMarked(fd.Doc) {
@@ -348,7 +348,7 @@ func takesCtx(info *types.Info, fd *ast.FuncDecl) bool {
 	return obj != nil && IsCtx(obj.Type())
 }
 
-// CheckDeviceMarkers refuses //gocuda:device on a function that takes no
+// CheckDeviceMarkers refuses //simtgo:device on a function that takes no
 // gpu.Ctx.
 //
 // There the directive changes nothing: such a function is already an ordinary

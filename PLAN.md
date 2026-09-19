@@ -76,7 +76,7 @@ hash of the **generated CUDA C** — which makes a stale artifact impossible to
 use rather than merely detectable. It cost 28.7 ms of start-up, which is now
 0.9 ms.
 
-- [x] `gocuda vet`, a `go/analysis` Analyzer running the same lowering the
+- [x] `simtgo vet`, a `go/analysis` Analyzer running the same lowering the
       transpiler does. _Not_ in editors: `gopls` runs a fixed, compiled-in set
       of analyzers, so the editor story is a `golangci-lint` module plugin or an
       on-save task.
@@ -95,7 +95,7 @@ must not undo — `go build` cannot be extended with custom vet checks, and
    regenerated keeps its constant and builds green, so `simt.VerifyPrebuilt` in
    an ordinary `go test ./...` catches the mismatch. No GPU needed; the cheapest
    and strongest of the three.
-3. `gocuda vet` catches it without regenerating at all.
+3. `simtgo vet` catches it without regenerating at all.
 
 ### 1.2 Toolchain discovery and portability (M) — 4 of 5
 
@@ -111,7 +111,7 @@ machine with no CUDA.
       not used. (2026-09-17)
 - [x] The `cuda` build tag kept as the no-GPU fallback, and now enforced by
       `cuda/surface_test.go`. (2026-09-17)
-- [x] Collapse `cmd/gocuda-nvrtc` into `cmd/gocuda`. (2026-09-18)
+- [x] Collapse `cmd/simtgo-nvrtc` into `cmd/simtgo`. (2026-09-18)
 
 Findings: the `_v2` symbol trap and the search policy are in
 [`docs/toolchain.md`](docs/toolchain.md).
@@ -155,7 +155,7 @@ Findings: the `_v2` symbol trap and the search policy are in
 blocker in the whole plan.
 
 - [x] Non-GPU job proving the no-tag build, `go vet` under both tags, the race
-      detector, `CGO_ENABLED=0 -tags cuda`, `gocuda generate -check`,
+      detector, `CGO_ENABLED=0 -tags cuda`, `simtgo generate -check`,
       `golangci-lint` and `treefmt --ci`. (2026-09-18) —
       `.github/workflows/ci.yml`.
 - [ ] **A GPU runner.** It gates the sanitizer workflow, the fuzzer's device
@@ -165,7 +165,7 @@ blocker in the whole plan.
         the decision down. Cost and who holds the token are the deciding
         factors, not capability.
   - [ ] `.github/workflows/gpu.yml`: `go test -tags cuda ./...` with
-        `GOCUDA_REQUIRE_DEVICE=1`, so a runner that lost its device fails
+        `SIMTGO_REQUIRE_DEVICE=1`, so a runner that lost its device fails
         instead of going green having launched nothing.
   - [ ] Flip `.github/workflows/sanitizer.yml` from `workflow_dispatch`-only to
         a schedule. The comment at its head already says this is what it waits
@@ -196,11 +196,11 @@ test.
 - [x] **Types** — `int32`/`uint32`/`int64`/`uint64`, opt-in `float64`, `bool`,
       structs, fixed-size arrays. (2026-09-18)
 - [x] **Double-precision `gpu` math** — `Sqrt64` and the rest, gated on
-      `//gocuda:float64` at the **call**. (2026-09-18)
+      `//simtgo:float64` at the **call**. (2026-09-18)
 - [x] **Narrow integer storage** — `[]uint8` and friends, accepted in
       `ctypeElem` and nowhere else. (2026-09-18)
 - [x] **Array-typed struct fields**, with every hole declared as a
-      `gocuda_padN` member. (2026-09-18)
+      `simtgo_padN` member. (2026-09-18)
 - [x] **Shared memory** — six typed constructors plus one dynamic tile.
       (2026-09-18)
 - [x] **Atomics** — six, taking a buffer and an index. (2026-09-18)
@@ -210,7 +210,7 @@ test.
       (2026-09-18)
 - [x] **`const` / `__restrict__`**, proved across the call graph and checked at
       launch. (2026-09-18)
-- [x] **A `//gocuda:device` marker**, refused on a function taking no `gpu.Ctx`
+- [x] **A `//simtgo:device` marker**, refused on a function taking no `gpu.Ctx`
       so it cannot become decoration. (2026-09-18)
 - [x] **Shared memory in a device function** — block-scoped storage, accounted
       onto the kernel that reaches it. (2026-09-18)
@@ -222,7 +222,7 @@ The shapes of those decisions are in
 Two remain.
 
 - [ ] **Opt-in fast math, and `#pragma unroll` hints for tap-style loops.**
-  - [x] `//gocuda:fastmath`, read exactly as `//gocuda:float64` is:
+  - [x] `//simtgo:fastmath`, read exactly as `//simtgo:float64` is:
         translation-unit scoped, refused on a device function for the same
         reason. (2026-09-19) — and refused on a helper for a second reason of
         its own: NVRTC takes the option for a compilation, not for a function.
@@ -231,7 +231,7 @@ Two remain.
         command line is pinned by a test on a machine with no CUDA. See
         [`docs/toolchain.md`](docs/toolchain.md#the-compile-options-are-one-option-plus-the-one-a-kernel-asks-for).
   - [x] **`Unit.SourceHash` must cover the flag.** (2026-09-19) — by emitting a
-        `// gocuda: fastmath` marker into the generated C rather than salting
+        `// simtgo: fastmath` marker into the generated C rather than salting
         the hash, so `SourceHash` still means "these exact bytes" and
         `internal/jit`'s cache key inherits the split for free.
   - [x] `NUMERICS.md` gains a section. (2026-09-19) — _Fast math, when it is
@@ -302,8 +302,8 @@ The machinery is described in
   - [x] The NVRTC oracle in CI, which needs a toolkit on the runner rather than
         a device, and would catch every struct-layout disagreement on every push.
         (2026-09-19) — a job of its own installing the `nvidia-cuda-nvrtc-cu12`
-        wheel and pointing `GOCUDA_LIBNVRTC` at it; no device, no `nvcc`. It
-        sets the new `GOCUDA_REQUIRE_NVRTC`, because the skip it otherwise takes
+        wheel and pointing `SIMTGO_LIBNVRTC` at it; no device, no `nvcc`. It
+        sets the new `SIMTGO_REQUIRE_NVRTC`, because the skip it otherwise takes
         is indistinguishable from a clean search — measured, a leg with the
         library missing passes in **three milliseconds** having compiled nothing.
   - [ ] Raise the daily budget above 20m, or add a weekly leg that runs longer.
@@ -446,7 +446,7 @@ it: they do not make a copy faster, they stop the copies being a queue.
       version) — removes the compile from every process start for kernels with
       no prebuilt artifact. (2026-09-19) — `internal/jit/diskcache.go`, on by
       default, under the user cache directory; `simt.WithoutDiskCache()` turns
-      it off and `GOCUDA_PTX_CACHE` moves it. 111.5 ms to 11.6 ms against
+      it off and `SIMTGO_PTX_CACHE` moves it. 111.5 ms to 11.6 ms against
       10.4 ms for a prebuilt artifact, so a kernel with no artifact and a
       kernel with one now cost the same to within the noise. The tile track
       gains the most and this item did not say so: its fused kernels have no

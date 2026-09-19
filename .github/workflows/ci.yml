@@ -53,7 +53,7 @@ jobs:
 
       # Catches a kernel that was edited but never regenerated, which the
       # prebuilt gate alone cannot see.
-      - run: go run ./cmd/gocuda generate -check
+      - run: go run ./cmd/simtgo generate -check
 
       # Strictly stronger than skipping the tagged tests: this compiles all of
       # them and runs the ones that need neither a device nor a toolkit, so a

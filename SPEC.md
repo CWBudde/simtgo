@@ -30,31 +30,31 @@ KernelDecl = "func" identifier "(" "ctx" "gpu.Ctx" { "," ParamGroup } ")" Block 
 
 It must be a plain function: no receiver, no results, no type parameters, and
 every parameter named. A kernel package may import **only**
-`github.com/CWBudde/gocuda/gpu`.
+`github.com/CWBudde/simtgo/gpu`.
 
 Four directives change what a declaration is, and each is a whole comment line
 in a doc comment — a mention inside a sentence is prose about the directive:
 
 | Directive           | On a function | On a file's package comment | Means                                                    |
 | ------------------- | ------------- | --------------------------- | -------------------------------------------------------- |
-| `//gocuda:ignore`   | yes           | yes                         | not a kernel, and not lowered at all                     |
-| `//gocuda:device`   | yes           | **no**                      | a helper, not a kernel; refused if it takes no `gpu.Ctx` |
-| `//gocuda:float64`  | yes           | yes                         | this kernel may use double precision                     |
-| `//gocuda:fastmath` | yes           | yes                         | compile this kernel with `--use_fast_math`               |
+| `//simtgo:ignore`   | yes           | yes                         | not a kernel, and not lowered at all                     |
+| `//simtgo:device`   | yes           | **no**                      | a helper, not a kernel; refused if it takes no `gpu.Ctx` |
+| `//simtgo:float64`  | yes           | yes                         | this kernel may use double precision                     |
+| `//simtgo:fastmath` | yes           | yes                         | compile this kernel with `--use_fast_math`               |
 
-`//gocuda:float64` is a promise about what a launch costs, so it belongs to the
+`//simtgo:float64` is a promise about what a launch costs, so it belongs to the
 kernel and covers the whole translation unit including every helper the kernel
 reaches. A helper may not carry its own — otherwise a kernel without the
 directive could acquire double precision through a call. The same helper may
 therefore lower as `float` in one kernel and `double` in another.
 
-`//gocuda:fastmath` is scoped the same way and refused on a helper for the same
+`//simtgo:fastmath` is scoped the same way and refused on a helper for the same
 reason, with one of its own: `--use_fast_math` is given to a compilation rather
 than to a function, so honouring it for one helper and not the rest of the
 translation unit is not something NVRTC can be asked for. It changes no
 generated code — it sets four NVRTC options, which
 [`NUMERICS.md`](NUMERICS.md) tabulates — but the generated source records it in
-a `// gocuda: fastmath` marker line, so a kernel compiled with the flag and the
+a `// simtgo: fastmath` marker line, so a kernel compiled with the flag and the
 same kernel without it hash differently and cannot share an ahead-of-time
 artifact.
 
@@ -172,7 +172,7 @@ and relaxing a refusal later costs a line where retracting an acceptance costs
 somebody a kernel that worked.
 
 **A struct is laid out by Go and checked by CUDA.** Every hole Go leaves is
-declared as an `unsigned char gocuda_padN[k]` member, the trailing one
+declared as an `unsigned char simtgo_padN[k]` member, the trailing one
 included, and then `sizeof` and `alignof` are asserted against Go's numbers.
 With every hole spelled out the members account for exactly Go's size, and C++
 lays each member at or after the end of the one before it — so the size can
@@ -220,7 +220,7 @@ become `extern __shared__ T name[]`, with the length arriving as a generated
 kernel parameter the launch fills.
 
 Preconditions: assigned to a variable, at the top level of its function, a
-constant size (static) or no argument (dynamic), `//gocuda:float64` for the
+constant size (static) or no argument (dynamic), `//simtgo:float64` for the
 `F64` forms, **at most one dynamic tile per kernel**, and no dynamic tile in a
 device function. A static tile in a device function is fine — that is
 block-scoped storage CUDA allocates once per function.
@@ -230,7 +230,7 @@ block-scoped storage CUDA allocates once per function.
 `Sqrt`, `Abs`, `Hypot`, `Sin`, `Cos`, `Exp`, `Log`, `Fmin`, `Fmax` become
 `sqrtf`, `fabsf`, `hypotf`, `sinf`, `cosf`, `expf`, `logf`, `fminf`, `fmaxf`.
 The double-precision half is `Sqrt64` and the rest, becoming CUDA's unsuffixed
-`sqrt`, `hypot`, `fmin` — legal only under `//gocuda:float64`, and the check
+`sqrt`, `hypot`, `fmin` — legal only under `//simtgo:float64`, and the check
 sits on the _call_, because `float32(gpu.Sqrt64(2))` names no `float64`
 anywhere.
 
@@ -332,17 +332,17 @@ is what the diagnostic contains. `simt/spec_test.go` checks both directions.
 - a device function naming its result — diagnostic: `must not name its result`
 - a variadic device function — diagnostic: `must not be variadic`
 - a gpu.Ctx helper that did not say it was a device function — diagnostic: `where is a kernel`
-- the refusal names the device marker — diagnostic: `Mark it //gocuda:device`
-- //gocuda:device on a function that takes no gpu.Ctx — diagnostic: `//gocuda:device does nothing on half, which takes no gpu.Ctx`
-- //gocuda:device on a function nothing calls — diagnostic: `//gocuda:device does nothing on unused`
+- the refusal names the device marker — diagnostic: `Mark it //simtgo:device`
+- //simtgo:device on a function that takes no gpu.Ctx — diagnostic: `//simtgo:device does nothing on half, which takes no gpu.Ctx`
+- //simtgo:device on a function nothing calls — diagnostic: `//simtgo:device does nothing on unused`
 
 ### Directives and double precision
 
-- float64 without the directive — diagnostic: `float64 needs //gocuda:float64 on kernel K`
-- //gocuda:float64 on a device function — diagnostic: `belongs on the kernel, not on device function half`
-- //gocuda:fastmath on a device function — diagnostic: `belongs on the kernel, not on device function scaled`
-- a float64 helper whose type never surfaces — diagnostic: `gpu.Sqrt64 is double precision and needs //gocuda:float64 on kernel K`
-- a float64 helper on a float64 kernel without the directive — diagnostic: `needs //gocuda:float64 on kernel K`
+- float64 without the directive — diagnostic: `float64 needs //simtgo:float64 on kernel K`
+- //simtgo:float64 on a device function — diagnostic: `belongs on the kernel, not on device function half`
+- //simtgo:fastmath on a device function — diagnostic: `belongs on the kernel, not on device function scaled`
+- a float64 helper whose type never surfaces — diagnostic: `gpu.Sqrt64 is double precision and needs //simtgo:float64 on kernel K`
+- a float64 helper on a float64 kernel without the directive — diagnostic: `needs //simtgo:float64 on kernel K`
 
 ### Narrow integers, which are storage only
 
@@ -428,7 +428,7 @@ Two things this does **not** do:
 ### Structs
 
 - struct equality — diagnostic: `field by field in Go, which C cannot do`
-- a field named like the emitted padding — diagnostic: `spelled like the padding gocuda emits`
+- a field named like the emitted padding — diagnostic: `spelled like the padding simtgo emits`
 - an embedded field — diagnostic: `embedded field`
 - a blank struct field — diagnostic: `has a blank field`
 - an anonymous struct type — diagnostic: `unsupported type struct{X float32} on the device`
@@ -486,14 +486,14 @@ Two things this does **not** do:
 
 - parameter collides with a generated length — diagnostic: `x_len is the length generated for slice parameter x`
 - a variable spelled like an escaped keyword — diagnostic: `int is a C++ keyword and is emitted as int_`
-- a name in the emitter's own namespace — diagnostic: `gocuda_bounds is reserved: names beginning with gocuda_ belong to the emitter`
+- a name in the emitter's own namespace — diagnostic: `simtgo_bounds is reserved: names beginning with simtgo_ belong to the emitter`
 
-  `gocuda_` is reserved throughout: as a variable, a parameter, a function or a
+  `simtgo_` is reserved throughout: as a variable, a parameter, a function or a
   struct type. The emitter writes its own file-scope names under that prefix —
-  `gocuda_pad0` for a struct's padding, `gocuda_bounds` for the range check
+  `simtgo_pad0` for a struct's padding, `simtgo_bounds` for the range check
   `WithBoundsChecks` emits — and a Go declaration spelling one of them lands on
   the same C symbol. The rule does not depend on the build options, so a kernel
-  that `gocuda vet` accepts is one every build accepts.
+  that `simtgo vet` accepts is one every build accepts.
 
 ### Aliasing
 

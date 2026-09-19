@@ -40,31 +40,31 @@ var Violations = []Violation{{
 	Want: "may not import",
 	edit: func(src string, _ *Program) string {
 		src = strings.Replace(src,
-			`import "github.com/CWBudde/gocuda/gpu"`,
-			"import (\n\t\"math\"\n\n\t\"github.com/CWBudde/gocuda/gpu\"\n)", 1)
-		return src + "\nfunc gocudaViolation(x float32) float32 { return x * float32(math.Pi) }\n"
+			`import "github.com/CWBudde/simtgo/gpu"`,
+			"import (\n\t\"math\"\n\n\t\"github.com/CWBudde/simtgo/gpu\"\n)", 1)
+		return src + "\nfunc simtgoViolation(x float32) float32 { return x * float32(math.Pi) }\n"
 	},
 }, {
 	Name: "a recursive device function",
 	Want: "recursion is not supported in kernels",
 	edit: func(src string, p *Program) string {
-		src += "\nfunc gocudaViolation(x int32) int32 {\n" +
-			"\tif x <= 0 {\n\t\treturn 0\n\t}\n\treturn gocudaViolation(x - 1)\n}\n"
-		return inject(src, p, "\tgocudaV := gocudaViolation(3)\n\tgocudaV = gocudaV\n")
+		src += "\nfunc simtgoViolation(x int32) int32 {\n" +
+			"\tif x <= 0 {\n\t\treturn 0\n\t}\n\treturn simtgoViolation(x - 1)\n}\n"
+		return inject(src, p, "\tsimtgoV := simtgoViolation(3)\n\tsimtgoV = simtgoV\n")
 	},
 }, {
 	Name: "calling another kernel",
 	Want: "is a kernel",
 	edit: func(src string, p *Program) string {
-		src += "\nfunc GocudaViolation(ctx gpu.Ctx, v []float32) {\n\tv[0] = 1\n}\n"
-		return inject(src, p, "\tGocudaViolation(ctx, nil)\n")
+		src += "\nfunc SimtgoViolation(ctx gpu.Ctx, v []float32) {\n\tv[0] = 1\n}\n"
+		return inject(src, p, "\tSimtgoViolation(ctx, nil)\n")
 	},
 }, {
 	Name: "a package-level variable",
 	Want: "declared outside the kernel",
 	edit: func(src string, p *Program) string {
-		src += "\nvar gocudaViolation int32\n"
-		return inject(src, p, "\tgocudaV := gocudaViolation\n\tgocudaV = gocudaV\n")
+		src += "\nvar simtgoViolation int32\n"
+		return inject(src, p, "\tsimtgoV := simtgoViolation\n\tsimtgoV = simtgoV\n")
 	},
 }, {
 	Name: "a barrier under a thread-varying condition",

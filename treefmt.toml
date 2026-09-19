@@ -16,7 +16,7 @@ excludes = [
   "kernels/prebuilt/prebuilt_gen.go",
   "*.ptx",
   "simt/testdata/*.cu",
-  ".gocuda-cache/*",
+  ".simtgo-cache/*",
 ]
 
 # Files no formatter claims are normal here (go.sum, *.cu, .gitattributes), so

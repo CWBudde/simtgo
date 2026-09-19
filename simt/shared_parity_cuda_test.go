@@ -7,10 +7,10 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/CWBudde/gocuda"
-	"github.com/CWBudde/gocuda/cuda"
-	"github.com/CWBudde/gocuda/internal/tolerance"
-	"github.com/CWBudde/gocuda/simt"
+	"github.com/CWBudde/simtgo"
+	"github.com/CWBudde/simtgo/cuda"
+	"github.com/CWBudde/simtgo/internal/tolerance"
+	"github.com/CWBudde/simtgo/simt"
 )
 
 // The device half of the shared-memory work. Every reference here is an
@@ -73,7 +73,7 @@ func histogram(x []int32, bins int) []int32 {
 // agree with.
 func TestHistogramParity(t *testing.T) {
 	ctx := device(t)
-	k, err := simt.Build(ctx, gocuda.Kernels(), "Histogram")
+	k, err := simt.Build(ctx, simtgo.Kernels(), "Histogram")
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestHistogramParity(t *testing.T) {
 // the launch rather than in the source.
 const dynProbe = `package kernels
 
-import "github.com/CWBudde/gocuda/gpu"
+import "github.com/CWBudde/simtgo/gpu"
 
 func DynProbe(ctx gpu.Ctx, bins, x []int32) {
 	tile := ctx.SharedDynI32()
@@ -191,7 +191,7 @@ func TestLaunchRefusesTheWrongSharedSpelling(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	plain, err := simt.Build(ctx, gocuda.Kernels(), "VecAdd")
+	plain, err := simt.Build(ctx, simtgo.Kernels(), "VecAdd")
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -243,9 +243,9 @@ func TestLaunchRefusesTheWrongSharedSpelling(t *testing.T) {
 // what the kernels in kernels/ do too.
 const typedProbe = `package kernels
 
-import "github.com/CWBudde/gocuda/gpu"
+import "github.com/CWBudde/simtgo/gpu"
 
-//gocuda:device
+//simtgo:device
 func staged(ctx gpu.Ctx, v int64) int64 {
 	scratch := ctx.SharedI64(64)
 	scratch[ctx.ThreadIdx()%64] = v * 2

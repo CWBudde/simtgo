@@ -1,6 +1,6 @@
 package kernels
 
-import "github.com/CWBudde/gocuda/gpu"
+import "github.com/CWBudde/simtgo/gpu"
 
 // GrayShift is the number of fractional bits the luma weights are scaled by.
 const GrayShift = 8

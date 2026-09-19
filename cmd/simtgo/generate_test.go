@@ -6,12 +6,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/CWBudde/gocuda/cuda"
+	"github.com/CWBudde/simtgo/cuda"
 )
 
 const goodKernel = `package kernels
 
-import "github.com/CWBudde/gocuda/gpu"
+import "github.com/CWBudde/simtgo/gpu"
 
 func VecAdd(ctx gpu.Ctx, c, a, b []float32) {
 	i := ctx.GlobalID()
@@ -23,7 +23,7 @@ func VecAdd(ctx gpu.Ctx, c, a, b []float32) {
 
 const badKernel = `package kernels
 
-import "github.com/CWBudde/gocuda/gpu"
+import "github.com/CWBudde/simtgo/gpu"
 
 func Broken(ctx gpu.Ctx, a []float64) {
 	a[0] = 1
@@ -199,11 +199,11 @@ func TestArchFlag(t *testing.T) {
 
 const ignoredHelper = `package kernels
 
-import "github.com/CWBudde/gocuda/gpu"
+import "github.com/CWBudde/simtgo/gpu"
 
 // Helper takes a Ctx but is never lowered.
 //
-//gocuda:ignore
+//simtgo:ignore
 func Helper(ctx gpu.Ctx, a []float64) {
 	a[0] = 1
 }
@@ -211,12 +211,12 @@ func Helper(ctx gpu.Ctx, a []float64) {
 
 const deviceHelper = `package kernels
 
-import "github.com/CWBudde/gocuda/gpu"
+import "github.com/CWBudde/simtgo/gpu"
 
 // Where is a helper that wants the thread's position, so it takes a Ctx and
 // says what it is.
 //
-//gocuda:device
+//simtgo:device
 func Where(ctx gpu.Ctx) int {
 	return ctx.GlobalID()
 }
@@ -227,7 +227,7 @@ const forbiddenImport = `package kernels
 import (
 	"math"
 
-	"github.com/CWBudde/gocuda/gpu"
+	"github.com/CWBudde/simtgo/gpu"
 )
 
 func Rooted(ctx gpu.Ctx, a []float32) {
@@ -254,7 +254,7 @@ func TestIgnoreDirectiveIsHonouredByGenerate(t *testing.T) {
 }
 
 // TestDeviceDirectiveIsHonouredByGenerate: the same agreement the opt-out
-// needs, for the marker that replaces it. A //gocuda:device helper must not be
+// needs, for the marker that replaces it. A //simtgo:device helper must not be
 // generated as a kernel -- that is the whole of what the marker does -- and it
 // must still be reachable from one, which the .cu below shows by containing it.
 func TestDeviceDirectiveIsHonouredByGenerate(t *testing.T) {
@@ -264,7 +264,7 @@ func TestDeviceDirectiveIsHonouredByGenerate(t *testing.T) {
 	}
 	gen := read(t, filepath.Join(o.outDir, genFile))
 	if strings.Contains(gen, "Where") {
-		t.Errorf("a //gocuda:device declaration was gated as a kernel:\n%s", gen)
+		t.Errorf("a //simtgo:device declaration was gated as a kernel:\n%s", gen)
 	}
 	if !strings.Contains(gen, "VecAdd") {
 		t.Errorf("the real kernel was not gated:\n%s", gen)

@@ -6,13 +6,13 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/CWBudde/gocuda/internal/fuzz"
-	"github.com/CWBudde/gocuda/simt"
+	"github.com/CWBudde/simtgo/internal/fuzz"
+	"github.com/CWBudde/simtgo/simt"
 )
 
 // TestShapesLowerWithTheirPadding is what the struct catalogue is for.
 //
-// The emitter turns every hole in a Go struct into a gocuda_padN member and
+// The emitter turns every hole in a Go struct into a simtgo_padN member and
 // asserts the whole struct's size and alignment, because NVRTC has no offsetof
 // to check the field positions with -- so the size assertion is what stands in
 // for them, and it is only as good as the padding it is computed from. A shape
@@ -29,9 +29,9 @@ func TestShapesLowerWithTheirPadding(t *testing.T) {
 		why  string
 	}{
 		"SPair": {pad: "", size: 8, why: "two four-byte fields, so no hole at all: the control"},
-		"SHole": {pad: "gocuda_pad0[3]", size: 8, why: "three bytes after an int8, the commonest hole"},
-		"SWide": {pad: "gocuda_pad0[4]", size: 16, why: "four bytes to reach the int64's alignment of eight"},
-		"STail": {pad: "gocuda_pad0[6]", size: 16, why: "six bytes at the end, which move no field and change sizeof"},
+		"SHole": {pad: "simtgo_pad0[3]", size: 8, why: "three bytes after an int8, the commonest hole"},
+		"SWide": {pad: "simtgo_pad0[4]", size: 16, why: "four bytes to reach the int64's alignment of eight"},
+		"STail": {pad: "simtgo_pad0[6]", size: 16, why: "six bytes at the end, which move no field and change sizeof"},
 	}
 
 	// Both directions, because the loop below only checks the shapes that are
@@ -63,7 +63,7 @@ func TestShapesLowerWithTheirPadding(t *testing.T) {
 				t.Errorf("no %q (%s):\n%s", sizeAssert, w.why, u.Source)
 			}
 			switch {
-			case w.pad == "" && strings.Contains(u.Source, "gocuda_pad"):
+			case w.pad == "" && strings.Contains(u.Source, "simtgo_pad"):
 				t.Errorf("%s has no hole (%s) but the emitter padded it:\n%s", shape.Name, w.why, u.Source)
 			case w.pad != "" && !strings.Contains(u.Source, w.pad):
 				t.Errorf("no %q (%s):\n%s", w.pad, w.why, u.Source)
@@ -77,7 +77,7 @@ func TestShapesLowerWithTheirPadding(t *testing.T) {
 // out.
 func shapeKernel(shape *fuzz.StructShape) string {
 	var b strings.Builder
-	b.WriteString("package kernels\n\nimport \"github.com/CWBudde/gocuda/gpu\"\n\n")
+	b.WriteString("package kernels\n\nimport \"github.com/CWBudde/simtgo/gpu\"\n\n")
 	b.WriteString("type " + shape.Name + " struct {\n")
 	for _, f := range shape.Fields {
 		fmt.Fprintf(&b, "\t%s %s\n", f.Name, f.Kind.GoName())

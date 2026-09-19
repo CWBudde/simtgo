@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/CWBudde/gocuda/internal/fuzz"
+	"github.com/CWBudde/simtgo/internal/fuzz"
 )
 
 // Feature coverage: what fraction of generated programs contain each construct.

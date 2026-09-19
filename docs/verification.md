@@ -13,7 +13,7 @@ have yet.
 ## 1. Golden files — the exact bytes the emitter produced
 
 `simt/testdata/*.cu`, one per kernel, compared by `TestGolden` and refreshed
-with `GOCUDA_UPDATE=1`.
+with `SIMTGO_UPDATE=1`.
 
 Cheap, and the right check for "did this change the output, and where". It is
 also the weakest claim in the set: a golden file says the emitter is
@@ -138,7 +138,7 @@ kernels** — a second code generator that a `simt`-only sweep would have missed
 entirely.
 
 ```sh
-GOCUDA_REQUIRE_DEVICE=1 go test -tags cuda -count=1 -timeout 0 \
+SIMTGO_REQUIRE_DEVICE=1 go test -tags cuda -count=1 -timeout 0 \
   -exec "compute-sanitizer --tool=memcheck --error-exitcode 1 --report-api-errors no --target-processes application-only" \
   ./simt/ ./tile/ ./cuda/
 ```
@@ -173,7 +173,7 @@ The default behaviour of every one of them is the wrong answer here.
 
 ### What turns a skip into a gate
 
-`GOCUDA_REQUIRE_DEVICE=1` turns the test helpers' "no CUDA device available"
+`SIMTGO_REQUIRE_DEVICE=1` turns the test helpers' "no CUDA device available"
 **skip into a failure**. The worst outcome available to a sanitizer job is to
 go green having launched nothing, and a silent skip is exactly how that
 happens. The GPU CI job will want the same switch for the same reason.
@@ -251,7 +251,7 @@ says why no version of the list fixes it.
 
 What does separate them is the Go source the C came from, and asking whether
 the thing the warning names is in it too. That is a judgment about two pieces
-of code, not a parse, so `GOCUDA_WARNING_TRIAGE=1` sends the warning and a
+of code, not a parse, so `SIMTGO_WARNING_TRIAGE=1` sends the warning and a
 slice of each source to a small decision model
 (`internal/typesafe`, `simt/triage_cuda_test.go`).
 
@@ -298,7 +298,7 @@ in `internal/lower`, `simt.Build` or the driver goes near it, and
 says why that line is where it is.
 
 Two advisory reviews share the same client and the same opt-in
-(`GOCUDA_DOC_REVIEW=1`), and neither can fail a build:
+(`SIMTGO_DOC_REVIEW=1`), and neither can fail a build:
 `simt/specprose_test.go` reads each `SPEC.md` Refusals sentence against the
 source its test refuses, which is the half of that document
 [layer 2](#2-the-contract-checked-in-both-directions) does not check; and
@@ -435,18 +435,18 @@ untagged target** so that one finding cannot hide the other.
 The NVRTC oracle runs there too, in a job of its own, and getting it there cost
 nothing but noticing that it needs a **toolkit and not a device**: NVRTC
 compiles to PTX and nothing is launched, so the `nvidia-cuda-nvrtc-cu12` wheel
-is the whole dependency and `GOCUDA_LIBNVRTC` points the loader at it. That is
+is the whole dependency and `SIMTGO_LIBNVRTC` points the loader at it. That is
 the same trick [`toolchain.md`](toolchain.md) records for running
 `TestGeneratedCCompiles` on a machine with no GPU. The version is pinned,
 because the target whitelists four NVRTC diagnostic numbers as generator noise
 and which numbers those are is a property of a particular NVRTC.
 
-**That job sets `GOCUDA_REQUIRE_NVRTC=1`, and the reason is the whole point of
+**That job sets `SIMTGO_REQUIRE_NVRTC=1`, and the reason is the whole point of
 the job.** Without the library the target skips, and a skip is indistinguishable
-from a clean search: with `GOCUDA_LIBNVRTC` pointed at a file that does not
+from a clean search: with `SIMTGO_LIBNVRTC` pointed at a file that does not
 exist, a twenty-minute leg passes **in three milliseconds** having compiled
 nothing. The variable turns that skip into a failure, exactly as
-`GOCUDA_REQUIRE_DEVICE` does for the sanitizer sweep.
+`SIMTGO_REQUIRE_DEVICE` does for the sanitizer sweep.
 
 Two schedules, because they answer different questions. The daily run is the
 regression cadence — every defect the fuzzer has found turned up in minutes, so
@@ -534,7 +534,7 @@ Stated plainly, because the rest of this page is a list of things that are.
   where there was no device. Its lowering, refusals, drift test, analyzer,
   emulator under `-race` and generated C are all verified; **every parity test
   it adds is written and unrun.** NVRTC compiles; it does not run.
-- **The generate gate checks source, not artifacts.** `gocuda generate -check`
+- **The generate gate checks source, not artifacts.** `simtgo generate -check`
   compares the lowered CUDA C and **not** the compiled PTX: a deliberately
   corrupted `.ptx` passes it, while a tampered `.cu` fails. That is the right
   check for source staleness and a weaker claim than "are the committed

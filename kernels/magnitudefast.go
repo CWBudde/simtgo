@@ -1,6 +1,6 @@
 package kernels
 
-import "github.com/CWBudde/gocuda/gpu"
+import "github.com/CWBudde/simtgo/gpu"
 
 // MagnitudeFast is Magnitude with a normalisation divide, compiled with
 // NVRTC's --use_fast_math.
@@ -16,7 +16,7 @@ import "github.com/CWBudde/gocuda/gpu"
 // opt-in: NUMERICS.md says what a test may still assert about a kernel
 // compiled this way.
 //
-//gocuda:fastmath
+//simtgo:fastmath
 func MagnitudeFast(ctx gpu.Ctx, mag, re, im []float32, scale float32) {
 	i := ctx.GlobalID()
 	if i < len(mag) {
