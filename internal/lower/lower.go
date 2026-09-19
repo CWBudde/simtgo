@@ -411,6 +411,7 @@ func (t *transpiler) kernel(fd *ast.FuncDecl) {
 		}
 	}
 	t.kernelName = fd.Name.Name
+	t.checkReserved(fd.Name.Name, fd.Name.Pos())
 	if fd.Recv != nil {
 		t.fail(fd.Pos(), "a kernel must be a plain function, not a method")
 		return
@@ -612,6 +613,7 @@ func (t *transpiler) deviceFunc(pos token.Pos, obj *types.Func) (string, bool) {
 	}
 
 	name := cname(obj.Name())
+	t.checkReserved(name, fd.Name.Pos())
 	// Reserve the name before the body is lowered: a helper that reaches
 	// itself has to find it taken, which is what the cycle check reads.
 	if t.lowering == nil {
@@ -780,6 +782,36 @@ func (t *transpiler) deviceParams(fd *ast.FuncDecl) []param {
 // are what share a C scope with its generated lengths. The kernel additionally
 // records sigNames, because a dynamically sized tile generates a length while
 // the body is lowered, long after this runs.
+// reservedPrefix is the emitter's own namespace in the generated C.
+//
+// Two names come from here rather than from the Go source: gocuda_padN, the
+// explicit padding a struct's holes are written as, and gocuda_bounds, the
+// range check WithBoundsChecks calls. Both are fixed spellings, both sit at
+// file scope, and both are perfectly ordinary Go identifiers -- so a kernel
+// package can declare them, and then the emitter's definition and the
+// author's are the same C symbol. A local named gocuda_bounds shadows the
+// helper and NVRTC rejects the call it cannot resolve; a device function of
+// that name redefines it outright.
+//
+// Neither is a mistranslation, and that is the only reason this is a refusal
+// and not an emitter defect: both fail loudly at compile time. What they fail
+// with is a message about generated code the author never wrote, which is not
+// a diagnostic anybody can act on.
+//
+// The refusal is unconditional rather than raised only when the checks are
+// on. A build option must not move the subset: a kernel that `gocuda vet`
+// accepts and simt.Build(WithBoundsChecks) then refuses would make the
+// analyzer a liar, and the analyzer has no build options to be told about.
+const reservedPrefix = "gocuda_"
+
+// checkReserved refuses one name that lands in the emitter's own namespace.
+func (t *transpiler) checkReserved(name string, pos token.Pos) {
+	if !strings.HasPrefix(name, reservedPrefix) {
+		return
+	}
+	t.fail(pos, "%s is reserved: names beginning with %s belong to the emitter, which writes its own into the same C scope; rename it", name, reservedPrefix)
+}
+
 func (t *transpiler) checkGeneratedNames(fd *ast.FuncDecl, params []param) {
 	generated := make(map[string]string, len(params))
 	for _, p := range params {
@@ -811,6 +843,12 @@ func (t *transpiler) checkGeneratedNames(fd *ast.FuncDecl, params []param) {
 		if pos, taken := declared[escaped]; taken {
 			t.fail(pos, "%s is a C++ keyword and is emitted as %s, which is also declared here, so in CUDA C the two would be one variable; rename one of them", name, escaped)
 		}
+	}
+	// The same walk answers the reserved-prefix question, since declared is
+	// every variable the function brings into a C scope the emitter also
+	// writes into.
+	for _, name := range spellings {
+		t.checkReserved(name, declared[name])
 	}
 	if t.inDevice {
 		// A device function has its own parameters and no dynamic tile, so

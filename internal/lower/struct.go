@@ -32,6 +32,9 @@ func (t *transpiler) structType(named *types.Named, pos token.Pos) string {
 	// cname, because a Go type may be called Class or Template, which C++ would
 	// read as a keyword.
 	name := cname(named.Obj().Name())
+	// A struct tag shares the ordinary namespace in C++, so a type spelled
+	// like one of the emitter's own file-scope names collides with it.
+	t.checkReserved(name, named.Obj().Pos())
 
 	// Reserved before the fields are walked so that a struct reachable from one
 	// of its own fields cannot recurse forever. Go needs a pointer to express
