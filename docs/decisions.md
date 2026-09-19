@@ -434,3 +434,73 @@ surface as — and `CUDA_ERROR_ILLEGAL_ADDRESS`, which is where an overrun the
 checks did _not_ cover lands. Under a bounds-checked build those two are the
 same mistake wearing different codes, which is what the error already says out
 loud. Everything else is returned untouched.
+
+## A driver call holds its OS thread
+
+`cuCtxSetCurrent` binds a context to the **calling OS thread**, and Go moves
+goroutines between threads at any preemption point. `Context.bind` and the
+driver call after it were two statements, so a goroutine preempted between
+them could finish its call on a thread the context had never been made current
+on, and the driver answered `CUDA_ERROR_INVALID_CONTEXT`. This is not a data
+race and the race detector cannot see it: no Go memory is touched
+concurrently, only a per-thread state the driver keeps and Go does not know
+about.
+
+The fix is one choke point, `Context.call`, which locks the thread around the
+bind and the call together. There is nowhere left to write the bug: a method
+that forgets to lock also forgets to bind, and does not compile against a
+`call` that takes the entry point as a closure.
+
+Two other candidates were considered.
+
+|                                          | what it fixes             | why not                                                                                                                                         |
+| ---------------------------------------- | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `LockOSThread` + `cuCtxSetCurrent`       | the migration window      | — chosen                                                                                                                                        |
+| `cuCtxPushCurrent`/`cuCtxPopCurrent`     | nothing, on its own       | the goroutine can still migrate between push and call; it needs the lock too, and then only adds restoring a context somebody else made current |
+| bind once per thread, and prove it stays | the repeated `SetCurrent` | Go offers no hook on thread creation, so there is no "once" to hang it on — an optimisation over the first row, not an alternative to it        |
+
+Push/pop is the polite form: it gives a thread back whatever context was
+current on it before. Nothing needs that today, because Go's threads are Go's
+and no host application shares them, and it costs a second driver call on
+every operation. If gocuda is ever called on a thread it did not create, this
+is the row to revisit.
+
+### What it costs, and what the measurement actually was
+
+One OS thread pinned for the duration of one driver call. Those calls are
+microseconds to milliseconds and block in the driver anyway, so the scheduler
+loses nothing it could have run there; `LockOSThread` itself is a couple of
+pointer writes. `go test -tags cuda ./...` takes the same time it did.
+
+The interesting part is the reproduction, because the roadmap described a
+shape that **does not fail**. 64 goroutines doing 40 `Upload`/`Download` round
+trips each against one context passes every time on the unfixed code, measured
+here. The reason is that `cuCtxSetCurrent` is sticky: once a thread has been
+made current it stays current, so in a steady thread pool every migration
+lands somewhere already bound, and the bug is invisible.
+
+What is needed is a thread that has **never** bound — one the runtime created
+after the work started. `TestContextIsGoroutineSafe` manufactures those: a
+goroutine that exits while still holding `runtime.LockOSThread` takes its OS
+thread down with it, so a loop of those retires threads continuously and
+obliges the scheduler to make fresh ones for the workers. On the unfixed code
+that fails in about 0.4 s, 15 runs out of 15, with three to six of 32 workers
+reporting `CUDA_ERROR_INVALID_CONTEXT`; with the fix, 15 of 15 pass, under the
+race detector too.
+
+That is worth stating plainly: a concurrency bug that a thread pool hides is a
+bug that reaches production and not CI. Measured on the T550 — one machine is
+one machine, but the mechanism is in the driver's contract rather than in this
+one's behaviour.
+
+### What is still not promised
+
+Ordering. Every call is synchronous and has finished before it returns, but
+two goroutines allocating, copying and launching against one context interleave
+however the scheduler likes, and nothing serialises them. A device buffer
+shared between goroutines needs the same care as any other shared memory. That
+is now written on `cuda.Context` rather than left to be inferred.
+
+Multi-GPU is untested, not unsupported: `NewContext` takes a device ordinal and
+the poison table is already keyed by one, but this machine has one GPU, so
+nothing here has exercised two contexts on two devices.

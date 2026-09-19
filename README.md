@@ -54,8 +54,8 @@ on a machine that has never had a CUDA toolkit. `compute-sanitizer` clean on
 
 **Not yet.** Linux only; Windows is planned and macOS is not possible, since
 NVIDIA ships no CUDA for it. The driver API is synchronous — no streams, no
-events, no async copies — and `cuda.Context` is not safe to share between
-goroutines, which is a known and reproduced bug rather than an untested claim.
+events, no async copies — so a `*cuda.Context` is safe to share between
+goroutines but nothing serialises what they do with it.
 The tile track is 1-D `float32` with seven operations and no reductions. One
 architecture has been measured, `sm_75`, and CI has no GPU, so the parity tests
 are unverified anywhere but the machine they were written on.

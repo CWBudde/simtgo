@@ -5,7 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
+	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/CWBudde/gocuda/cuda"
@@ -323,6 +327,113 @@ func TestJITLoadAcrossContexts(t *testing.T) {
 		t.Error("Load in a fresh context returned no PTX")
 	}
 	runAdd(t, second, res.Func)
+}
+
+// TestContextIsGoroutineSafe is the regression test for the one thing a
+// caller is most likely to try first: sharing a *Context between goroutines.
+//
+// The mechanism is not a data race and the race detector cannot see it.
+// cuCtxSetCurrent binds a context to the *calling OS thread*, and Go may move
+// a goroutine to another thread at any preemption point; a driver call that
+// lands on a thread the context was never made current on is answered with
+// CUDA_ERROR_INVALID_CONTEXT. The same bug showed up as a rare spurious
+// failure of examples/tilefir.
+//
+// Concurrency alone does not reproduce it, and that was measured rather than
+// assumed: 64 goroutines doing 40 Upload/Download round trips each pass every
+// time on the unfixed code. The reason is that cuCtxSetCurrent is sticky --
+// once a thread has been made current it stays current -- so in a steady
+// thread pool every migration lands somewhere already bound. What is needed
+// is a thread that has *never* bound, which means a thread the runtime
+// created after the work started.
+//
+// Hence the shredder. A goroutine that exits while still holding
+// runtime.LockOSThread takes its OS thread down with it, so the loop below
+// retires threads continuously and obliges the scheduler to make fresh ones
+// for the workers. On the unfixed code every worker fails, inside about a
+// second; with the fix there is no window to land in.
+func TestContextIsGoroutineSafe(t *testing.T) {
+	requireDevice(t)
+	if n := runtime.GOMAXPROCS(0); n < 2 {
+		t.Skipf("GOMAXPROCS = %d: a goroutine cannot migrate between threads", n)
+	}
+
+	ctx, err := cuda.NewContext(0)
+	if err != nil {
+		t.Fatalf("NewContext: %v", err)
+	}
+	defer ctx.Close()
+
+	var stop atomic.Bool
+	var shredder sync.WaitGroup
+	shredder.Add(1)
+	go func() {
+		defer shredder.Done()
+		for !stop.Load() {
+			var batch sync.WaitGroup
+			for range 8 {
+				batch.Add(1)
+				go func() {
+					defer batch.Done()
+					runtime.LockOSThread() // exits locked, so the thread dies
+				}()
+			}
+			batch.Wait()
+		}
+	}()
+
+	const (
+		workers = 32
+		rounds  = 50
+	)
+	want := []float32{1, 2, 3, 4, 5, 6, 7, 8}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, workers)
+	for w := range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for r := range rounds {
+				s, err := cuda.Upload(ctx, want)
+				if err != nil {
+					errs <- fmt.Errorf("worker %d round %d: Upload: %w", w, r, err)
+					return
+				}
+				got, err := s.Download()
+				s.Free()
+				if err != nil {
+					errs <- fmt.Errorf("worker %d round %d: Download: %w", w, r, err)
+					return
+				}
+				if !slices.Equal(got, want) {
+					errs <- fmt.Errorf("worker %d round %d: got %v, want %v", w, r, got, want)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	stop.Store(true)
+	shredder.Wait()
+	close(errs)
+
+	// Report the first failure with its type intact and only count the rest:
+	// a broken binding produces one per worker and they all say the same
+	// thing.
+	n := 0
+	for err := range errs {
+		if n == 0 {
+			t.Errorf("%v", err)
+			if errors.Is(err, cuda.ErrInvalidContext) {
+				t.Log("CUDA_ERROR_INVALID_CONTEXT: a worker ran on a thread the context was never made current on")
+			}
+		}
+		n++
+	}
+	if n > 1 {
+		t.Errorf("%d of %d workers failed", n, workers)
+	}
 }
 
 // TestParseArch covers the reading of a virtual architecture, including the

@@ -59,9 +59,19 @@ func Available() bool {
 
 // Context owns a device's primary context.
 //
-// The driver API binds contexts to OS threads, and goroutines migrate between
-// them, so every method calls cuCtxSetCurrent before touching the driver
-// rather than relying on runtime.LockOSThread.
+// # Goroutine safety
+//
+// A *Context is safe to share between goroutines. Every method makes the
+// context current and issues its driver call on one OS thread it holds for
+// the duration, so a goroutine that migrates cannot leave a call behind on a
+// thread the context was never made current on. See call, and
+// docs/decisions.md#a-driver-call-holds-its-os-thread.
+//
+// What is *not* promised is ordering. The calls are synchronous, so each one
+// has finished before it returns, but two goroutines allocating, copying and
+// launching against one context interleave however the scheduler likes, and
+// nothing here serialises them for you. A device buffer shared between
+// goroutines needs the same care as any other shared memory.
 //
 // A context also owns every module loaded into it, including the compilation
 // cache behind LoadPTXCached. A CUmodule is only meaningful inside the context
@@ -179,12 +189,44 @@ func NewContext(device int) (*Context, error) {
 		return nil, err
 	}
 	c.maxShared = int(shared)
+	// One bind here as a check that the context can be made current at all,
+	// so a caller learns about a context they cannot use now rather than at
+	// their first allocation. It is not what makes the calls below work:
+	// each of those binds on its own locked thread, because this one is
+	// undone by the first goroutine migration.
 	return c, c.bind()
 }
 
-// bind makes this context current on the calling thread, and is the first
-// thing every method here does -- which is what makes it the one place a
-// sticky fault has to be reported from.
+// call runs one driver entry point with this context current on an OS thread
+// that cannot change underneath it. Every method here goes through it, which
+// is what makes it the one place a sticky fault has to be reported from.
+//
+// The lock is the whole point, and it is why bind and the call it protects
+// cannot be two statements in the caller. cuCtxSetCurrent binds a context to
+// the *calling OS thread*; Go may move a goroutine to another thread at any
+// preemption point, and a driver call that lands on a thread this context was
+// never made current on is answered with CUDA_ERROR_INVALID_CONTEXT. That is
+// not a data race and the race detector cannot see it. See
+// docs/decisions.md#a-driver-call-holds-its-os-thread.
+//
+// The cost is one thread pinned for the duration of one driver call. Those
+// calls are microseconds to milliseconds and block anyway, so the scheduler
+// loses nothing it could have used; LockOSThread itself is a couple of
+// pointer writes.
+func (c *Context) call(op string, fn func() Result) error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	if err := c.bind(); err != nil {
+		return err
+	}
+	return c.fault(check(fn(), op))
+}
+
+// bind makes this context current on the calling thread.
+//
+// It is unexported and deliberately small: call is its only caller besides
+// NewContext, because a bind that is not followed by the driver call on the
+// same locked thread is a bind that may already have been undone.
 func (c *Context) bind() error {
 	if p := c.poisoned.Load(); p != nil {
 		return p
@@ -311,19 +353,13 @@ func (c *Context) Close() error {
 
 // Sync blocks until all work on the context has completed.
 func (c *Context) Sync() error {
-	if err := c.bind(); err != nil {
-		return err
-	}
-	return c.fault(check(cuCtxSynchronize(), "cuCtxSynchronize"))
+	return c.call("cuCtxSynchronize", cuCtxSynchronize)
 }
 
 // Alloc reserves n bytes of device memory.
 func (c *Context) Alloc(n int) (DevPtr, error) {
-	if err := c.bind(); err != nil {
-		return 0, err
-	}
 	var p uint64
-	if err := c.fault(check(cuMemAlloc(&p, uint64(n)), "cuMemAlloc")); err != nil {
+	if err := c.call("cuMemAlloc", func() Result { return cuMemAlloc(&p, uint64(n)) }); err != nil {
 		return 0, err
 	}
 	return DevPtr(p), nil
@@ -331,24 +367,19 @@ func (c *Context) Alloc(n int) (DevPtr, error) {
 
 // Free releases device memory.
 func (c *Context) Free(p DevPtr) error {
-	if err := c.bind(); err != nil {
-		return err
-	}
-	return c.fault(check(cuMemFree(uint64(p)), "cuMemFree"))
+	return c.call("cuMemFree", func() Result { return cuMemFree(uint64(p)) })
 }
 
 func (c *Context) copyHtoD(dst DevPtr, src unsafe.Pointer, n int) error {
-	if err := c.bind(); err != nil {
-		return err
-	}
-	return c.fault(check(cuMemcpyHtoD(uint64(dst), src, uint64(n)), "cuMemcpyHtoD"))
+	return c.call("cuMemcpyHtoD", func() Result {
+		return cuMemcpyHtoD(uint64(dst), src, uint64(n))
+	})
 }
 
 func (c *Context) copyDtoH(dst unsafe.Pointer, src DevPtr, n int) error {
-	if err := c.bind(); err != nil {
-		return err
-	}
-	return c.fault(check(cuMemcpyDtoH(dst, uint64(src), uint64(n)), "cuMemcpyDtoH"))
+	return c.call("cuMemcpyDtoH", func() Result {
+		return cuMemcpyDtoH(dst, uint64(src), uint64(n))
+	})
 }
 
 // Module is a loaded PTX module. It belongs to the context it was loaded into
@@ -375,9 +406,6 @@ func (c *Context) loadPTXLocked(ptx []byte) (*Module, error) {
 	if c.closed {
 		return nil, ErrContextClosed
 	}
-	if err := c.bind(); err != nil {
-		return nil, err
-	}
 
 	// cuModuleLoadData reads a NUL-terminated image. The copy is not avoidable
 	// by appending in place: ptx belongs to the caller, and a spare byte of
@@ -389,7 +417,9 @@ func (c *Context) loadPTXLocked(ptx []byte) (*Module, error) {
 	defer pin.Unpin()
 
 	m := &Module{x: c}
-	if err := check(cuModuleLoadData(&m.c, unsafe.Pointer(&img[0])), "cuModuleLoadData"); err != nil {
+	if err := c.call("cuModuleLoadData", func() Result {
+		return cuModuleLoadData(&m.c, unsafe.Pointer(&img[0]))
+	}); err != nil {
 		return nil, err
 	}
 	c.modules = append(c.modules, m)
@@ -453,10 +483,7 @@ func (m *Module) unloadLocked() error {
 	}
 	h := m.c
 	m.c = 0
-	if err := m.x.bind(); err != nil {
-		return err
-	}
-	return check(cuModuleUnload(h), "cuModuleUnload")
+	return m.x.call("cuModuleUnload", func() Result { return cuModuleUnload(h) })
 }
 
 // forgetLocked drops every reference the context holds to m, so that an
@@ -483,9 +510,15 @@ type Function struct {
 }
 
 // Function looks up a kernel by its (extern "C") name.
+//
+// This one used to reach the driver with no bind at all, which worked only
+// because every caller had just loaded the module and so had left the context
+// current on that thread by luck. It goes through call like the rest now.
 func (m *Module) Function(name string) (*Function, error) {
 	f := &Function{x: m.x}
-	if err := check(cuModuleGetFunction(&f.f, m.c, name), "cuModuleGetFunction "+name); err != nil {
+	if err := m.x.call("cuModuleGetFunction "+name, func() Result {
+		return cuModuleGetFunction(&f.f, m.c, name)
+	}); err != nil {
 		return nil, err
 	}
 	return f, nil
@@ -506,10 +539,6 @@ func (m *Module) Function(name string) (*Function, error) {
 // cost -- two C allocations become two Go ones -- and is done this way because
 // there is no C allocator left to call, not because it is faster.
 func (f *Function) LaunchSync(grid, block Dim3, sharedBytes int, args ...Arg) error {
-	if err := f.x.bind(); err != nil {
-		return err
-	}
-
 	// Each parameter gets its own width, rounded up to 8, rather than a fixed
 	// 8-byte slot: a struct passed by value is as wide as the struct, and
 	// copying it into an 8-byte slot would overwrite the parameters after it.
@@ -541,15 +570,20 @@ func (f *Function) LaunchSync(grid, block Dim3, sharedBytes int, args ...Arg) er
 	if len(args) > 0 {
 		params = unsafe.Pointer(&table[0])
 	}
-	err := check(cuLaunchKernel(f.f,
-		grid.X, grid.Y, grid.Z,
-		block.X, block.Y, block.Z,
-		uint32(sharedBytes), 0, params, nil), "cuLaunchKernel")
-	if err != nil {
-		return f.x.fault(err)
+	// Marshalling and pinning happen above, off the locked thread: only the
+	// driver call itself has to stay on one.
+	if err := f.x.call("cuLaunchKernel", func() Result {
+		return cuLaunchKernel(f.f,
+			grid.X, grid.Y, grid.Z,
+			block.X, block.Y, block.Z,
+			uint32(sharedBytes), 0, params, nil)
+	}); err != nil {
+		return err
 	}
 	// A kernel fault is asynchronous: measured on a T550, cuLaunchKernel
-	// returns success and the trap surfaces here. Sync records it.
+	// returns success and the trap surfaces here. Sync records it. It locks a
+	// thread of its own, which need not be this one -- cuCtxSynchronize waits
+	// on the context, not on the thread that issued the launch.
 	return f.x.Sync()
 }
 

@@ -465,6 +465,11 @@ Stated plainly, because the rest of this page is a list of things that are.
   corrupted `.ptx` passes it, while a tampered `.cu` fails. That is the right
   check for source staleness and a weaker claim than "are the committed
   artifacts current?".
+- **Multi-GPU.** `NewContext` takes a device ordinal and the poison table is
+  keyed by one, but this machine has one GPU, so two contexts on two devices
+  have never been exercised. The goroutine-safety guarantee on `cuda.Context`
+  is tested ([the finding](decisions.md#a-driver-call-holds-its-os-thread));
+  the multi-device half of that roadmap item is not.
 - **No GPU in CI.** `.github/workflows/ci.yml` is the non-GPU half. Nothing in
   it runs on a device, so the parity tests are unverified there, the sanitizer
   workflow has no runner, and the fuzzer's device leg does not exist. This is
