@@ -81,7 +81,7 @@ func FuzzNVRTCAcceptsTheGeneratedC(f *testing.F) {
 		// surfaced: NVRTC compiled the kernel and remarked that a variable was
 		// used before its value was set, which was the only outward sign that
 		// "int a = a + 1;" was reading itself.
-		if log := remainingWarnings(ptx.Log); log != "" {
+		if log := triagedWarnings(t, ptx.Log, src, u.Source); log != "" {
 			t.Fatalf("seed %d: NVRTC accepted the generated C but warned about it:\n%s\n\n=== Go ===\n%s\n=== C ===\n%s",
 				seed, log, src, u.Source)
 		}
@@ -95,7 +95,13 @@ func FuzzNVRTCAcceptsTheGeneratedC(f *testing.F) {
 // a branch under a constant false, a comparison the types make constant -- so
 // that a random program is still a legal Go one. NVRTC is right about every
 // one of them, and the author it is describing is a random number generator.
-// Anything not on this list is a finding, which is what caught #549-D.
+//
+// What this list cannot do is tell those apart from a mistranslation that
+// happens to produce the same diagnostic number, and each of these numbers has
+// such a twin: an emitter that drops a use writes the same "#177-D declared
+// but never referenced" as a generator that never wrote one. A number is not
+// the distinction the filter needs. That is what triagedWarnings is for, and
+// why anything not on this list is still a finding on its own.
 var generatorNoise = map[string]string{
 	"#550-D": `"was set but never used": the generator's own "v = v", which is how it keeps Go from refusing an unused variable`,
 	"#177-D": `"declared but never referenced": the same filler, where even the self-assignment was not emitted`,
@@ -107,35 +113,115 @@ var generatorNoise = map[string]string{
 // which is the part generatorNoise is keyed on.
 var warningLine = regexp.MustCompile(`warning (#\d+-\w)`)
 
-// remainingWarnings strips the noise and returns what is left, or "".
+// quotedIdent captures the name NVRTC quotes in a diagnostic -- the "scale" in
+// `variable "scale" was declared but never referenced`. It is what the Go and
+// the C are sliced around before either is shown to a judgment, and it is done
+// here rather than there because finding a quoted word is exact work.
+var quotedIdent = regexp.MustCompile(`"([A-Za-z_][A-Za-z0-9_]*)"`)
+
+// suppressible is NVRTC's boilerplate tail, printed once whenever the log had
+// any warning at all.
+const suppressible = "Remark: The warnings can be suppressed"
+
+// warningBlock is one diagnostic together with the lines NVRTC prints under
+// it, which are the quoted source and a caret. Blocks exist because a filter
+// that dropped only the numbered line would leave those behind and report a
+// caret as a finding.
 //
-// It works over whole lines rather than the whole log because NVRTC follows
-// each diagnostic with the source line and a caret, and a filter that dropped
-// only the numbered line would leave those behind and report an empty finding.
-func remainingWarnings(log string) string {
-	var kept []string
-	skipping := false
+// num is empty for a run of lines belonging to no warning.
+type warningBlock struct {
+	num   string
+	lines []string
+}
+
+// splitWarnings cuts a log into blocks. A warning block runs from its numbered
+// line until a line that is neither indented nor blank, which is where NVRTC
+// starts the next thing it has to say.
+func splitWarnings(log string) []warningBlock {
+	var out []warningBlock
+	var cur *warningBlock
 	for _, line := range strings.Split(log, "\n") {
-		if m := warningLine.FindStringSubmatch(line); m != nil {
-			_, noise := generatorNoise[m[1]]
-			skipping = noise
-			if noise {
+		switch {
+		case warningLine.MatchString(line):
+			out = append(out, warningBlock{num: warningLine.FindStringSubmatch(line)[1], lines: []string{line}})
+			cur = &out[len(out)-1]
+		case cur != nil && cur.num != "" && (strings.HasPrefix(line, " ") || strings.TrimSpace(line) == ""):
+			cur.lines = append(cur.lines, line)
+		default:
+			if cur == nil || cur.num != "" {
+				out = append(out, warningBlock{})
+				cur = &out[len(out)-1]
+			}
+			cur.lines = append(cur.lines, line)
+		}
+	}
+	return out
+}
+
+// noise reports whether the allowlist claims this block says nothing about the
+// translation. A block that is not a numbered warning is never noise.
+func (b warningBlock) noise() bool {
+	if b.num == "" {
+		return false
+	}
+	_, ok := generatorNoise[b.num]
+	return ok
+}
+
+// ident is the name the diagnostic quoted, or "".
+func (b warningBlock) ident() string {
+	if len(b.lines) == 0 {
+		return ""
+	}
+	if m := quotedIdent.FindStringSubmatch(b.lines[0]); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
+func (b warningBlock) String() string { return strings.Join(b.lines, "\n") }
+
+// join renders blocks back into a log, dropping NVRTC's suppressible remark.
+//
+// The remark is boilerplate and carries nothing, but dropping it is not a
+// tidying: it used to be tested for as a prefix of the whole residue, and
+// nvcc prints it after the *first* warning rather than at the end. So a log
+// whose first warning was noise and whose second was a finding filtered down
+// to a residue beginning with the remark, and the finding was discarded with
+// it. #549-D -- the diagnostic that caught both halves of the shadowed
+// initialiser defect -- is exactly the kind that arrives second.
+func join(blocks []warningBlock) string {
+	var kept []string
+	for _, b := range blocks {
+		for _, line := range b.lines {
+			if strings.HasPrefix(strings.TrimSpace(line), suppressible) {
 				continue
 			}
-		} else if skipping && (strings.HasPrefix(line, " ") || strings.TrimSpace(line) == "") {
-			continue // the quoted source and caret belonging to a skipped one
-		} else if strings.TrimSpace(line) != "" {
-			skipping = false
-		}
-		if !skipping {
 			kept = append(kept, line)
 		}
 	}
-	out := strings.TrimSpace(strings.Join(kept, "\n"))
-	// NVRTC ends a log that had any warning at all with this, so a log that is
-	// nothing but the remark is a log that was entirely noise.
-	if strings.HasPrefix(out, "Remark: The warnings can be suppressed") {
-		return ""
+	return strings.TrimSpace(strings.Join(kept, "\n"))
+}
+
+// remainingWarnings strips the noise the allowlist knows and returns what is
+// left, or "".
+func remainingWarnings(log string) string {
+	var kept []warningBlock
+	for _, b := range splitWarnings(log) {
+		if !b.noise() {
+			kept = append(kept, b)
+		}
+	}
+	return join(kept)
+}
+
+// suppressedWarnings is the other half: the blocks the allowlist dropped.
+func suppressedWarnings(log string) []warningBlock {
+	var out []warningBlock
+	for _, b := range splitWarnings(log) {
+		if b.noise() {
+			out = append(out, b)
+		}
 	}
 	return out
 }

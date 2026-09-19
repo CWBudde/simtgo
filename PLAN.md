@@ -289,6 +289,10 @@ The machinery is described in
       caller's slices and that this is deliberate, because there a kernel is
       ordinary Go, where aliasing is defined.
 
+- [x] **The NVRTC oracle's noise filter.** (2026-09-19) — it dropped findings,
+      and its allowlist cannot see a class of defect:
+      [`docs/verification.md`](docs/verification.md#10-nvrtc-warning-triage-opt-in).
+
 - [ ] **Differential fuzzing.** The generator, the corpus and three oracles
       exist, and two of them — the host and NVRTC oracles — now run in
       `.github/workflows/fuzz.yml`. The box stays open because the device

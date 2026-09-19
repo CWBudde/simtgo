@@ -649,3 +649,53 @@ without it, only claimed.
 The synchronous `CopyFrom`/`CopyTo` keep taking a `[]T`, and for the symmetric
 reason — they finish before they return, so there is nothing to outlive. A
 `HostSlice` works there too, through `Slice()`, and is simply faster.
+
+## A judgment may add a finding, and may never remove one
+
+The differential fuzzer's NVRTC layer asks a decision model whether a warning
+it was about to discard describes something the Go source says too. That is a
+model inside a gate, in a repository whose first invariant is
+[refuse, never mistranslate](#refuse-never-mistranslate), so the shape of it
+matters more than the capability.
+
+The line is drawn at direction, not at confidence. The judgment is asked only
+about warnings the allowlist has already decided to suppress, and its only
+available effect is to put one back. It is never asked whether a warning that
+survived should be dropped, never asked whether generated CUDA C is correct,
+and never consulted by `internal/lower`, `simt.Build`, the analyzer or the
+driver. A wrong answer in one direction costs somebody reading a nightly fuzz
+failure; a wrong answer in the other direction would be a mistranslation
+shipping, and that direction is not reachable from here.
+
+Three properties follow from wanting that to stay true.
+
+**It is not a dependency.** `internal/typesafe` is stdlib only, imported from
+`_test.go` files, so `go.mod` still has two entries and
+`CGO_ENABLED=0 go build -tags cuda ./...` is unaffected. The library cannot
+acquire a network call by accident, because the library does not reference
+this at all.
+
+**Unavailable means absent, not failed.** No key, no network, a timeout, a
+malformed answer, a diagnostic that names nothing to slice around — each lands
+on the behaviour without the triage, the way every CUDA test lands on a skip
+without a device. A check nobody can reach must not be able to turn a passing
+build red.
+
+**It is off unless asked for.** `GOCUDA_WARNING_TRIAGE=1` is set in the
+nightly fuzz workflow and nowhere else; `ci.yml` runs on a machine with no
+toolkit, no device and no reason to reach a service.
+
+The alternative was to keep widening the allowlist, and it does not work: the
+allowlist is keyed on the diagnostic number, and the number is
+[the same](emitter-defects.md#the-noise-allowlist-is-keyed-on-something-that-does-not-carry-the-distinction)
+for a dropped use and for generated filler. No entry added to a table keyed on
+the wrong thing recovers information the key never carried.
+
+The two document reviews that share the client — `simt/specprose_test.go` and
+`internal/docreview` — are held to a weaker version of the same rule: they log
+and cannot fail at all. That is a measurement rather than a preference. About
+one correct `SPEC.md` bullet in twenty comes back below the same threshold a
+drifted one does, and the filing check agrees with the record about three
+times in four, so a red result from either would mean "somebody look" while
+looking like "something is wrong". `simt/spec_test.go` remains the gate, and
+it is still exact.

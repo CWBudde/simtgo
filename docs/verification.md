@@ -234,6 +234,80 @@ context's, which was
 [measured](toolchain.md#what-the-host-sees-after-a-__trap) — and `go test`
 giving each package its own binary is the only isolation strong enough.
 
+## 10. NVRTC warning triage, opt-in
+
+Layer 4 treats a clean compile that still warned as a finding, because a
+kernel author should never see a message about code they did not write. That
+only works if the noise can be told from the signal, and the generator writes
+noise on purpose — filler that makes a random program a legal Go one.
+
+The filter that separates them keys on the **diagnostic number**, and the
+number does not carry the distinction. An emitter that drops a use writes
+`#177-D: declared but never referenced`, and so does a generator that never
+wrote one; `#550-D`, `#186-D` and `#128-D` each have the same twin. The
+allowlist suppresses that whole class in silence, and the
+[defect record](emitter-defects.md#the-noise-allowlist-is-keyed-on-something-that-does-not-carry-the-distinction)
+says why no version of the list fixes it.
+
+What does separate them is the Go source the C came from, and asking whether
+the thing the warning names is in it too. That is a judgment about two pieces
+of code, not a parse, so `GOCUDA_WARNING_TRIAGE=1` sends the warning and a
+slice of each source to a small decision model
+(`internal/typesafe`, `simt/triage_cuda_test.go`).
+
+**Only one direction is allowed.** The judgment may put a suppressed warning
+back; it is never asked whether a warning that survived the allowlist should
+be dropped. So the refusals this layer already makes cannot regress, nothing
+here decides that generated CUDA C is correct, and every way the call can fail
+— no key, no network, a timeout, a diagnostic naming nothing to slice around —
+lands on the behaviour without it.
+
+**Measured**, on the corpus in `simt/triage_cuda_test.go` (`triageCases`), every case of
+which carries an allowlisted number so the allowlist scores zero on the
+findings by construction:
+
+|                                      | allowlist alone | with the triage |
+| ------------------------------------ | --------------- | --------------- |
+| suppressed mistranslations recovered | 0 of 3          | 2 of 3          |
+| genuine generator noise re-raised    | 0 of 3          | 0 of 3          |
+
+An earlier run over a wider corpus padded to ~660 lines, which is the size a
+real generated program reaches, recovered 4 of 5 with the same clean noise
+column. Roughly 670 input tokens and 390 ms per warning, and it only fires on
+a warning that was about to be discarded.
+
+**What it cannot see.** A `shadowRename`-shaped defect, where the Go writes
+`d := d + 1` and the C writes `float d = d + 1.0f;`: the two are the same
+construct as text and differ by a scoping rule, and it was wrong on that case
+in every arrangement tried. `#549-D` catches that one by other means, which is
+the argument for this being a second look rather than a replacement.
+
+**Where the context comes from matters more than the question does.** The same
+warning about the same defect was answered at confidence 0.29 over a whole
+generated program and 0.93 over the lines mentioning the identifier the
+diagnostic quoted. Finding that identifier is a regular expression and stays
+one; so does slicing around it. The model is handed only the part that is
+about the warning.
+
+Two things keep this out of the library. It lives in a `_test.go` behind the
+`cuda` tag and an environment variable, wired into the nightly fuzz workflow
+and never `ci.yml`; and `internal/typesafe` is stdlib only, so `go.mod` is
+unchanged and `CGO_ENABLED=0 go build -tags cuda ./...` still holds. Nothing
+in `internal/lower`, `simt.Build` or the driver goes near it, and
+[`decisions.md`](decisions.md#a-judgment-may-add-a-finding-and-may-never-remove-one)
+says why that line is where it is.
+
+Two advisory reviews share the same client and the same opt-in
+(`GOCUDA_DOC_REVIEW=1`), and neither can fail a build:
+`simt/specprose_test.go` reads each `SPEC.md` Refusals sentence against the
+source its test refuses, which is the half of that document
+[layer 2](#2-the-contract-checked-in-both-directions) does not check; and
+`internal/docreview` reads each section of this record against
+[`README.md`](README.md)'s table of which page owns which subject. Their
+measured rates — about one correct bullet in twenty flagged, and about three
+quarters agreement on filing — are recorded at both sites, because a review
+whose error rate is not written down next to it gets believed.
+
 ## The differential fuzzer
 
 `internal/fuzz` generates random programs in the supported subset and compares
