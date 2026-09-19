@@ -29,6 +29,12 @@ type Kernel struct {
 	// answers the same question: what this PTX targets.
 	Arch string
 
+	// BoundsChecks says this kernel was built with WithBoundsChecks, and is
+	// what turns a faulted launch into a TrapError rather than a bare driver
+	// error. It is also the honest signal that this build went through NVRTC:
+	// a bounds-checked kernel never matches a prebuilt.
+	BoundsChecks bool
+
 	// RequiredBlock, SharedBytes, DynSharedWidth and Params are what the
 	// kernel's source demands of a launch; see Unit.
 	RequiredBlock  int
@@ -155,6 +161,7 @@ func Build(dev *cuda.Context, fsys fs.FS, name string, opts ...BuildOption) (*Ke
 		Log:            res.Log,
 		Prebuilt:       res.Prebuilt,
 		Arch:           res.Arch,
+		BoundsChecks:   u.BoundsChecks,
 		RequiredBlock:  u.RequiredBlock,
 		SharedBytes:    u.SharedBytes,
 		DynSharedWidth: u.DynSharedWidth,
@@ -437,5 +444,34 @@ func (k *Kernel) launch(grid, block cuda.Dim3, dynBytes int, args []any) error {
 	if err != nil {
 		return err
 	}
-	return k.fn.LaunchSync(grid, block, dynBytes, flat...)
+	err = k.fn.LaunchSync(grid, block, dynBytes, flat...)
+	if err != nil && k.BoundsChecks {
+		return &TrapError{Kernel: k.Name, Err: err}
+	}
+	return err
 }
+
+// TrapError is a bounds-checked launch that faulted.
+//
+// It exists because the device cannot say anything useful about the fault
+// itself. __trap() carries no payload, so the driver reports an unspecified
+// launch failure and the context does not survive it -- which is
+// indistinguishable, from the error alone, from a genuine illegal address or
+// a kernel that ran out of resources. What the caller does know, and what
+// this says, is that this build asked for the checks, so an index outside its
+// buffer is by far the most likely cause and there is a way to find out which
+// one.
+type TrapError struct {
+	Kernel string
+	Err    error
+}
+
+func (e *TrapError) Error() string {
+	return fmt.Sprintf("simt: %s was built with bounds checks and its launch faulted, "+
+		"which an index outside a slice or a shared tile would do: %v. "+
+		"Run the same kernel under gpu.RunCPU to find out which index -- there a "+
+		"kernel is ordinary Go, and the panic names the index, the length and the thread",
+		e.Kernel, e.Err)
+}
+
+func (e *TrapError) Unwrap() error { return e.Err }

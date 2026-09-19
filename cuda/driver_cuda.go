@@ -3,9 +3,11 @@
 package cuda
 
 import (
+	"errors"
 	"fmt"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 )
 
@@ -87,7 +89,23 @@ type Context struct {
 	modules []*Module          // every module loaded here, in load order
 	cache   map[string]*Module // the subset loaded through LoadPTXCached
 	closed  bool
+
+	// poisoned: see the comment below.
+	poisoned atomic.Pointer[ContextPoisonedError]
 }
+
+// poisoned is the first sticky fault this context saw, set once and never
+// cleared. Every later call reports it instead of the driver's own repetition
+// of the same code with no explanation of where it came from -- the
+// difference between "cuMemAlloc failed: unspecified launch failure" ten
+// calls later and a sentence naming the kernel fault that caused it. See
+// ContextPoisonedError.
+//
+// It is an atomic rather than a field under mu, and that is not a
+// micro-optimisation. bind() reads it, and loadPTXLocked calls bind() with mu
+// already held by LoadPTX or LoadPTXCached; a sync.Mutex is not reentrant, so
+// reading this under mu deadlocks the first Build that ever runs. That was
+// not reasoned out in advance -- it was written that way, and it hung.
 
 // NewContext retains the primary context of the given device ordinal.
 func NewContext(device int) (*Context, error) {
@@ -117,8 +135,56 @@ func NewContext(device int) (*Context, error) {
 	return c, c.bind()
 }
 
+// bind makes this context current on the calling thread, and is the first
+// thing every method here does -- which is what makes it the one place a
+// sticky fault has to be reported from.
 func (c *Context) bind() error {
+	if p := c.poisoned.Load(); p != nil {
+		return p
+	}
 	return check(cuCtxSetCurrent(c.ctx), "cuCtxSetCurrent")
+}
+
+// sticky lists the result codes that leave the CUDA context unusable.
+//
+// The driver's word for these is "sticky": the fault happened on the device
+// with no way to unwind it, so the driver fails every subsequent call in that
+// context with the same code and offers no reset. What was measured here, on
+// a T550 with driver 580, is stronger than that and is the reason
+// ContextPoisonedError says what it says: after a __trap() not only does the
+// poisoned context keep returning 719 -- from Sync, from cuMemAlloc, from
+// cuMemcpyDtoH and from the cuModuleUnload inside Close -- but
+// cuDevicePrimaryCtxRetain fails with 719 as well, so a *replacement* context
+// cannot be made either. The process is finished with CUDA, not just the
+// context.
+//
+// Only 719 was measured. The rest are on the list because the CUDA
+// documentation describes them as sticky, and treating a sticky error as
+// recoverable is the failure this exists to prevent -- the cost of being
+// wrong in the other direction is one misleading sentence, not a hang.
+// See docs/toolchain.md#what-the-host-sees-after-a-trap.
+func sticky(r Result) bool {
+	switch r {
+	case ErrIllegalAddress, ErrLaunchTimeout, ErrIllegalInstruction,
+		ErrMisalignedAddress, ErrLaunchFailed:
+		return true
+	}
+	return false
+}
+
+// fault records a sticky error so that the calls after it say what happened
+// rather than repeating the code, and passes every error through unchanged.
+//
+// Only the first one is kept. A sticky fault makes every subsequent call fail
+// with the same code, so the second is a consequence of the first and saying
+// so is the whole point.
+func (c *Context) fault(err error) error {
+	var e *Error
+	if !errors.As(err, &e) || !sticky(e.Code) {
+		return err
+	}
+	c.poisoned.CompareAndSwap(nil, &ContextPoisonedError{Op: e.Op, Code: e.Code})
+	return err
 }
 
 // Arch reports the virtual architecture of the device, e.g. "compute_75". It
@@ -194,7 +260,7 @@ func (c *Context) Sync() error {
 	if err := c.bind(); err != nil {
 		return err
 	}
-	return check(cuCtxSynchronize(), "cuCtxSynchronize")
+	return c.fault(check(cuCtxSynchronize(), "cuCtxSynchronize"))
 }
 
 // Alloc reserves n bytes of device memory.
@@ -426,8 +492,10 @@ func (f *Function) LaunchSync(grid, block Dim3, sharedBytes int, args ...Arg) er
 		block.X, block.Y, block.Z,
 		uint32(sharedBytes), 0, params, nil), "cuLaunchKernel")
 	if err != nil {
-		return err
+		return f.x.fault(err)
 	}
+	// A kernel fault is asynchronous: measured on a T550, cuLaunchKernel
+	// returns success and the trap surfaces here. Sync records it.
 	return f.x.Sync()
 }
 
