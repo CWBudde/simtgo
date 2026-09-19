@@ -53,6 +53,11 @@ const hostAllocDefault = 0
 // and it must be released with Free -- a dropped HostSlice is a leak of
 // page-locked memory, which is scarcer than ordinary memory because the
 // kernel cannot reclaim it under pressure.
+//
+// For the same reason T must be free of pointers: the collector does not scan
+// this memory, so a pointer written through Slice() keeps nothing alive.
+// NewHostSlice refuses anything that carries one, naming the member it found
+// -- see ElementTypeError and the rule in elemtype.go.
 type HostSlice[T any] struct {
 	p   unsafe.Pointer
 	n   int
@@ -65,8 +70,14 @@ type HostSlice[T any] struct {
 // driver records against the current context, so this goes through call like
 // every other driver entry point here.
 func NewHostSlice[T any](c *Context, n int) (*HostSlice[T], error) {
-	if n < 0 {
-		return nil, &LengthError{Op: "NewHostSlice", Want: 0, Got: n}
+	// Both checks come before the context is touched, so a caller learns
+	// about a type or a length that could never have worked without needing
+	// a device to be told -- and so they can be tested without one.
+	if err := checkElem[T]("NewHostSlice"); err != nil {
+		return nil, err
+	}
+	if err := checkExtent[T]("NewHostSlice", n); err != nil {
+		return nil, err
 	}
 	h := &HostSlice[T]{n: n, ctx: c}
 	if n == 0 {

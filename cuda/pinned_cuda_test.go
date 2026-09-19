@@ -4,6 +4,7 @@ package cuda_test
 
 import (
 	"errors"
+	"math"
 	"runtime"
 	"testing"
 
@@ -221,5 +222,53 @@ func BenchmarkCopy(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+// TestNewHostSliceRefusesPointerBearingTypes is the review finding that
+// prompted the check: page-locked memory is not scanned by the collector, so
+// a []T over it that holds the only reference to a Go object keeps nothing
+// alive.
+//
+// It runs here with a device as well as in the untagged test of checkElem,
+// because what matters to a caller is that NewHostSlice refuses -- and that
+// it refuses before it allocates anything, which is why the error comes back
+// rather than a live HostSlice beside it.
+func TestNewHostSliceRefusesPointerBearingTypes(t *testing.T) {
+	dev := device(t)
+
+	var e *cuda.ElementTypeError
+	h, err := cuda.NewHostSlice[*float32](dev, 16)
+	if !errors.As(err, &e) {
+		t.Fatalf("NewHostSlice[*float32] = %v, want an *cuda.ElementTypeError", err)
+	}
+	if h != nil {
+		t.Error("a refused allocation came back with a HostSlice beside its error")
+	}
+	if _, err := cuda.NewHostSlice[string](dev, 16); !errors.As(err, &e) {
+		t.Errorf("NewHostSlice[string] = %v, want an *cuda.ElementTypeError", err)
+	}
+
+	// The pointer-free case still works, which is the half that would be easy
+	// to break while adding the refusal.
+	ok, err := cuda.NewHostSlice[float32](dev, 16)
+	if err != nil {
+		t.Fatalf("NewHostSlice[float32]: %v", err)
+	}
+	ok.Free()
+}
+
+// TestNewHostSliceRefusesALengthThatWouldWrap covers the second review
+// finding. The byte count is computed in a Go int before it reaches the
+// driver as a size_t, and a product that wrapped to a small positive number
+// would allocate far too little and then hand back a Slice() claiming every
+// element that was asked for.
+func TestNewHostSliceRefusesALengthThatWouldWrap(t *testing.T) {
+	dev := device(t)
+	if _, err := cuda.NewHostSlice[float32](dev, math.MaxInt/4+1); err == nil {
+		t.Error("accepted a length whose byte size overflows an int")
+	}
+	if _, err := cuda.NewHostSlice[float32](dev, -1); err == nil {
+		t.Error("accepted a negative length")
 	}
 }

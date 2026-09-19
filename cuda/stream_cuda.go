@@ -221,6 +221,12 @@ func (s *Stream) Wait(ctx context.Context) error {
 // driver everywhere else -- cannot hold it still for long enough. See
 // docs/decisions.md#an-asynchronous-copy-does-not-take-a-go-slice.
 func (s *Slice[T]) UploadAsync(st *Stream, src *HostSlice[T]) error {
+	if st == nil {
+		return &NilError{Op: "UploadAsync", Arg: "stream"}
+	}
+	if src == nil {
+		return &NilError{Op: "UploadAsync", Arg: "src"}
+	}
 	if src.n != s.n {
 		return &LengthError{Op: "UploadAsync", Want: s.n, Got: src.n}
 	}
@@ -236,6 +242,12 @@ func (s *Slice[T]) UploadAsync(st *Stream, src *HostSlice[T]) error {
 // DownloadAsync queues a copy from this buffer into page-locked host memory.
 // See UploadAsync for why the destination cannot be a []T.
 func (s *Slice[T]) DownloadAsync(st *Stream, dst *HostSlice[T]) error {
+	if st == nil {
+		return &NilError{Op: "DownloadAsync", Arg: "stream"}
+	}
+	if dst == nil {
+		return &NilError{Op: "DownloadAsync", Arg: "dst"}
+	}
 	if dst.n != s.n {
 		return &LengthError{Op: "DownloadAsync", Want: s.n, Got: dst.n}
 	}
@@ -256,6 +268,9 @@ func (s *Slice[T]) DownloadAsync(st *Stream, dst *HostSlice[T]) error {
 // the stream -- or by any other call on the context, since a sticky fault
 // poisons all of it.
 func (f *Function) Launch(s *Stream, grid, block Dim3, sharedBytes int, args ...Arg) error {
+	if s == nil {
+		return &NilError{Op: "Launch", Arg: "stream"}
+	}
 	return f.launch(s.s, grid, block, sharedBytes, args)
 }
 
@@ -292,6 +307,9 @@ func (e *Event) Close() error {
 // Recording the same event twice overwrites the first mark, which is what
 // makes an event reusable across iterations of a loop.
 func (e *Event) Record(s *Stream) error {
+	if s == nil {
+		return &NilError{Op: "Record", Arg: "stream"}
+	}
 	h := s.s
 	return e.x.call("cuEventRecord", func() Result { return cuEventRecord(e.e, h) })
 }
@@ -312,6 +330,12 @@ func (e *Event) Sync() error {
 // float32 of milliseconds, so the returned Duration is exact only to roughly
 // that -- do not read nanoseconds off it.
 func Elapsed(start, end *Event) (time.Duration, error) {
+	if start == nil {
+		return 0, &NilError{Op: "Elapsed", Arg: "start"}
+	}
+	if end == nil {
+		return 0, &NilError{Op: "Elapsed", Arg: "end"}
+	}
 	var ms float32
 	if err := start.x.call("cuEventElapsedTime", func() Result {
 		return cuEventElapsedTime(&ms, start.e, end.e)

@@ -480,6 +480,13 @@ it: they do not make a copy faster, they stop the copies being a queue.
         reach needs the same care as any other shared memory. `README.md`'s
         "not safe to share between goroutines" went with it.
 
+- [ ] Refuse a pointer-bearing element type on `cuda.Slice` too.
+      `NewHostSlice` does, because the collector does not scan page-locked
+      memory; `Slice` has the same hazard by a different route, since
+      `Download` fills a Go-heap `[]T` with device bytes and a pointer-shaped
+      element would hand the collector addresses to follow. `checkElem` in
+      `cuda/elemtype.go` is already the check —
+      [the rule](docs/decisions.md#a-buffer-outside-the-go-heap-holds-no-pointers).
 - [ ] An asynchronous `LaunchShared`. `simt.Kernel.LaunchOn` refuses a kernel
       that declares a dynamic shared tile: a dynamic tile and a stream are two
       new things at once and nothing has needed both yet. Noted rather than

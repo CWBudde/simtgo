@@ -536,3 +536,63 @@ func BenchmarkOverlap(b *testing.B) {
 		}
 	})
 }
+
+// TestNilArgumentsAreRefusedNotPanicked is the third review finding. These
+// entry points dereferenced their *Stream, *HostSlice and *Event without
+// looking, so a caller who dropped an error from NewStream got a panic from
+// inside the package rather than an error naming the argument -- and
+// simt.Kernel.LaunchOn already refused a nil stream properly, which made the
+// pair inconsistent as well as unhelpful.
+func TestNilArgumentsAreRefusedNotPanicked(t *testing.T) {
+	dev := device(t)
+	fn := spinKernel(t, dev)
+	st, err := dev.NewStream()
+	if err != nil {
+		t.Fatalf("NewStream: %v", err)
+	}
+	defer st.Close()
+
+	d := zeroed(t, dev, 64)
+	h, err := cuda.NewHostSlice[float32](dev, 64)
+	if err != nil {
+		t.Fatalf("NewHostSlice: %v", err)
+	}
+	defer h.Free()
+	ev, err := dev.NewEvent()
+	if err != nil {
+		t.Fatalf("NewEvent: %v", err)
+	}
+	defer ev.Close()
+	grid, block := spinGrid(64)
+
+	for _, tc := range []struct {
+		name string
+		call func() error
+		arg  string
+	}{
+		{"UploadAsync/stream", func() error { return d.UploadAsync(nil, h) }, "stream"},
+		{"UploadAsync/src", func() error { return d.UploadAsync(st, nil) }, "src"},
+		{"DownloadAsync/stream", func() error { return d.DownloadAsync(nil, h) }, "stream"},
+		{"DownloadAsync/dst", func() error { return d.DownloadAsync(st, nil) }, "dst"},
+		{"Launch/stream", func() error { return fn.Launch(nil, grid, block, 0, d.Arg(), cuda.ArgI32(64), cuda.ArgI32(1)) }, "stream"},
+		{"Record/stream", func() error { return ev.Record(nil) }, "stream"},
+		{"Elapsed/start", func() error { _, err := cuda.Elapsed(nil, ev); return err }, "start"},
+		{"Elapsed/end", func() error { _, err := cuda.Elapsed(ev, nil); return err }, "end"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var e *cuda.NilError
+			err := tc.call() // must not panic
+			if !errors.As(err, &e) {
+				t.Fatalf("got %v, want a *cuda.NilError", err)
+			}
+			if e.Arg != tc.arg {
+				t.Errorf("Arg = %q, want %q", e.Arg, tc.arg)
+			}
+		})
+	}
+
+	// Nothing above may have left work on the stream.
+	if done, err := st.Done(); err != nil || !done {
+		t.Errorf("a refused call queued something: done=%v err=%v", done, err)
+	}
+}

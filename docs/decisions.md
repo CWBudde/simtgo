@@ -579,6 +579,39 @@ the other two are short machine-written strings — but "not reachable today" is
 how a joined key becomes ambiguous later, and a length prefix is one line.
 That was found by the test rather than by reading the code.
 
+## A buffer outside the Go heap holds no pointers
+
+`cuda.HostSlice` is generic over `any`, which is more than it can honour, so
+`NewHostSlice` refuses an element type carrying a pointer — a pointer, string,
+slice, map, channel, function, interface, or a struct or array containing one.
+
+The memory comes from `cuMemHostAlloc` and the garbage collector does not scan
+it. Store the only reference to a Go object in a `[]T` over that memory and
+nothing keeps the object alive: the collector cannot see the reference, frees
+the target, and a later read through the slice returns a value that is simply
+wrong. No panic, no race-detector report, nothing to grep for — which is what
+makes it worth a refusal rather than a warning in a doc comment.
+
+`runtime.Pinner` does not rescue it. A `Pinner` holds one object for as long
+as the `Pinner` itself lives, and a buffer the caller fills whenever they like
+has no such moment to hang it on. That is the same reason the asynchronous
+copies refuse a `[]T`, one section down, and the two restrictions come from
+one fact about this memory rather than from two rules.
+
+Zero-sized element types are refused by the same check, for a duller reason:
+there is no allocation for the driver to make, so a `Len()` of a thousand
+would have no memory behind it and `Slice()` could not agree with it.
+
+The check is `reflect`, once, at allocation, before the context is touched —
+so it costs nothing against a driver call, and it is tested without a GPU,
+which is why the rule lives in an untagged file.
+
+**`cuda.Slice` is not yet guarded the same way**, and should be: its device
+memory is not scanned either, but `Download` builds a `[]T` on the Go heap and
+fills it with device bytes, so a pointer-bearing `T` would hand the collector
+addresses to follow. It is a pre-existing hazard rather than one this rule
+introduced, and `PLAN.md` carries it.
+
 ## An asynchronous copy does not take a Go slice
 
 `Slice.UploadAsync` and `Slice.DownloadAsync` take a `*cuda.HostSlice` — a

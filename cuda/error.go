@@ -302,3 +302,19 @@ func (e *BusyStreamError) Error() string {
 	return fmt.Sprintf("cuda: %s: a cancelled Wait left work on this stream and the device is still running it; "+
 		"Sync to let it finish, or CloseAbandoned to say the outstanding work is accepted", e.Op)
 }
+
+// NilError reports a required argument that was nil.
+//
+// The alternative is the panic Go would give anyway, one frame further in and
+// naming a field rather than a parameter. These are the package's own handle
+// types -- a *Stream nobody created, a *HostSlice whose allocation failed and
+// whose error was dropped -- and an error saying which argument it was gets
+// the caller back to their own line.
+type NilError struct {
+	// Op is the operation that refused, and Arg the parameter that was nil.
+	Op, Arg string
+}
+
+func (e *NilError) Error() string {
+	return fmt.Sprintf("cuda: %s: %s must not be nil", e.Op, e.Arg)
+}
