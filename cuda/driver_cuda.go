@@ -450,7 +450,11 @@ func Compile(src, name, arch string, opts ...CompileOption) (*PTX, error) {
 	if r := nvrtcCreateProgram(&prog, src, name, 0, nil, nil); r != nvrtcSuccess {
 		return nil, nvrtcError(r, "nvrtcCreateProgram")
 	}
-	defer nvrtcDestroyProgram(&prog)
+	// The result is discarded deliberately. This runs on the way out of a
+	// function that already has its answer -- a PTX or a compile error -- and
+	// failing to free a program handle is neither recoverable here nor
+	// something the caller could act on.
+	defer func() { _ = nvrtcDestroyProgram(&prog) }()
 
 	// The options array is a char** of NUL-terminated strings. purego converts
 	// a string *argument* for us, but this one is an array, so it is built by
@@ -543,7 +547,11 @@ func check(r Result, op string) error {
 	// The driver owns the string it hands back, so it outlives the call and
 	// needs no pinning; goString copies it into Go memory.
 	var str *byte
-	cuGetErrorString(r, &str)
+	// The result is discarded deliberately: cuGetErrorString fails only for a
+	// code it does not recognise, and leaves str nil when it does, which
+	// goString turns into "". The code itself still prints through Error.Code
+	// from the pure-Go name table, so a check here could add nothing.
+	_ = cuGetErrorString(r, &str)
 	return &Error{Op: op, Code: r, Desc: goString(str)}
 }
 

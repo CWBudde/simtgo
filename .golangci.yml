@@ -9,14 +9,13 @@
 # and each with the argument in full -- if a third ever wants to join them, the
 # bar is that same paragraph, not a path.
 #
-# Not covered: the `cuda`-tagged half of the tree. A single run sees one build
-# configuration, and the untagged one is where the transpiler, the analyzer and
-# the CPU emulator live -- the bulk of the code and all of the logic a lint can
-# reason about. The driver and NVRTC bindings behind //go:build cuda are
-# reached by `go vet -tags cuda ./...` in CI instead, which is weaker but real.
-# `just lint-cuda` is the full run for that half, and it is not automated:
-# three of the fourteen's findings were only ever visible there, and two
-# errcheck findings are open there now.
+# A single run sees one build configuration, so this config is applied twice:
+# untagged, where the transpiler, the analyzer and the CPU emulator live, and
+# again with `--build-tags cuda` over the driver and the NVRTC bindings. CI
+# runs both as separate jobs, and `just lint` and `just lint-cuda` are the two
+# halves locally. The second half was unautomated until 2026-09-19 and it was
+# not idle ground: three of the fourteen linters' findings were ever only
+# visible there.
 version: "2"
 
 linters:
