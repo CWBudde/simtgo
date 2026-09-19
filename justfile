@@ -114,6 +114,14 @@ check: build vet test test-race build-nocgo check-generated test-cuda lint fmt-c
 # what makes it a gate at all. A clean run prints nothing: go test discards a
 # passing binary's stdout.
 # compute-sanitizer over every kernel, one tool at a time. Needs a device.
+#
+# It is taken from PATH, and on a machine with both the toolkit's copy and the
+# distribution's nvidia-cuda-toolkit package installed, /usr/bin wins and can
+# be years older than the driver. That failure looks nothing like an install
+# problem -- every package "FAIL"s in milliseconds with "Unable to find
+# injection library libsanitizer-collection.so" -- so if that is what comes
+# back, put the toolkit's own directory first:
+#   PATH=/usr/local/cuda-12.8/compute-sanitizer:$PATH just sanitize-all
 sanitize tool="memcheck":
     GOCUDA_REQUIRE_DEVICE=1 go test -tags cuda -count=1 -timeout 0 \
         -exec "compute-sanitizer --tool={{tool}} --error-exitcode 1 --report-api-errors no --target-processes application-only" \
