@@ -470,6 +470,15 @@ Stated plainly, because the rest of this page is a list of things that are.
   have never been exercised. The goroutine-safety guarantee on `cuda.Context`
   is tested ([the finding](decisions.md#a-driver-call-holds-its-os-thread));
   the multi-device half of that roadmap item is not.
+- **Overlap, on one copy-engine configuration.** The streams work is tested
+  for correctness — an asynchronous round trip, a cancelled wait, event
+  timing, the launch parameters surviving a collection — and those tests hold
+  on any device. The _overlap_ claim does not: `BenchmarkOverlap` shows copies
+  and compute running at once because this T550 reports
+  `ASYNC_ENGINE_COUNT = 3` and `CONCURRENT_KERNELS = 1`. A device with one
+  copy engine would overlap strictly less, and nothing here has run on one.
+  What is measured is in
+  [`toolchain.md`](toolchain.md#streams-overlap-the-copies-with-the-compute).
 - **No GPU in CI.** `.github/workflows/ci.yml` is the non-GPU half. Nothing in
   it runs on a device, so the parity tests are unverified there, the sanitizer
   workflow has no runner, and the fuzzer's device leg does not exist. This is

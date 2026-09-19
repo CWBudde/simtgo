@@ -364,11 +364,75 @@ Dropping the entry is right either way: a file the driver refuses is worthless
 whichever reason it refused it for. Every other way the cache can fail is a
 miss, because a cache is an optimisation and no build may sink on one.
 
+## Page-locked host memory buys little bandwidth here, and is still required
+
+The expectation going in was the textbook one: a copy out of page-locked host
+memory should run at roughly twice the speed of one out of pageable memory,
+because the driver no longer has to stage through a bounce buffer of its own.
+On this machine it does not.
+
+`BenchmarkCopy` in `cuda/pinned_cuda_test.go` copies 32 MiB with the same
+synchronous driver call, differing only in where the host buffer came from.
+Minimum of 20 runs of 30 iterations, and the median was within 0.5% of the
+minimum in every case, so this is not a noise artifact:
+
+| copy                   | pageable | page-locked | gain     |
+| ---------------------- | -------- | ----------- | -------- |
+| `cuMemcpyHtoD`, 32 MiB | 5.888 ms | 5.611 ms    | **4.7%** |
+| `cuMemcpyDtoH`, 32 MiB | 6.830 ms | 6.435 ms    | **5.8%** |
+
+About 5.7 GB/s pageable and 6.0 GB/s page-locked, against roughly 7.9 GB/s of
+theoretical PCIe 4.0 x4. The staging copy the driver does for pageable memory
+is evidently pipelined against the transfer well enough that it is nearly free
+here; the textbook factor of two is older than that optimisation.
+
+**So bandwidth is not the reason `HostSlice` exists.** The reason is the next
+section: an asynchronous copy is not available at all without it, both because
+`cuMemcpyHtoDAsync` falls back to a synchronous transfer for pageable memory
+and because Go's `runtime.Pinner` cannot hold a slice still past the end of
+the call. That argument is set out in
+[`decisions.md`](decisions.md#an-asynchronous-copy-does-not-take-a-go-slice).
+Five per cent would not have justified a new type. Overlap does.
+
+## Streams overlap the copies with the compute
+
+`BenchmarkOverlap` in `cuda/stream_cuda_test.go` moves 64 MiB up and 64 MiB
+back in sixteen 4 MiB chunks, running a tunable spin kernel over each. Both
+cases use page-locked memory and do identical work; the only difference is
+whether each step waits for the one before it:
+
+| arrangement                                 | min      | median   |
+| ------------------------------------------- | -------- | -------- |
+| serial: copy up, compute, copy back, repeat | 52.09 ms | 52.34 ms |
+| four streams, one wait at the end           | 31.38 ms | 31.75 ms |
+
+**1.65× on the same work**, and the 20.6 ms saved is close to what the
+serial arrangement spends copying — which is the shape to expect when the
+copies hide behind the compute rather than the other way round.
+
+This device can do it: it reports `ASYNC_ENGINE_COUNT = 3` and
+`CONCURRENT_KERNELS = 1`, so host-to-device, device-to-host and compute can all
+be in flight at once. **A device with one copy engine would overlap strictly
+less**, and nothing here has run on one — see
+[`verification.md`](verification.md#what-is-not-verified). The ratio is the
+part to carry away, and only for hardware that answers those two attributes
+the same way.
+
+Worth stating for scale: this is the first change in the repository to attack
+the number that opens Phase 4 — 1.0 ms in the kernel against 9.5 ms moving
+data. It does not make the copies faster. It makes them stop being a queue.
+
 ## Where these numbers come from
 
 NVIDIA T550 Laptop (`sm_75`, 4 GB), CUDA 12.8 NVRTC, driver 580, go1.26.8,
-Linux, 11-core CPU. The NVRTC-only measurements were made with a 12.9 toolkit on
-a machine with no device, where noted.
+Linux, 12th Gen Core i7-1255U. The NVRTC-only measurements were made with a
+12.9 toolkit on a machine with no device, where noted.
+
+The copy and overlap numbers above were taken at a load average of about 3 on
+that CPU, which is this machine's floor rather than a quiet one. They are
+quoted as the minimum of 20 runs for that reason, and the median sat within
+0.5% of the minimum in every case, so the contention did not reach them. The
+disk-cache numbers further up were not so lucky and say so.
 
 One machine is one machine — see
 [`verification.md`](verification.md#what-is-not-verified).
