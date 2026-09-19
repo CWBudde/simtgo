@@ -504,3 +504,49 @@ is now written on `cuda.Context` rather than left to be inferred.
 Multi-GPU is untested, not unsupported: `NewContext` takes a device ordinal and
 the poison table is already keyed by one, but this machine has one GPU, so
 nothing here has exercised two contexts on two devices.
+
+## The PTX cache is on by default, and only its location is an environment variable
+
+The persistent cache in `internal/jit/diskcache.go` is on unless a caller says
+`simt.WithoutDiskCache()`. An opt-in cache does not do the thing the roadmap
+asked for — taking NVRTC out of process start — because the programs that
+would most benefit are the ones that never learn the option exists.
+
+`GOCUDA_PTX_CACHE` moves the directory, and that is not the environment
+variable this file
+[rejected for bounds checks](#bounds-checks-are-a-build-option-and-the-checks-are-their-own-marker).
+The objection there was that a process-wide switch expressed in one corner of a
+program silently changes what an unrelated library _builds_: different bytes,
+different behaviour, and nothing at the call site saying so. A location says
+where bytes are kept and never what is compiled, so no program's output changes
+because another part of it set the variable. `internal/fuzz/hostrun` already
+does the same thing one layer down with `GOCUDA_HOSTRUN_CACHE`.
+
+Whether the cache is consulted at all stays a build option, for exactly the
+rejected reason: that one _is_ about whether a compiler runs.
+
+### Not the same thing as `WithCacheDir`
+
+Two caches, deliberately separate, and conflating them was the first design.
+
+|           | `WithCacheDir` / `.gocuda-cache`  | the PTX cache                       |
+| --------- | --------------------------------- | ----------------------------------- |
+| For       | a human to read                   | the next process                    |
+| Named     | after the kernel                  | after a hash of what produced it    |
+| Holds     | the `.cu` and the `.ptx` that ran | PTX only                            |
+| Read back | never                             | that is the point                   |
+| Keyed on  | nothing — it overwrites           | source, architecture, NVRTC version |
+
+A dump named `FIR-a1b2c3d4e5f6.cu` is the right thing for reading and the
+wrong thing to load from: the 12 hex digits in that name are a convenience,
+not collision resistance, which is stated where they are produced. Reusing it
+would have meant hanging a module lookup on a truncated hash.
+
+### The key is length-prefixed, and a test says why
+
+`sha256("a\0b" + "\0" + "c" + "\0" + "d")` and `sha256("a" + "\0" + "b\0c" +
+"\0" + "d")` are the same digest for two different triples. A NUL is not
+reachable in any of the three terms today — the source is generated CUDA C,
+the other two are short machine-written strings — but "not reachable today" is
+how a joined key becomes ambiguous later, and a length prefix is one line.
+That was found by the test rather than by reading the code.

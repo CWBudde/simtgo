@@ -40,6 +40,11 @@ type Request struct {
 	// "// gocuda: fastmath" marker, so the source the key already hashes
 	// differs, and the two builds cannot collide in the module cache.
 	FastMath bool
+
+	// NoDiskCache skips the persistent PTX cache, compiling with NVRTC and
+	// storing nothing. See diskcache.go for what that cache is and why it is
+	// not the same thing as CacheDir.
+	NoDiskCache bool
 }
 
 // Result is a compiled and loaded kernel.
@@ -99,6 +104,18 @@ var (
 // Close.
 func Load(ctx *cuda.Context, req Request) (*Result, error) {
 	res, err := load(ctx, cacheKey(ctx, req), req)
+
+	// Cached PTX the driver will not accept. The file was written by this
+	// machine's own NVRTC, so the usual cause is that the driver changed
+	// under it -- a downgrade leaves an ISA version it no longer reads.
+	// Dropping the entry matters as much as the retry: without it every
+	// process pays the failed load and the recompile again.
+	if err != nil && req.PTX == nil && !req.NoDiskCache && rejectedPTX(err) {
+		forgetDisk(diskKey(req.Src, ctx.Arch(), nvrtcTag()))
+		req.NoDiskCache = true
+		return load(ctx, cacheKey(ctx, req), req)
+	}
+
 	if err != nil && req.PTX != nil && rejectedPTX(err) {
 		// Prebuilt PTX was produced by the NVRTC of whoever ran the generator,
 		// and it records that NVRTC's ISA version in its .version directive --
@@ -166,6 +183,22 @@ func load(ctx *cuda.Context, key string, req Request) (*Result, error) {
 			remember(key, artifacts{ptx: req.PTX, prebuilt: true, arch: req.PTXArch})
 			return req.PTX, nil
 		}
+		// The persistent cache sits here, between the artifact a generator
+		// produced and the compiler: a hit is indistinguishable from what
+		// NVRTC would have returned, because it is what NVRTC did return.
+		// The log is not stored with it -- it is a compiler's warnings about
+		// a source that compiled, and remembering them across processes would
+		// mean a second run reporting warnings nothing emitted this time.
+		var disk string
+		if !req.NoDiskCache {
+			disk = diskKey(req.Src, ctx.Arch(), nvrtcTag())
+			if ptx := readDisk(disk); ptx != nil {
+				dump(req.CacheDir, req.Name, short, req.Src, ptx)
+				remember(key, artifacts{ptx: ptx, arch: ctx.Arch()})
+				return ptx, nil
+			}
+		}
+
 		var opts []cuda.CompileOption
 		if req.FastMath {
 			opts = append(opts, cuda.WithFastMath())
@@ -179,6 +212,9 @@ func load(ctx *cuda.Context, key string, req Request) (*Result, error) {
 			dump(req.CacheDir, req.Name, short, req.Src, nil)
 			compileErr = fmt.Errorf("compiling %s: %w", req.Name, err)
 			return nil, compileErr
+		}
+		if disk != "" {
+			writeDisk(disk, p.Bytes)
 		}
 		dump(req.CacheDir, req.Name, short, req.Src, p.Bytes)
 		remember(key, artifacts{ptx: p.Bytes, log: p.Log, arch: ctx.Arch()})

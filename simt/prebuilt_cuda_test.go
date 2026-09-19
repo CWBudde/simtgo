@@ -248,18 +248,25 @@ func TestBuildPrebuiltNewerArch(t *testing.T) {
 	}
 }
 
-// BenchmarkBuild measures what the ahead-of-time path actually buys.
+// BenchmarkBuild measures what each of the three paths to a loaded kernel
+// actually buys: NVRTC, the on-disk PTX cache, and a registered artifact.
 //
 // Every iteration builds in a context of its own, because the module cache is
 // per context: reusing one would make every iteration after the first a map
-// lookup, and both numbers would converge on the cost of nothing happening.
-// The price is that the context setup is in both numbers, which is the same
-// constant on both sides.
+// lookup, and every number would converge on the cost of nothing happening.
+// The price is that the context setup is in all of them, which is the same
+// constant throughout -- and is measured on its own below so the difference
+// can be read rather than taken on trust.
 func BenchmarkBuild(b *testing.B) {
 	if !cuda.Available() {
 		b.Skip("no CUDA device available")
 	}
 	swapRegistry(b)
+	// A cache of this benchmark's own, so it measures neither a warm
+	// developer cache nor the cost of writing into a real one -- and so that
+	// the "nvrtc" case below is NVRTC, which it stopped being the moment the
+	// disk cache went in and started answering the second iteration.
+	b.Setenv("GOCUDA_PTX_CACHE", b.TempDir())
 	// One context is held open for the whole benchmark. Releasing the last
 	// reference to a device's primary context destroys it, and retaining it
 	// again costs upwards of 150 ms -- a hundred times what is being measured
@@ -304,7 +311,22 @@ func BenchmarkBuild(b *testing.B) {
 			dev.Close()
 		}
 	})
-	b.Run("nvrtc", func(b *testing.B) { run(b, WithoutPrebuilt()) })
+	b.Run("nvrtc", func(b *testing.B) { run(b, WithoutPrebuilt(), WithoutDiskCache()) })
+	b.Run("disk cache", func(b *testing.B) {
+		// Warmed once outside the loop, in a context of its own so the build
+		// callback actually runs: the file is what every iteration then
+		// reads, which is what a second process start looks like.
+		warm, err := cuda.NewContext(0)
+		if err != nil {
+			b.Fatalf("NewContext: %v", err)
+		}
+		_, err = Build(warm, kernelSources, "FIR", WithoutPrebuilt(), WithCacheDir(""))
+		warm.Close()
+		if err != nil {
+			b.Fatalf("Build (warming the cache): %v", err)
+		}
+		run(b, WithoutPrebuilt())
+	})
 	b.Run("prebuilt", func(b *testing.B) {
 		registerFIR(b, u, ptx, arch)
 		run(b)
