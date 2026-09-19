@@ -453,6 +453,21 @@ var refusals = []refusal{{
 	body: "func K(ctx gpu.Ctx, x []float32) { x_len := int32(3)\nif ctx.GlobalID() < len(x) { x[0] = float32(x_len) } }",
 	want: "x_len is the length generated for slice parameter x",
 }, {
+	// gocuda_bounds is the range check WithBoundsChecks emits at file scope,
+	// and it is a legal Go identifier, so a local of that name shadows the
+	// helper and NVRTC rejects the call. Refused for every build rather than
+	// only the checked one: a build option that moves the subset would make
+	// `gocuda vet` -- which has no build options -- wrong about what builds.
+	name: "a local in the emitter's namespace",
+	body: "func K(ctx gpu.Ctx, x []float32) { gocuda_bounds := int32(3)\nx[0] = float32(gocuda_bounds) }",
+	want: "gocuda_bounds is reserved: names beginning with gocuda_ belong to the emitter",
+}, {
+	// The same name one scope out, where it is a redefinition rather than a
+	// shadow.
+	name: "a device function in the emitter's namespace",
+	body: "func gocuda_bounds(x float32) float32 { return x / 2 }\n\nfunc K(ctx gpu.Ctx, a []float32) { a[0] = gocuda_bounds(a[1]) }",
+	want: "gocuda_bounds is reserved: names beginning with gocuda_ belong to the emitter",
+}, {
 	// cname spells a C++ keyword with a trailing underscore, so a variable
 	// already spelled that way becomes the same C identifier as the
 	// keyword-named one. Both then read whichever was declared last.

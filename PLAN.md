@@ -353,20 +353,51 @@ The machinery is described in
         remaining item.
 
 - [ ] **Debug mode** — the closest thing to a panic the device can offer, behind
-      a flag.
-  - [ ] Bounds checks on every slice and shared-tile index, behind a
-        `simt.Build` option so the released path pays nothing.
-  - [ ] Device `printf` in the `gpu` vocabulary. First answer the question the
-        item rests on: does NVRTC declare it with no header? Measure it the way
-        every other built-in in
-        [`docs/toolchain.md`](docs/toolchain.md#what-nvrtc-declares-with-no-header-included)
-        was measured.
-  - [ ] `__trap()`, and what the host sees afterwards — the context is unusable,
+      a flag. Three of four; `simt.WithBoundsChecks()` is the flag, and the
+      release path is byte for byte what it was.
+      [Why a build option and not a directive](docs/decisions.md#bounds-checks-are-a-build-option-and-the-checks-are-their-own-marker),
+      [what the layer sees and cannot see](docs/verification.md#9-bounds-checks-on-the-device-behind-a-flag).
+  - [x] Bounds checks on every slice and shared-tile index, behind a
+        `simt.Build` option so the released path pays nothing. (2026-09-19) —
+        every subscript whose bound the emitter can name, through one
+        `__device__` helper taking a `long long` so all four index types
+        promote into it without a second overload. Two omissions are argued at
+        the site: a `range` loop's induction variable is bounded by the same
+        length the check would use, and a constant index into a fixed-size
+        array has already been refused by `go/types`. A constant index into a
+        slice is checked, a shared tile included — `tile[300]` on a
+        64-element tile compiles in Go. The emulator half needed no code: a
+        kernel under `RunCPU` is ordinary Go, and `gc`'s own check names the
+        index, the length and the thread.
+  - [ ] Device `printf` in the `gpu` vocabulary. (2026-09-19) — partial: the
+        question the item rests on is answered, and the answer is **yes**.
+        NVRTC declares `printf` with no header, the variadic form resolves,
+        and `%f` with a runtime argument compiles
+        ([the measurement](docs/toolchain.md#what-nvrtc-declares-with-no-header-included)).
+        So this is no longer a capability question and is now a design one,
+        which is where it stops: a fixed-arity `Ctx.PrintF32`/`PrintI32` with
+        the tag folded into the format string at lowering would be a subset
+        extension — a `gpu` entry, its hand-written twin in `gpupkg.go`, a new
+        refusal for a non-constant tag, and a `SPEC.md` line — and whether a
+        per-thread printf is wanted at all, given 256 interleaved lines a
+        block and output that only appears at a synchronisation point, is not
+        a measurement. Still unmeasured: whether a `printf` before a
+        `__trap()` reaches stdout at all.
+  - [x] `__trap()`, and what the host sees afterwards — the context is unusable,
         so say so in the error rather than letting the next call fail obscurely.
-  - [ ] The interaction with `SourceHash` and the prebuilt registry, the same
+        (2026-09-19) — `cuda.ContextPoisonedError` from every later call, and
+        `simt.TrapError` naming the kernel and pointing at `gpu.RunCPU`, which
+        is the only place the index can still be had. The measurement was
+        worse than the documentation implies and changed what the error says:
+        a fresh context cannot be retained either, so the **process** is
+        finished with CUDA, not just the context.
+        [What was measured](docs/toolchain.md#what-the-host-sees-after-a-__trap).
+  - [x] The interaction with `SourceHash` and the prebuilt registry, the same
         problem fast math had, and solved the same way: a debug build must not
         find a release artifact, so the flag belongs in the generated source
-        where `SourceHash` already sees it.
+        where `SourceHash` already sees it. (2026-09-19) — the checks are in
+        those bytes already; the marker line covers the kernel that indexes
+        nothing, whose two builds would otherwise be identical.
 
 ## Phase 4 — Host runtime for real workloads (M)
 
@@ -442,7 +473,7 @@ reductions and 2-D tiling are a rewrite of it rather than an extension.
 - [ ] Device-resident tensors with explicit materialisation points (Phase 4).
 - [ ] Generic element types; richer shape diagnostics.
 
-## Phase 7 — Release engineering (S–M) — 4 of 9
+## Phase 7 — Release engineering (S–M) — 5 of 9
 
 - [x] LICENSE and the redistribution position. (2026-09-18) — MIT; `libnvrtc` is
       `dlopen`'d and never shipped.
@@ -464,10 +495,12 @@ reductions and 2-D tiling are a rewrite of it rather than an extension.
       nothing else lints. It mirrors the workflow rather than being called by
       it, so no runner needs `just`. `sanitize` ships unexercised: no device
       here.
-- [ ] Lint the `cuda`-tagged half in CI. Three of the seven linters' findings
-      were visible only under `--build-tags cuda`, and two `errcheck` findings
-      in `cuda/driver_cuda.go` are open there now. A second `golangci-lint` job
-      with the tag would close the gap the config's own header admits.
+- [x] Lint the `cuda`-tagged half in CI. (2026-09-19) — a second
+      `golangci-lint` job with `--build-tags cuda`, rather than a
+      `run.build-tags` key, so the untagged run stays exactly what it was and
+      the two configurations fail separately and say which one did. The two
+      `errcheck` findings that blocked it were both deliberate discards and
+      became explicit ones with the reason at the site.
 - [ ] Semantic versioning, a v1 API freeze and a deprecation policy.
 - [ ] Godoc with runnable `Example` functions; `SPEC.md` as the reference.
 - [ ] CHANGELOG and release automation.
@@ -510,7 +543,7 @@ Naming these keeps the scope honest:
 | 4 Host runtime        | M    | 0 of 8   | 1.3        | streams change ownership semantics; the context bug is live   |
 | 5 Performance         | M    | 0 of 4   | 2, 4       | may expose NVRTC as the ceiling → revisit the PTX decision    |
 | 6 Tile maturity       | L    | 0 of 7   | 2, 4       | reductions and 2-D tiling are a rewrite of the code generator |
-| 7 Release             | S–M  | 4 of 9   | all        | —                                                             |
+| 7 Release             | S–M  | 5 of 9   | all        | —                                                             |
 
 The critical path is **1.4 → 3 → 5**. Phases 4 and 6 can run in parallel; 1.2's
 Windows leg is independent of everything else.

@@ -69,6 +69,13 @@ that launched nothing is green and means nothing. And note that a clean run
 prints **nothing**: `go test` discards a passing binary's stdout, so the
 `ERROR SUMMARY` lines show up only on a failure, or under `-v`.
 
+**`internal/faulttest` is deliberately not in that package list and must not be
+added to it.** It traps on purpose, to pin what the host sees afterwards, and
+the sanitizer reads a deliberate trap as a finding — `--error-exitcode 1`
+would turn a passing test into a failed sweep. It is a package of its own for
+a second reason: a trap ends the whole process's use of CUDA and not merely
+the context's, so it needs a test binary nobody else is sharing.
+
 There is a `justfile` carrying all of the above under shorter names, and
 `just check` is the whole non-GPU sequence in CI's order. It mirrors the
 workflow rather than being called by it, so the workflow stays authoritative:

@@ -79,6 +79,28 @@ jobs:
           # failure that has nothing to do with the code being linted.
           install-mode: goinstall
 
+  # A single golangci-lint run sees one build configuration, and the job above
+  # sees the untagged one. The driver and the NVRTC bindings live behind
+  # //go:build cuda and were reached only by `go vet -tags cuda`, which is
+  # weaker: three of the fourteen linters' findings were ever only visible
+  # here, and the two errcheck findings this job was blocked on are the most
+  # recent pair. A second job rather than a run.build-tags key in the config,
+  # so the untagged run stays exactly what it was and the two configurations
+  # fail separately and say which one did.
+  lint-cuda:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.2
+          install-mode: goinstall
+          args: --build-tags cuda
+
   format:
     runs-on: ubuntu-latest
     steps:

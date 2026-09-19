@@ -486,6 +486,14 @@ Two things this does **not** do:
 
 - parameter collides with a generated length — diagnostic: `x_len is the length generated for slice parameter x`
 - a variable spelled like an escaped keyword — diagnostic: `int is a C++ keyword and is emitted as int_`
+- a name in the emitter's own namespace — diagnostic: `gocuda_bounds is reserved: names beginning with gocuda_ belong to the emitter`
+
+  `gocuda_` is reserved throughout: as a variable, a parameter, a function or a
+  struct type. The emitter writes its own file-scope names under that prefix —
+  `gocuda_pad0` for a struct's padding, `gocuda_bounds` for the range check
+  `WithBoundsChecks` emits — and a Go declaration spelling one of them lands on
+  the same C symbol. The rule does not depend on the build options, so a kernel
+  that `gocuda vet` accepts is one every build accepts.
 
 ### Aliasing
 

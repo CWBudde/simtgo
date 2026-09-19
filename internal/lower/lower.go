@@ -18,6 +18,7 @@ import (
 	"go/types"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -57,7 +58,32 @@ type Unit struct {
 	// can be mistaken for this one. The bool exists because reading the flag
 	// back out of the source would be parsing our own output.
 	FastMath bool
+	// BoundsChecks says the unit was lowered with WithBoundsChecks, so every
+	// subscript whose bound the emitter could name is range-checked and traps
+	// on a violation. Like FastMath it is recorded in Source as well, so
+	// SourceHash differs and a debug build cannot find a release artifact --
+	// but unlike FastMath the checks themselves are usually already in those
+	// bytes, and the marker is what covers the kernel that indexes nothing.
+	BoundsChecks bool
 }
+
+// An Option is a build-time choice about what to emit.
+//
+// No Option refuses a program the default accepts. That is the rule the
+// analyzer depends on: analysis/simtcheck passes none, so the subset it
+// reports on is the subset a build accepts, by construction rather than by
+// agreement. An Option may add code; it may never add a Diagnostic.
+type Option func(*options)
+
+type options struct{ boundsChecks bool }
+
+// WithBoundsChecks emits a range check at every slice, array and shared-tile
+// subscript whose bound the emitter can name, trapping on a violation.
+//
+// Why this is a build option rather than a source directive, and what the
+// device can and cannot tell you afterwards:
+// docs/decisions.md#bounds-checks-are-a-build-option-and-the-checks-are-their-own-marker.
+func WithBoundsChecks() Option { return func(o *options) { o.boundsChecks = true } }
 
 // A Param is one of a kernel's parameters, as the generated C declares it.
 //
@@ -99,8 +125,12 @@ type Diagnostic struct {
 //
 // A Unit is returned only when nothing was refused; a kernel that produced any
 // diagnostic yields (nil, diags), so half-lowered CUDA can never escape.
-func Kernel(fset *token.FileSet, info *types.Info, files []*ast.File, fd *ast.FuncDecl) (*Unit, []Diagnostic) {
-	t := &transpiler{fset: fset, info: info, files: files, lens: map[types.Object]string{}, sizes: goSizes()}
+func Kernel(fset *token.FileSet, info *types.Info, files []*ast.File, fd *ast.FuncDecl, opts ...Option) (*Unit, []Diagnostic) {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
+	t := &transpiler{fset: fset, info: info, files: files, lens: map[types.Object]string{}, sizes: goSizes(), boundsChecks: o.boundsChecks}
 	t.kernel(fd)
 	if len(t.diags) > 0 {
 		return nil, tidy(t.diags)
@@ -115,6 +145,7 @@ func Kernel(fset *token.FileSet, info *types.Info, files []*ast.File, fd *ast.Fu
 		Params:         t.paramInfo,
 		SourceHash:     SourceHash(src),
 		FastMath:       t.fastMath,
+		BoundsChecks:   t.boundsChecks,
 	}, nil
 }
 
@@ -169,6 +200,12 @@ type transpiler struct {
 	// refuse -- so its whole job is to reach Unit.FastMath and the marker line
 	// in the generated source.
 	fastMath bool
+	// boundsChecks is set from WithBoundsChecks and gates every call to
+	// checked. usedBounds records whether any of those calls actually emitted
+	// one, which is what decides whether the helper is defined: a kernel that
+	// indexes nothing must not carry a __device__ function nothing calls.
+	boundsChecks bool
+	usedBounds   bool
 	// lens maps a slice-valued object to the C expression giving its length.
 	// The key is the checked object rather than its name, so a declaration
 	// shadowing a slice parameter cannot be mistaken for it.
@@ -374,6 +411,7 @@ func (t *transpiler) kernel(fd *ast.FuncDecl) {
 		}
 	}
 	t.kernelName = fd.Name.Name
+	t.checkReserved(fd.Name.Name, fd.Name.Pos())
 	if fd.Recv != nil {
 		t.fail(fd.Pos(), "a kernel must be a plain function, not a method")
 		return
@@ -451,8 +489,25 @@ func (t *transpiler) kernel(fd *ast.FuncDecl) {
 		// distinction for free.
 		t.line("// gocuda: fastmath")
 	}
+	if t.boundsChecks {
+		// Unlike the fast-math marker this one is redundant in every kernel
+		// that indexes anything: the checks are themselves in the bytes the
+		// hash covers. It earns its place on the degenerate case -- a kernel
+		// with no subscript at all emits identical C either way, and without
+		// the marker a debug build of it would find and load the release
+		// prebuilt. That load would in fact be correct, the same bytes having
+		// been compiled the same way, so this is not a correctness fix; it is
+		// what lets "a debug build never finds a release artifact" be true
+		// with no case split, and what lets someone reading a dumped .cu see
+		// which mode produced it.
+		t.line("// gocuda: bounds")
+	}
 	for _, def := range t.structDefs {
 		t.buf.WriteString(def)
+		t.line("")
+	}
+	if t.usedBounds {
+		t.buf.WriteString(boundsHelperDef)
 		t.line("")
 	}
 	for _, proto := range t.deviceProtos {
@@ -558,6 +613,7 @@ func (t *transpiler) deviceFunc(pos token.Pos, obj *types.Func) (string, bool) {
 	}
 
 	name := cname(obj.Name())
+	t.checkReserved(name, fd.Name.Pos())
 	// Reserve the name before the body is lowered: a helper that reaches
 	// itself has to find it taken, which is what the cycle check reads.
 	if t.lowering == nil {
@@ -726,6 +782,36 @@ func (t *transpiler) deviceParams(fd *ast.FuncDecl) []param {
 // are what share a C scope with its generated lengths. The kernel additionally
 // records sigNames, because a dynamically sized tile generates a length while
 // the body is lowered, long after this runs.
+// reservedPrefix is the emitter's own namespace in the generated C.
+//
+// Two names come from here rather than from the Go source: gocuda_padN, the
+// explicit padding a struct's holes are written as, and gocuda_bounds, the
+// range check WithBoundsChecks calls. Both are fixed spellings, both sit at
+// file scope, and both are perfectly ordinary Go identifiers -- so a kernel
+// package can declare them, and then the emitter's definition and the
+// author's are the same C symbol. A local named gocuda_bounds shadows the
+// helper and NVRTC rejects the call it cannot resolve; a device function of
+// that name redefines it outright.
+//
+// Neither is a mistranslation, and that is the only reason this is a refusal
+// and not an emitter defect: both fail loudly at compile time. What they fail
+// with is a message about generated code the author never wrote, which is not
+// a diagnostic anybody can act on.
+//
+// The refusal is unconditional rather than raised only when the checks are
+// on. A build option must not move the subset: a kernel that `gocuda vet`
+// accepts and simt.Build(WithBoundsChecks) then refuses would make the
+// analyzer a liar, and the analyzer has no build options to be told about.
+const reservedPrefix = "gocuda_"
+
+// checkReserved refuses one name that lands in the emitter's own namespace.
+func (t *transpiler) checkReserved(name string, pos token.Pos) {
+	if !strings.HasPrefix(name, reservedPrefix) {
+		return
+	}
+	t.fail(pos, "%s is reserved: names beginning with %s belong to the emitter, which writes its own into the same C scope; rename it", name, reservedPrefix)
+}
+
 func (t *transpiler) checkGeneratedNames(fd *ast.FuncDecl, params []param) {
 	generated := make(map[string]string, len(params))
 	for _, p := range params {
@@ -757,6 +843,12 @@ func (t *transpiler) checkGeneratedNames(fd *ast.FuncDecl, params []param) {
 		if pos, taken := declared[escaped]; taken {
 			t.fail(pos, "%s is a C++ keyword and is emitted as %s, which is also declared here, so in CUDA C the two would be one variable; rename one of them", name, escaped)
 		}
+	}
+	// The same walk answers the reserved-prefix question, since declared is
+	// every variable the function brings into a C scope the emitter also
+	// writes into.
+	for _, name := range spellings {
+		t.checkReserved(name, declared[name])
 	}
 	if t.inDevice {
 		// A device function has its own parameters and no dynamic tile, so
@@ -1000,4 +1092,98 @@ func narrowCType(typ types.Type) (string, bool) {
 		return "unsigned short", true
 	}
 	return "", false
+}
+
+// boundsHelper is the name of the range check WithBoundsChecks emits, and
+// boundsHelperDef is its definition.
+//
+// Four things about this shape are deliberate.
+//
+// It is a function rather than a macro or a conditional expression, because
+// the index may have side effects: a[f(i)] is in the subset, and any form that
+// names the index twice would call f twice. One parameter, one evaluation.
+//
+// The index is long long rather than int. Go allows any integer type as an
+// index and the subset allows four of them, and one signed 64-bit parameter
+// takes all four by promotion with neither a narrowing nor a second overload.
+// It also removes a whole warning class: written inline, `i < 0` on an
+// unsigned index is a "comparison is always false" warning, and NVRTC's
+// warnings reach the caller through Kernel.Log. Inside the helper the
+// parameter is signed, so nothing warns. The honest limit is that a uint64
+// index above 2^63 arrives negative and traps -- which is the right answer for
+// an index no allocation can hold, and sits under the int-narrowing
+// infidelity that is already documented.
+//
+// The bound is long long too, so that a length which is a C int and one which
+// is an array's extent compare the same way, with no implementation-defined
+// conversion in between.
+//
+// __trap() and __forceinline__ are both used because both were measured
+// declared with no header rather than assumed; see
+// docs/toolchain.md#what-nvrtc-declares-with-no-header-included.
+const boundsHelper = "gocuda_bounds"
+
+const boundsHelperDef = `__device__ __forceinline__ long long gocuda_bounds(long long i, long long n)
+{
+	if (i < 0 || i >= n)
+	{
+		__trap();
+	}
+	return i;
+}
+`
+
+// boundOf reports the C expression giving the number of elements in x, or ""
+// when the emitter cannot name one.
+//
+// It never fails. A build option must not change which programs are accepted,
+// so an indexable whose bound is unknown is emitted unchecked rather than
+// refused -- which is why this exists at all instead of calling lengthOf, the
+// one that reports a diagnostic. Through Transpile the empty case is
+// unreachable, every slice in the subset being a parameter with a generated
+// length; internal/lower is also driven by the analyzer over packages this
+// emitter did not construct, which is where it earns its keep.
+func (t *transpiler) boundOf(x ast.Expr) string {
+	if typ := t.typeOf(x); typ != nil {
+		if arr, ok := typ.Underlying().(*types.Array); ok {
+			return strconv.FormatInt(arr.Len(), 10)
+		}
+	}
+	if id, ok := unparen(x).(*ast.Ident); ok {
+		obj := t.info.Uses[id]
+		if obj == nil {
+			obj = t.info.Defs[id]
+		}
+		if l, ok := t.lens[obj]; ok {
+			return l
+		}
+	}
+	return ""
+}
+
+// checked wraps a rendered subscript in the bounds helper, or returns it
+// unchanged when this build asked for no checks or the bound is unknown.
+//
+// index is the subscript's syntax where the caller still has it, and nil where
+// the subscript has already been lifted into a temporary. It is used only to
+// recognise a constant index into an array, which go/types has already refused
+// if it is out of range, so there is nothing left for a run-time check to say.
+// A constant index into a *slice* is still checked: nobody knows the length.
+func (t *transpiler) checked(x ast.Expr, index ast.Expr, rendered string) string {
+	if !t.boundsChecks {
+		return rendered
+	}
+	bound := t.boundOf(x)
+	if bound == "" {
+		return rendered
+	}
+	if index != nil && t.info.Types[index].Value != nil {
+		if typ := t.typeOf(x); typ != nil {
+			if _, ok := typ.Underlying().(*types.Array); ok {
+				return rendered
+			}
+		}
+	}
+	t.usedBounds = true
+	return fmt.Sprintf("%s(%s, %s)", boundsHelper, rendered, bound)
 }

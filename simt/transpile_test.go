@@ -1829,3 +1829,110 @@ func TestFastMathPrebuiltDoesNotCrossOver(t *testing.T) {
 		t.Error("the plain kernel's PTX satisfied the fast-math kernel; the flag would be dropped on the prebuilt path")
 	}
 }
+
+// TestBoundsChecksCoverWhatTheyClaim pins which subscripts WithBoundsChecks
+// reaches and which it deliberately leaves alone.
+//
+// The interesting content is the second list. A build option that silently
+// checked less than it says would be worse than one that checked nothing, so
+// each omission is here with the reason it is sound: a range loop's induction
+// variable is compared against the very bound a check would use, and a
+// constant index into a fixed-size array has already been refused by go/types
+// if it is out of range. A constant index into a *slice* is still checked --
+// nobody knows the length.
+func TestBoundsChecksCoverWhatTheyClaim(t *testing.T) {
+	const src = `package kernels
+
+import "github.com/CWBudde/gocuda/gpu"
+
+type Cfg struct {
+	Taps [4]float32
+}
+
+func Probe(ctx gpu.Ctx, y, x []float32, cfg Cfg) {
+	tile := ctx.SharedF32(64)
+	var local [4]float32
+	i := ctx.GlobalID()
+	tile[ctx.ThreadIdx()] = x[i]
+	local[2] = cfg.Taps[1]
+	y[0] = x[0] + local[2] + tile[3]
+	for _, v := range x {
+		y[i] += v
+	}
+}
+`
+	fsys := fstest.MapFS{"k.go": &fstest.MapFile{Data: []byte(src)}}
+
+	rel, err := simt.Transpile(fsys, "Probe")
+	if err != nil {
+		t.Fatalf("Transpile: %v", err)
+	}
+	if strings.Contains(rel.Source, "gocuda_bounds") {
+		t.Fatalf("the release build emitted a check:\n%s", rel.Source)
+	}
+
+	dbg, err := simt.Transpile(fsys, "Probe", simt.WithBoundsChecks())
+	if err != nil {
+		t.Fatalf("Transpile(WithBoundsChecks): %v", err)
+	}
+
+	checked := []struct{ what, want string }{
+		{"a slice read at a computed index", "x[gocuda_bounds(i, x_len)]"},
+		{"a shared tile written at a computed index", "tile[gocuda_bounds((int)threadIdx.x, 64)]"},
+		{"a slice read at a constant index", "x[gocuda_bounds(0, x_len)]"},
+		{"a slice written at a constant index", "y[gocuda_bounds(0, y_len)]"},
+		// A shared tile is a Go slice, whatever it lowers to, so go/types has
+		// refused nothing about a constant index into one -- tile[300] on a
+		// 64-element tile compiles in Go and this is the only thing that
+		// catches it.
+		{"a constant index into a shared tile", "tile[gocuda_bounds(3, 64)]"},
+	}
+	for _, c := range checked {
+		if !strings.Contains(dbg.Source, c.want) {
+			t.Errorf("%s is unchecked; expected %q in:\n%s", c.what, c.want, dbg.Source)
+		}
+	}
+
+	unchecked := []struct{ what, want string }{
+		{"a constant index into a local array", "local[2]"},
+		{"a constant index into an array struct field", "cfg.Taps[1]"},
+		{"a range loop's own induction variable", "float v = x[v_i];"},
+	}
+	for _, c := range unchecked {
+		if !strings.Contains(dbg.Source, c.want) {
+			t.Errorf("%s: expected the unchecked form %q in:\n%s", c.what, c.want, dbg.Source)
+		}
+	}
+
+	// The helper is defined exactly when something calls it.
+	if !strings.Contains(dbg.Source, "__device__ __forceinline__ long long gocuda_bounds") {
+		t.Errorf("the helper is called but never defined:\n%s", dbg.Source)
+	}
+}
+
+// TestBoundsChecksDefineNoHelperWhenNothingIsIndexed is the other half of
+// "defined exactly when something calls it". A __device__ function nothing
+// calls is not a warning NVRTC raises, so nothing but this would notice.
+func TestBoundsChecksDefineNoHelperWhenNothingIsIndexed(t *testing.T) {
+	fsys := fstest.MapFS{"k.go": &fstest.MapFile{Data: []byte(`package kernels
+
+import "github.com/CWBudde/gocuda/gpu"
+
+func NoIndex(ctx gpu.Ctx) {
+	ctx.SyncThreads()
+}
+`)}}
+	dbg, err := simt.Transpile(fsys, "NoIndex", simt.WithBoundsChecks())
+	if err != nil {
+		t.Fatalf("Transpile(WithBoundsChecks): %v", err)
+	}
+	if strings.Contains(dbg.Source, "gocuda_bounds") {
+		t.Errorf("a helper was defined for a kernel that indexes nothing:\n%s", dbg.Source)
+	}
+	// The marker is still there, and it is the whole reason it exists: without
+	// it this kernel's debug build would hash to its release build and load
+	// the release artifact.
+	if !strings.Contains(dbg.Source, "// gocuda: bounds") {
+		t.Errorf("no marker, so this kernel's debug build is indistinguishable from its release build:\n%s", dbg.Source)
+	}
+}

@@ -178,7 +178,7 @@ func (t *transpiler) expr(e ast.Expr) cexpr {
 		}
 		// The subscript itself is delimited by the brackets, so it needs no
 		// precedence of its own; what is indexed does.
-		return cexpr{fmt.Sprintf("%s[%s]", t.expr(e.X).at(precPostfix), t.expr(e.Index).s), precPostfix}
+		return cexpr{fmt.Sprintf("%s[%s]", t.expr(e.X).at(precPostfix), t.checked(e.X, e.Index, t.expr(e.Index).s)), precPostfix}
 	case *ast.SelectorExpr:
 		return t.selector(e)
 	case *ast.CompositeLit:

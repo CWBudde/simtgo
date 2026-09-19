@@ -198,6 +198,42 @@ finding cannot hide another, and `workflow_dispatch` **only** — a `schedule`
 with no matching runner queues a job forever and reports nothing, which is
 worse than not running.
 
+## 9. Bounds checks on the device, behind a flag
+
+`simt.WithBoundsChecks()` wraps every slice, array and shared-tile subscript
+whose bound the emitter can name in a helper that calls `__trap()`. It is the
+only layer here that needs no external tool and no second backend: the check
+is in the generated C, so it runs wherever the kernel does.
+
+**What it sees.** Every subscript the emitter wrote, on any device, including
+the ones a parity test would never reach because the reference agrees with the
+kernel about which indices are in range. Layer 8 sees more — a stray pointer,
+an uninitialised read — but needs `compute-sanitizer` and therefore a machine
+with one installed and matching the driver.
+
+**What it cannot see.** A subscript whose bound the emitter cannot name is
+emitted unchecked, because a build option must never change which programs are
+accepted. A `range` loop's induction variable is skipped as provably dead —
+the emitted loop is bounded by the same length — and a constant index into a
+fixed-size array is skipped because `go/types` has already refused it if it is
+out of range. A constant index into a slice, a shared tile included, is
+checked.
+
+**What the fault tells you: less than the emulator's.** `__trap()` carries no
+payload, so the device can report only that it trapped. `gpu.RunCPU` on the
+same kernel is Go, and Go's own bounds check names the index, the length and
+the thread — so `simt.TrapError` says to go there. The asymmetry is pinned
+from both ends: `gpu.TestOutOfRangeIndexIsDiagnosedWithTheIndex` holds the
+emulator's message, and `internal/faulttest` holds the device's.
+
+**`internal/faulttest` is deliberately outside layer 8's sweep.** A trap is a
+real fault and the sanitizer reports it as one, so `--error-exitcode 1` would
+turn a passing test into a failed sweep. It is also a package of its own
+because a trap ends the whole process's use of CUDA — not merely the
+context's, which was
+[measured](toolchain.md#what-the-host-sees-after-a-__trap) — and `go test`
+giving each package its own binary is the only isolation strong enough.
+
 ## The differential fuzzer
 
 `internal/fuzz` generates random programs in the supported subset and compares

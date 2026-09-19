@@ -450,6 +450,20 @@ func TestGeneratedCCompiles(t *testing.T) {
 			if strings.TrimSpace(u.Source) == "" {
 				t.Fatalf("%s lowered to nothing", name)
 			}
+
+			// And again with the checks on. A debug build never loads a
+			// prebuilt, so NVRTC is the only thing standing between it and a
+			// launch -- which makes this the gate for the emitted helper and
+			// for every place a subscript was wrapped in it. The one thing
+			// the untagged emitter tests cannot say is whether a compiler
+			// accepts the result.
+			d, err := simt.Transpile(gocuda.Kernels(), name, simt.WithBoundsChecks())
+			if err != nil {
+				t.Fatalf("Transpile(WithBoundsChecks): %v", err)
+			}
+			if _, err := cuda.Compile(d.Source, name+".debug.cu", arch); err != nil {
+				t.Fatalf("NVRTC refused the bounds-checked %s: %v\n%s", name, err, d.Source)
+			}
 		})
 	}
 }
@@ -496,5 +510,108 @@ func TestEmittedPaddingIsMeasured(t *testing.T) {
 	wrong := "struct S { int A; unsigned char gocuda_pad0[5]; double B; };\nstatic_assert(sizeof(S) == 16, \"size\");" + entry
 	if _, err := cuda.Compile(wrong, "S.cu", arch); err == nil {
 		t.Error("NVRTC accepted a struct with one byte too much padding, so sizeof is not measuring the padding and the offsets are not pinned by it")
+	}
+}
+
+// TestNVRTCDeclaresTrapAndPrintf measures what a debug mode may be built out
+// of, one spelling at a time, the way every other row of
+// docs/toolchain.md#what-nvrtc-declares-with-no-header-included was measured.
+//
+// The question is not academic. NVRTC compiles a bare string with no include
+// path, so a bounds check that calls __trap() and a diagnostic that calls
+// printf are each available only if the compiler declares them itself. Two of
+// these decide what the emitter may write; the rest decide whether a device
+// printf is a feature at all or a documented absence.
+//
+// Each case is one compilation and one verdict, and the verdicts are printed
+// rather than merely asserted: the table in docs/toolchain.md is transcribed
+// from this output, so a run of this test with -v is where the documentation
+// comes from. Only the two the emitter depends on are failures; the rest are
+// recorded either way, because "measured, and the answer is no" is a result.
+//
+// No device is needed, only the toolkit.
+func TestNVRTCDeclaresTrapAndPrintf(t *testing.T) {
+	requireNVRTC(t)
+
+	const arch = "compute_75"
+
+	cases := []struct {
+		name string
+		body string
+		// required says the emitter cannot be written without this one, so a
+		// refusal is a test failure rather than a measurement.
+		required bool
+		// implies is what a successful compilation lets the emitter do.
+		implies string
+	}{
+		{
+			name: "__trap()",
+			body: "__trap();",
+			// Required, because the emitted bounds helper calls it. Recorded
+			// as a measurement and enforced as a dependency at the same time:
+			// if a future NVRTC stopped declaring it, every bounds-checked
+			// kernel would fail to compile, and a log line saying "NOT
+			// declared" in a passing test is not how anyone should find out.
+			required: true,
+			implies:  "a bounds check can trap through the documented intrinsic",
+		},
+		{
+			name:     `asm("trap;")`,
+			body:     `asm("trap;");`,
+			required: false,
+			implies:  "inline PTX asm is accepted, which is the floor under __trap()",
+		},
+		{
+			name:    "printf, no arguments",
+			body:    `printf("hello\n");`,
+			implies: "printf is declared with no header",
+		},
+		{
+			name:    "printf, one integer",
+			body:    `printf("%d\n", 1);`,
+			implies: "the variadic form resolves",
+		},
+		{
+			name:    "printf, a float and a runtime value",
+			body:    `printf("%f %d\n", 1.0f, (int)threadIdx.x);`,
+			implies: "printf is usable for anything worth printing",
+		},
+		{
+			name: "__forceinline__",
+			body: "",
+			// Required for the same reason: the helper carries the attribute,
+			// so a refusal is a broken emitter rather than a missing luxury.
+			required: true,
+			implies:  "the emitted bounds helper may ask to be inlined",
+		},
+	}
+
+	// The helper carries __forceinline__ so that case measures the attribute
+	// rather than the call; every other case leaves it off the declaration.
+	prelude := func(forceinline bool) string {
+		attr := ""
+		if forceinline {
+			attr = "__forceinline__ "
+		}
+		return "__device__ " + attr + "long long gocuda_probe(long long i) { return i; }\n"
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			force := tc.name == "__forceinline__"
+			src := prelude(force) +
+				"extern \"C\" __global__ void K(float* y)\n{\n\t" + tc.body +
+				"\n\ty[0] = (float)gocuda_probe(1);\n}\n"
+
+			_, err := cuda.Compile(src, "probe.cu", arch)
+			switch {
+			case err == nil:
+				t.Logf("declared: %s", tc.implies)
+			case tc.required:
+				t.Errorf("NVRTC refused %s, which the emitter needs: %v", tc.name, err)
+			default:
+				t.Logf("NOT declared: %v", err)
+			}
+		})
 	}
 }

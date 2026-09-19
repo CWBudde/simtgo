@@ -145,8 +145,8 @@ func (p *Package) Decl(name string) *ast.FuncDecl {
 	return nil
 }
 
-// Kernel lowers the named kernel.
-func (p *Package) Kernel(name string) (*Unit, []Diagnostic, error) {
+// Kernel lowers the named kernel, with opts passed on to Kernel.
+func (p *Package) Kernel(name string, opts ...Option) (*Unit, []Diagnostic, error) {
 	fd := p.Decl(name)
 	if fd == nil {
 		declared := p.Names()
@@ -156,7 +156,7 @@ func (p *Package) Kernel(name string) (*Unit, []Diagnostic, error) {
 		return nil, nil, fmt.Errorf("no kernel named %q; this package declares %s",
 			name, strings.Join(declared, ", "))
 	}
-	u, diags := Kernel(p.Fset, p.Info, p.Files, fd)
+	u, diags := Kernel(p.Fset, p.Info, p.Files, fd, opts...)
 	return u, diags, nil
 }
 

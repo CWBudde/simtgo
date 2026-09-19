@@ -1,12 +1,14 @@
 package simt
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"math"
 
 	"github.com/CWBudde/gocuda/cuda"
 	"github.com/CWBudde/gocuda/internal/jit"
+	"github.com/CWBudde/gocuda/internal/lower"
 )
 
 // Kernel is a Go kernel that has been transpiled, compiled and loaded.
@@ -27,6 +29,12 @@ type Kernel struct {
 	// PTX is forward compatible and the driver JITs it. Either way the field
 	// answers the same question: what this PTX targets.
 	Arch string
+
+	// BoundsChecks says this kernel was built with WithBoundsChecks, and is
+	// what turns a faulted launch into a TrapError rather than a bare driver
+	// error. It is also the honest signal that this build went through NVRTC:
+	// a bounds-checked kernel never matches a prebuilt.
+	BoundsChecks bool
 
 	// RequiredBlock, SharedBytes, DynSharedWidth and Params are what the
 	// kernel's source demands of a launch; see Unit.
@@ -49,8 +57,18 @@ type Kernel struct {
 type BuildOption func(*buildOptions)
 
 type buildOptions struct {
-	cacheDir   string
-	noPrebuilt bool
+	cacheDir     string
+	noPrebuilt   bool
+	boundsChecks bool
+}
+
+// lowerOptions is what of a build's options the lowering is allowed to see.
+// Two of the three concern loading and are simply not consulted there.
+func (o buildOptions) lowerOptions() []lower.Option {
+	if o.boundsChecks {
+		return []lower.Option{lower.WithBoundsChecks()}
+	}
+	return nil
 }
 
 // WithCacheDir chooses where the generated .cu and the PTX that was loaded are
@@ -75,6 +93,25 @@ func WithoutPrebuilt() BuildOption {
 	return func(o *buildOptions) { o.noPrebuilt = true }
 }
 
+// WithBoundsChecks builds the kernel with a range check at every slice, array
+// and shared-tile subscript. An index outside its buffer calls __trap()
+// instead of reading or writing memory that belongs to something else.
+//
+// This is the debug build, and it is a build option rather than something a
+// kernel says about itself precisely so that the released path pays nothing:
+// without it not one character of the generated C changes. It also means a
+// debug build never loads a prebuilt artifact -- the checks and a marker line
+// are both in the source the hash is taken over -- so it always goes through
+// NVRTC and needs a toolkit.
+//
+// What the device can tell you afterwards is that it trapped, and not which
+// index did it: a trap carries no payload and the context does not survive
+// it. Running the same kernel under gpu.RunCPU is what names the index, the
+// length and the thread, because there a kernel is ordinary Go.
+func WithBoundsChecks() BuildOption {
+	return func(o *buildOptions) { o.boundsChecks = true }
+}
+
 // Build transpiles the named Go kernel from fsys and loads it into dev: the
 // whole SIMT pipeline, Go source to CUDA C to PTX.
 //
@@ -93,7 +130,7 @@ func Build(dev *cuda.Context, fsys fs.FS, name string, opts ...BuildOption) (*Ke
 		opt(&o)
 	}
 
-	u, err := Transpile(fsys, name)
+	u, err := Transpile(fsys, name, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -125,6 +162,7 @@ func Build(dev *cuda.Context, fsys fs.FS, name string, opts ...BuildOption) (*Ke
 		Log:            res.Log,
 		Prebuilt:       res.Prebuilt,
 		Arch:           res.Arch,
+		BoundsChecks:   u.BoundsChecks,
 		RequiredBlock:  u.RequiredBlock,
 		SharedBytes:    u.SharedBytes,
 		DynSharedWidth: u.DynSharedWidth,
@@ -407,5 +445,82 @@ func (k *Kernel) launch(grid, block cuda.Dim3, dynBytes int, args []any) error {
 	if err != nil {
 		return err
 	}
-	return k.fn.LaunchSync(grid, block, dynBytes, flat...)
+	return k.diagnose(k.fn.LaunchSync(grid, block, dynBytes, flat...))
 }
+
+// diagnose turns a failed launch into a TrapError, but only for the failures
+// a __trap() can actually have produced.
+//
+// Wrapping every error was wrong in two directions, and both of them point
+// the reader at the wrong thing. A launch that never started -- the wrong
+// argument count, a block the device cannot fit, too few registers -- is not
+// a fault at all, so "its launch faulted, which an index outside a slice
+// would do" sends somebody hunting an index that was never read. And once a
+// context is poisoned, every later launch fails in Context.bind before the
+// kernel is dispatched: naming *that* kernel accuses one that did not run,
+// and buries the ContextPoisonedError that says which one did.
+//
+// So: the poisoned case passes through untouched, because it already carries
+// a better sentence than this one could write, and everything else has to
+// name a result code a device-side fault produces.
+func (k *Kernel) diagnose(err error) error {
+	if err == nil || !k.BoundsChecks {
+		return err
+	}
+	var poisoned *cuda.ContextPoisonedError
+	if errors.As(err, &poisoned) {
+		return err
+	}
+	var e *cuda.Error
+	if !errors.As(err, &e) || !faulted(e.Code) {
+		return err
+	}
+	return &TrapError{Kernel: k.Name, Err: err}
+}
+
+// faulted reports whether a result code means the kernel ran and the device
+// faulted, as opposed to the launch being refused before it started.
+//
+// 719 is what a __trap() was measured to surface as here
+// (docs/toolchain.md#what-the-host-sees-after-a-trap). 700 is on the list
+// because it is what an out-of-range access that the checks did *not* cover
+// lands on -- a raw overrun in a helper the emitter had no length for -- and
+// under a bounds-checked build that is the same mistake wearing a different
+// code, which is exactly what TrapError says out loud. Every other code,
+// ErrLaunchOutOfResources and the argument errors among them, is left alone.
+func faulted(r cuda.Result) bool {
+	switch r {
+	case cuda.ErrLaunchFailed, cuda.ErrIllegalAddress:
+		return true
+	}
+	return false
+}
+
+// TrapError is a bounds-checked launch that faulted.
+//
+// It exists because the device cannot say anything useful about the fault
+// itself. __trap() carries no payload, so the driver reports an unspecified
+// launch failure and the context does not survive it -- which is
+// indistinguishable, from the error alone, from a genuine illegal address in
+// code the checks never covered. What the caller does know, and what this
+// says, is that this build asked for the checks, so an index outside its
+// buffer is by far the most likely cause and there is a way to find out which
+// one.
+//
+// It is raised only for those two codes; see diagnose. A launch that was
+// refused before it started, or one failing because an earlier trap poisoned
+// the context, is not evidence of anything a bounds check saw.
+type TrapError struct {
+	Kernel string
+	Err    error
+}
+
+func (e *TrapError) Error() string {
+	return fmt.Sprintf("simt: %s was built with bounds checks and its launch faulted, "+
+		"which an index outside a slice or a shared tile would do: %v. "+
+		"Run the same kernel under gpu.RunCPU to find out which index -- there a "+
+		"kernel is ordinary Go, and the panic names the index, the length and the thread",
+		e.Kernel, e.Err)
+}
+
+func (e *TrapError) Unwrap() error { return e.Err }

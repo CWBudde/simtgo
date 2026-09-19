@@ -354,7 +354,10 @@ func (t *transpiler) assignTarget(lhs ast.Expr, assigned map[types.Object]bool) 
 	}
 	name := t.reserve(baseName(lhs) + "_idx")
 	t.line("%s = %s;", t.cdecl(typ, name, idx.Index.Pos()), t.expr(idx.Index).s)
-	return fmt.Sprintf("%s[%s]", t.expr(idx.X).at(precPostfix), name)
+	// The subscript is already in a temporary, so there is no syntax left to
+	// test for constness -- and none is needed: this path is taken only where
+	// the index could change, which a constant never can.
+	return fmt.Sprintf("%s[%s]", t.expr(idx.X).at(precPostfix), t.checked(idx.X, nil, name))
 }
 
 // stableIndex reports whether an index expression reads the same thing in both
@@ -1084,6 +1087,13 @@ func (t *transpiler) rangeStmt(s *ast.RangeStmt) {
 
 	// The value is a copy in Go, so it is a local here too: writing to it must
 	// not reach the slice.
+	//
+	// WithBoundsChecks deliberately does not reach this subscript. The loop
+	// emitted just below is `for (k = 0; k < X_len; k++)` against the very
+	// bound a check would compare with, so the check is provably dead -- and
+	// a debug build is read by whoever is debugging, which is the worst time
+	// to fill a range loop with noise. A subscript written out by hand inside
+	// the body is an ordinary IndexExpr and is checked like any other.
 	if value != nil {
 		obj := t.info.Defs[value]
 		if obj == nil {

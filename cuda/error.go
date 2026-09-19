@@ -36,6 +36,8 @@ const (
 	ErrIllegalAddress        Result = 700
 	ErrLaunchOutOfResources  Result = 701
 	ErrLaunchTimeout         Result = 702
+	ErrIllegalInstruction    Result = 715
+	ErrMisalignedAddress     Result = 716
 	ErrLaunchFailed          Result = 719
 	ErrSystemDriverMismatch  Result = 803
 )
@@ -61,6 +63,8 @@ var resultNames = map[Result]string{
 	ErrIllegalAddress:        "CUDA_ERROR_ILLEGAL_ADDRESS",
 	ErrLaunchOutOfResources:  "CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES",
 	ErrLaunchTimeout:         "CUDA_ERROR_LAUNCH_TIMEOUT",
+	ErrIllegalInstruction:    "CUDA_ERROR_ILLEGAL_INSTRUCTION",
+	ErrMisalignedAddress:     "CUDA_ERROR_MISALIGNED_ADDRESS",
 	ErrLaunchFailed:          "CUDA_ERROR_LAUNCH_FAILED",
 	ErrSystemDriverMismatch:  "CUDA_ERROR_SYSTEM_DRIVER_MISMATCH",
 }
@@ -243,3 +247,27 @@ func (e *CompileError) Error() string {
 
 // Unwrap exposes the status code, which is what errors.Is compares against.
 func (e *CompileError) Unwrap() error { return e.Code }
+
+// ContextPoisonedError reports a context that a device-side fault has made
+// permanently unusable, and is returned by every later call on it in place of
+// the driver error that would otherwise arrive with no explanation.
+//
+// It unwraps to the original Result, so errors.Is(err, cuda.ErrLaunchFailed)
+// keeps working on the tenth call as well as the first.
+type ContextPoisonedError struct {
+	// Op is the driver call that first failed, which is where the fault
+	// surfaced rather than where it happened: a kernel fault is asynchronous
+	// and is usually reported by cuCtxSynchronize.
+	Op string
+	// Code is what that call returned.
+	Code Result
+}
+
+func (e *ContextPoisonedError) Error() string {
+	return fmt.Sprintf("cuda: this context is unusable: %s failed with %s, "+
+		"and a fault of that kind is sticky -- the driver fails every later call in it. "+
+		"Measured here, retaining a fresh primary context fails too, so this process "+
+		"cannot use CUDA again and has to exit", e.Op, e.Code.Name())
+}
+
+func (e *ContextPoisonedError) Unwrap() error { return e.Code }

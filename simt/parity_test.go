@@ -1431,3 +1431,81 @@ func TestFastMathChangesTheAnswer(t *testing.T) {
 		t.Errorf("fast math moved a result by %g, beyond the 1e-5 the parity tests assert", worst)
 	}
 }
+
+// TestBoundsChecksAgreeInRange is the claim WithBoundsChecks rests on: a
+// correct kernel computes the same thing with the checks on.
+//
+// It is worth a device test rather than a golden. The untagged tests pin what
+// is emitted and the NVRTC leg pins that it compiles, but neither asks whether
+// the long long round trip through the helper changes an index -- and the
+// subset allows four integer types as an index, all of which arrive at the
+// helper by promotion. An off-by-one in the promotion would pass every
+// untagged test and every compile.
+//
+// The build is also its own negative control for the prebuilt path: a debug
+// build must miss the registry and go through NVRTC, and Kernel.Prebuilt is
+// where that shows.
+func TestBoundsChecksAgreeInRange(t *testing.T) {
+	ctx := device(t)
+
+	const probe = `package kernels
+
+import "github.com/CWBudde/gocuda/gpu"
+
+func BoundsProbe(ctx gpu.Ctx, y, x []float32) {
+	tile := ctx.SharedF32(64)
+	t := ctx.ThreadIdx()
+	tile[t] = x[ctx.GlobalID()]
+	ctx.SyncThreads()
+	i := ctx.GlobalID()
+	if i < len(y) {
+		y[i] = tile[t] * 2
+	}
+}
+`
+	src := fstest.MapFS{"probe.go": &fstest.MapFile{Data: []byte(probe)}}
+
+	const n = 64
+	x := make([]float32, n)
+	for i := range x {
+		x[i] = float32(i) * 0.5
+	}
+	want := make([]float32, n)
+	for i, v := range x {
+		want[i] = v * 2
+	}
+
+	run := func(t *testing.T, opts ...simt.BuildOption) ([]float32, *simt.Kernel) {
+		t.Helper()
+		k, err := simt.Build(ctx, src, "BoundsProbe", opts...)
+		if err != nil {
+			t.Fatalf("Build: %v", err)
+		}
+		dy, _ := cuda.NewSlice[float32](ctx, n)
+		dx, _ := cuda.Upload(ctx, x)
+		defer dy.Free()
+		defer dx.Free()
+		if err := k.LaunchN(n, 64, dy, dx); err != nil {
+			t.Fatalf("Launch: %v", err)
+		}
+		got, err := dy.Download()
+		if err != nil {
+			t.Fatalf("Download: %v", err)
+		}
+		return got, k
+	}
+
+	release, rk := run(t)
+	debug, dk := run(t, simt.WithBoundsChecks())
+
+	tolerance.AssertEqual(t, "release vs reference", release, want)
+	tolerance.AssertEqual(t, "debug vs reference", debug, want)
+	tolerance.AssertEqual(t, "debug vs release", debug, release)
+
+	if rk.Source == dk.Source {
+		t.Error("the two builds generated the same C, so this compared one kernel with itself")
+	}
+	if dk.Prebuilt {
+		t.Error("a bounds-checked build loaded a prebuilt artifact")
+	}
+}
