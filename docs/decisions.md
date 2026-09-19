@@ -304,3 +304,67 @@ binary built with an older Go refuses the module outright. CI uses the action's
 any version — the module zip is rejected by the proxy itself over a non-ASCII
 path in its own test data, and its GitHub releases are drafts — so CI builds it
 from a pinned tag.
+
+## Bounds checks are a build option, and the checks are their own marker
+
+`simt.WithBoundsChecks()` emits a range check at every subscript whose bound
+the emitter can name. Four alternatives were considered, and each is rejected
+for a reason this repository has already had to learn once.
+
+**A `//gocuda:debug` source directive**, read the way `//gocuda:float64` and
+`//gocuda:fastmath` are. Rejected because it puts the choice in the kernel,
+where it gets committed, generated into `kernels/prebuilt/` and shipped.
+Those two directives are properties of _what the kernel computes_ — a
+precision, a set of compiler licences. Bounds checking is a property of _this
+build_, and the roadmap's own wording is the distinction: "so the released
+path pays nothing". For the same reason `gocuda generate` has no debug mode
+at all; a bounds-checked artifact in `kernels/prebuilt/` would be the release
+path.
+
+**An environment variable.** Rejected for the reason `WithCacheDir` was: a
+process-wide switch expressed in one corner of a program silently changes
+what an unrelated library builds.
+
+**Salting `SourceHash`.** Rejected because the hash has to keep meaning
+_these exact bytes_, which is what lets a committed `.cu` explain its own
+identity. A salt also has to be threaded into `internal/jit`'s cache key
+separately, since that one hashes the source — two places to keep in step
+instead of none.
+
+**A separate cache namespace, or a `Debug` field on `jit.Request`.** Fixes
+the module cache and not the registry: a prebuilt is found by what the kernel
+lowered to, and there is no second key to consult.
+
+So the checks go into the generated C, which is what `SourceHash` is taken
+over, and the registry and the JIT cache inherit the split for free.
+
+**A marker line is emitted anyway**, and it is worth saying why, because it is
+redundant in every kernel that indexes anything. A kernel with no subscript at
+all generates identical C either way, and without the marker its debug build
+would find and load the release prebuilt. That load would in fact be
+_correct_ — same bytes, same compilation — so this is not a correctness fix.
+It is what lets "a debug build never finds a release artifact" be true with no
+case split, and what lets someone reading a dumped `.cu` see which mode
+produced it.
+
+### What the two backends can each tell you
+
+Asymmetric, and the errors say so rather than papering over it.
+
+The emulator needed no code at all: a kernel under `RunCPU` is ordinary Go, so
+`gc`'s bounds check is already there, already unconditional, and already names
+the index, the length and the thread. The device can say only _that_ it
+trapped — `__trap()` carries no payload, and the fault takes the process with
+it. `simt.TrapError` therefore points the reader at `RunCPU`, which is where
+the question "which index?" can still be answered.
+
+### The alternative that would name the index, and its price
+
+The helper could instead record `(site, index, length)` into a device buffer,
+clamp the index and let the launch finish, so the host could print the exact
+fault and keep the context alive. It is strictly more informative. It also
+costs a generated kernel parameter that exists only in debug mode — so the
+launch path, and not just the source, differs between the two — and it lets a
+kernel carry on computing with wrong data, which is the opposite of what a
+panic is for. The trap ships first, as the roadmap asked; this is recorded so
+that adding it later is a decision with its trade already written down.

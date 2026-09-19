@@ -82,7 +82,7 @@ type options struct{ boundsChecks bool }
 //
 // Why this is a build option rather than a source directive, and what the
 // device can and cannot tell you afterwards:
-// docs/decisions.md#bounds-checks-are-a-build-option.
+// docs/decisions.md#bounds-checks-are-a-build-option-and-the-checks-are-their-own-marker.
 func WithBoundsChecks() Option { return func(o *options) { o.boundsChecks = true } }
 
 // A Param is one of a kernel's parameters, as the generated C declares it.

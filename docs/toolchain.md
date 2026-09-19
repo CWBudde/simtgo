@@ -238,6 +238,38 @@ identically, so the skew cannot favour one variant — but a machine with a
 matched toolkit might see different absolute counts. One machine is one
 machine.
 
+## What the host sees after a `__trap()`
+
+Measured on the T550 with driver 580, because the debug build's bounds checks
+rest on it and the CUDA documentation is less specific than the error message
+needed to be. The probe is `internal/faulttest`.
+
+| Question                                  | Answer                                                                                                                      |
+| ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| Does `cuLaunchKernel` fail?               | **No.** It returns success                                                                                                  |
+| Where does the trap surface?              | `cuCtxSynchronize`, as `CUDA_ERROR_LAUNCH_FAILED` (719)                                                                     |
+| Is it sticky?                             | **Yes.** `cuCtxSynchronize`, `cuMemAlloc`, `cuMemcpyDtoH` and the `cuModuleUnload` inside `Close` all return 719 afterwards |
+| Does a fresh context recover the process? | **No.** `cuDevicePrimaryCtxRetain` returns 719 as well                                                                      |
+
+The last row is the one worth having measured. "The context is unusable" is
+what the documentation says and what a reader would assume; what is actually
+true here is that the **process** is unusable. Closing the poisoned context
+and opening another does not work, so `cuda.ContextPoisonedError` tells the
+caller to exit rather than to reopen — advice that would have been wrong if it
+had been written from the documentation alone.
+
+Two consequences follow, and they are why the trap test lives where it does.
+`go test` gives each package its own binary, which is the only isolation
+strong enough for a test that ends a process's use of CUDA, so
+`internal/faulttest` is a package of its own and holds exactly one trapping
+test. And it is deliberately outside the `compute-sanitizer` sweep, which
+would read a deliberate trap as a finding and fail the run.
+
+Only 719 was measured. `cuda`'s `sticky` list also carries 700, 702, 715 and
+716 on the documentation's word, because treating a sticky error as
+recoverable is the failure the list exists to prevent and the cost of being
+wrong the other way is one misleading sentence.
+
 ## Launch parameters go through `runtime.Pinner`
 
 Kernel parameters are not marshalled through C `malloc`/`free` per launch: the
