@@ -289,14 +289,9 @@ The machinery is described in
       caller's slices and that this is deliberate, because there a kernel is
       ordinary Go, where aliasing is defined.
 
-- [x] **The NVRTC oracle's noise filter.** (2026-09-19) — it discarded a
-      finding whenever an allowlisted warning preceded it, and its allowlist is
-      keyed on the diagnostic number, which is the same for a dropped use and
-      for generated filler. The first is fixed, the second cannot be fixed
-      where it lives, and an opt-in second look recovers part of the class:
-      [`docs/verification.md`](docs/verification.md#10-nvrtc-warning-triage-opt-in),
-      [`docs/emitter-defects.md`](docs/emitter-defects.md#nvrtcs-remark-swallowed-the-warning-behind-it),
-      [`docs/decisions.md`](docs/decisions.md#a-judgment-may-add-a-finding-and-may-never-remove-one).
+- [x] **The NVRTC oracle's noise filter.** (2026-09-19) — it dropped findings,
+      and its allowlist cannot see a class of defect:
+      [`docs/verification.md`](docs/verification.md#10-nvrtc-warning-triage-opt-in).
 
 - [ ] **Differential fuzzing.** The generator, the corpus and three oracles
       exist, and two of them — the host and NVRTC oracles — now run in

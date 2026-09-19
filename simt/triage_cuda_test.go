@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -40,11 +41,21 @@ const triageContext = 3
 // can go wrong -- no key, no network, a timeout, a malformed answer -- lands
 // on today's behaviour rather than on a failure, which is the same bargain the
 // CUDA tests strike with a missing device.
+// triageDown is set the first time the service could not be reached.
+//
+// Without it, an unreachable service is worse than a disabled one: the
+// generator's filler produces an allowlisted warning constantly, so every
+// input carrying one would open its own 90-second budget and a 20-minute
+// search would spend most of itself waiting instead of fuzzing. One failure
+// is enough to know; the rest of the process falls back to the plain NVRTC
+// oracle, which is what the fuzzer had before any of this.
+var triageDown atomic.Bool
+
 func triagedWarnings(t *testing.T, log, goSrc, cSrc string) string {
 	t.Helper()
 	kept := remainingWarnings(log)
 
-	if os.Getenv(TriageEnv) == "" || !typesafe.Available() {
+	if os.Getenv(TriageEnv) == "" || !typesafe.Available() || triageDown.Load() {
 		return kept
 	}
 	suppressed := suppressedWarnings(log)
@@ -59,12 +70,14 @@ func triagedWarnings(t *testing.T, log, goSrc, cSrc string) string {
 	for _, b := range suppressed {
 		verdict, confidence, err := judgeWarning(ctx, b, goSrc, cSrc)
 		if err != nil {
-			// A judgment nobody can reach is a judgment not made. Say so once
-			// and leave the allowlist's answer standing.
-			if !errors.Is(err, typesafe.ErrNotConfigured) {
-				t.Logf("warning triage unavailable, %s left suppressed: %v", b.num, err)
+			// A judgment nobody can reach is a judgment not made. Say so once,
+			// stop asking for the rest of the process, and leave the
+			// allowlist's answer standing.
+			if !triageDown.Swap(true) {
+				t.Logf("warning triage unavailable, disabled for the rest of this process "+
+					"(%s left suppressed): %v", b.num, err)
 			}
-			continue
+			break
 		}
 		if verdict != "mistranslation" {
 			continue
@@ -139,18 +152,40 @@ const goSrcCap = 8000
 //
 // There are two handles and NVRTC gives whichever it has. Most diagnostics
 // quote the name they are about -- the "scale" in `variable "scale" was
-// declared but never referenced` -- and a name can be found on both sides,
-// so both get sliced around it. But #186-D and #128-D, two of the four
-// numbers on the allowlist, quote nothing; they report a line instead. A line
-// number locates the C exactly and the Go not at all, because no mapping from
-// generated C back to Go source exists in this repository, so the C is cut
-// around it and the Go goes whole, capped.
+// declared but never referenced` -- and most such names exist on both sides.
+// But #186-D and #128-D, two of the four numbers on the allowlist, quote
+// nothing; they report a line instead. A line number locates the C exactly
+// and the Go not at all, because no mapping from generated C back to Go
+// source exists in this repository, so the C is cut around it and the Go goes
+// whole, capped.
 //
-// Both handles missing means there is nothing to ask about, and asking anyway
-// with two whole programs is the shape the measurement found worst.
+// A name NVRTC quotes is the **C** spelling, which is not always the Go one.
+// A Go variable named after a C++ keyword is emitted with a trailing
+// underscore (`cname` in internal/lower), and the fuzz generator picks from
+// `keywordPool` one time in five, so `class` in the Go is `class_` in the C
+// and in the diagnostic. Slicing the Go by the C spelling would find nothing
+// there and hand over an empty Go source -- and a judgment shown no Go at all
+// has every reason to call faithful filler a mistranslation, which would fail
+// a nightly fuzz run over nothing. So the Go is tried by the quoted name and
+// then by the name with one trailing underscore removed, and if neither finds
+// anything the whole capped source goes rather than an empty string. The same
+// fallback covers every other name the emitter invents and the Go never had,
+// `y_len` among them.
 func slice(b warningBlock, goSrc, cSrc string) (goPart, cPart string, err error) {
 	if ident := b.ident(); ident != "" {
-		return mentions(goSrc, ident, triageContext), mentions(cSrc, ident, triageContext), nil
+		cPart = mentions(cSrc, ident, triageContext)
+		for _, name := range []string{ident, strings.TrimSuffix(ident, "_")} {
+			if goPart = mentions(goSrc, name, triageContext); goPart != "" {
+				break
+			}
+		}
+		if goPart == "" {
+			goPart = truncate(goSrc, goSrcCap)
+		}
+		if cPart == "" {
+			cPart = truncate(cSrc, goSrcCap)
+		}
+		return goPart, cPart, nil
 	}
 	if len(b.lines) > 0 {
 		if m := warningLoc.FindStringSubmatch(b.lines[0]); m != nil {
@@ -196,11 +231,23 @@ func truncate(src string, n int) string {
 // mentions returns the lines of src naming ident, each with n lines either
 // side, elisions marked. Filtering here rather than in the question is the
 // half of this design that the measurement actually cared about.
+//
+// The match is on whole identifiers, and that is not a detail. Half of the
+// generator's `namePool` is single letters, so a substring test for "a" holds
+// on almost every line of any program -- the window would quietly become the
+// whole source, the filtering would buy nothing, and the measurement this is
+// built on would not describe what the code does. Go's \b counts "_" as a
+// word character, so \bclass\b does not match inside `class_` and \blen\b
+// does not match inside `y_len`, which is exactly the distinction wanted.
 func mentions(src, ident string, n int) string {
+	if ident == "" {
+		return ""
+	}
+	word := regexp.MustCompile(`\b` + regexp.QuoteMeta(ident) + `\b`)
 	lines := strings.Split(src, "\n")
 	keep := make(map[int]bool, len(lines))
 	for i, line := range lines {
-		if !strings.Contains(line, ident) {
+		if !word.MatchString(line) {
 			continue
 		}
 		for j := max(i-n, 0); j <= min(i+n, len(lines)-1); j++ {

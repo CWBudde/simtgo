@@ -107,3 +107,80 @@ func TestAllowlistCannotTellFillerFromADroppedUse(t *testing.T) {
 		}
 	}
 }
+
+// The three tests below pin what the review of this change found: the slicing
+// that decides what a judgment is shown was wrong in two ways that are silent
+// rather than loud, because both produce a plausible-looking window.
+
+// TestMentionsMatchesWholeIdentifiers pins the match against the generator's
+// own name pool. Half of `namePool` in internal/fuzz is a single letter, so a
+// substring test holds on nearly every line of any program: the window would
+// become the whole source, and the filtering the measurement rests on would
+// buy nothing while appearing to work.
+func TestMentionsMatchesWholeIdentifiers(t *testing.T) {
+	src := "auto class_ = 1;\nfloat scale = 2.0f;\nint a = 5;\nint y_len = 8;"
+
+	got := mentions(src, "a", 0)
+	if !strings.Contains(got, "int a = 5;") {
+		t.Errorf("the declaration of a was not found:\n%s", got)
+	}
+	for _, unwanted := range []string{"auto", "scale", "y_len"} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("matching %q dragged in the line containing %q:\n%s", "a", unwanted, got)
+		}
+	}
+	// "_" is a word character, so neither of these reaches into the other.
+	if got := mentions(src, "class", 0); got != "" {
+		t.Errorf("class matched inside class_:\n%s", got)
+	}
+	if got := mentions(src, "len", 0); got != "" {
+		t.Errorf("len matched inside y_len:\n%s", got)
+	}
+}
+
+// TestSliceFindsTheGoNameBehindAnEscapedCName pins the translation back.
+//
+// A Go name that is a C++ keyword is emitted with a trailing underscore, and
+// the generator picks one from keywordPool one time in five, so the name
+// NVRTC quotes is `class_` where the Go says `class`. Slicing the Go by the C
+// spelling finds nothing, and a judgment shown no Go at all has every reason
+// to call faithful filler a mistranslation -- which would fail a nightly fuzz
+// run over nothing at all.
+func TestSliceFindsTheGoNameBehindAnEscapedCName(t *testing.T) {
+	goSrc := "func K(ctx gpu.Ctx, y []float32) {\n\tclass := 3\n\tclass = class\n\ty[0] = 1\n}"
+	cSrc := "extern \"C\" __global__ void K(float* __restrict__ y, int y_len)\n{\n\tint class_ = 3;\n\tclass_ = class_;\n\ty[0] = 1.0f;\n}"
+	block := splitWarnings("k.cu(3): warning #550-D: variable \"class_\" was set but never used\n")[0]
+
+	goPart, cPart, err := slice(block, goSrc, cSrc)
+	if err != nil {
+		t.Fatalf("slice: %v", err)
+	}
+	if !strings.Contains(goPart, "class := 3") {
+		t.Errorf("the Go slice does not carry the construct the warning is about:\n%s", goPart)
+	}
+	if !strings.Contains(cPart, "int class_ = 3;") {
+		t.Errorf("the C slice does not carry the declaration:\n%s", cPart)
+	}
+}
+
+// TestSliceNeverHandsOverAnEmptyGoSource is the general form of the previous
+// one. `y_len` is a name the emitter invents and the Go never had, and there
+// are others. Whenever the quoted name cannot be found in the Go, the whole
+// capped source goes rather than an empty string, because an empty Go source
+// is the input most likely to turn generator noise into a finding.
+func TestSliceNeverHandsOverAnEmptyGoSource(t *testing.T) {
+	goSrc := "func K(ctx gpu.Ctx, y []float32) {\n\ty[0] = 1\n}"
+	cSrc := "extern \"C\" __global__ void K(float* __restrict__ y, int y_len)\n{\n\ty[0] = 1.0f;\n}"
+	block := splitWarnings("k.cu(1): warning #177-D: variable \"y_len\" was declared but never referenced\n")[0]
+
+	goPart, _, err := slice(block, goSrc, cSrc)
+	if err != nil {
+		t.Fatalf("slice: %v", err)
+	}
+	if goPart == "" {
+		t.Fatal("the Go slice is empty, which is the input most likely to make noise look like a finding")
+	}
+	if !strings.Contains(goPart, "y[0] = 1") {
+		t.Errorf("the fallback did not carry the Go source:\n%s", goPart)
+	}
+}

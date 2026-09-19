@@ -262,7 +262,7 @@ here decides that generated CUDA C is correct, and every way the call can fail
 — no key, no network, a timeout, a diagnostic naming nothing to slice around —
 lands on the behaviour without it.
 
-**Measured**, on the corpus in `simt/triagefilter_cuda_test.go`, every case of
+**Measured**, on the corpus in `simt/triage_cuda_test.go` (`triageCases`), every case of
 which carries an allowlisted number so the allowlist scores zero on the
 findings by construction:
 
