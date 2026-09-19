@@ -79,7 +79,7 @@ func (t *transpiler) atomic(c *ast.CallExpr, goName, cfn string) cexpr {
 	// operator over a postfix subscript, and the whole thing sits in an
 	// argument slot. No new precedence level is involved.
 	args := make([]string, 0, len(c.Args)-1)
-	args = append(args, fmt.Sprintf("&%s[%s]", name.at(precPostfix), t.expr(c.Args[1]).s))
+	args = append(args, fmt.Sprintf("&%s[%s]", name.at(precPostfix), t.checked(buf, c.Args[1], t.expr(c.Args[1]).s)))
 	for _, a := range c.Args[2:] {
 		args = append(args, t.expr(a).at(precArg))
 	}

@@ -187,3 +187,61 @@ func Scale(ctx gpu.Ctx, y, x []float32, a float32) {
 		t.Errorf("VerifyPrebuilt over every declared kernel: %v", err)
 	}
 }
+
+// TestBoundsChecksMissThePrebuilt is the whole of the debug flag's interaction
+// with the ahead-of-time path, and it needs neither a device nor a toolkit.
+//
+// A debug build must not find a release artifact. The mechanism is that the
+// checks and their marker are in the generated C, which is what SourceHash is
+// taken over, so a prebuilt filed under the release hash is simply not there
+// to be found -- the same mechanism fast math uses, and for the same reason.
+//
+// The hit is the negative control, and the test is worth much less without it:
+// a miss proves nothing unless the same registration can be demanded and seen
+// to be served.
+func TestBoundsChecksMissThePrebuilt(t *testing.T) {
+	swapRegistry(t)
+
+	src := fstest.MapFS{"k.go": &fstest.MapFile{Data: []byte(`package kernels
+
+import "github.com/CWBudde/gocuda/gpu"
+
+func Scale(ctx gpu.Ctx, y, x []float32, a float32) {
+	i := ctx.GlobalID()
+	if i < len(y) {
+		y[i] = x[i] * a
+	}
+}
+`)}}
+
+	release, err := Transpile(src, "Scale")
+	if err != nil {
+		t.Fatalf("Transpile: %v", err)
+	}
+	debug, err := Transpile(src, "Scale", WithBoundsChecks())
+	if err != nil {
+		t.Fatalf("Transpile(WithBoundsChecks): %v", err)
+	}
+
+	if release.BoundsChecks || !debug.BoundsChecks {
+		t.Errorf("Unit.BoundsChecks = %v, %v; want false, true", release.BoundsChecks, debug.BoundsChecks)
+	}
+	if release.SourceHash == debug.SourceHash {
+		t.Fatal("the two builds hash the same, so a debug build would load a release artifact")
+	}
+	if !strings.Contains(debug.Source, "gocuda_bounds") {
+		t.Errorf("no check in the debug source:\n%s", debug.Source)
+	}
+	if strings.Contains(release.Source, "gocuda_bounds") {
+		t.Errorf("a check reached the release source:\n%s", release.Source)
+	}
+
+	RegisterPrebuilt(Prebuilt{Name: "Scale", SourceSHA256: release.SourceHash, Arch: "compute_75", PTX: []byte("ptx")})
+
+	if _, ok := pickPrebuilt(release.SourceHash, 7, 5); !ok {
+		t.Error("the release build did not find its own artifact, so the miss below proves nothing")
+	}
+	if _, ok := pickPrebuilt(debug.SourceHash, 7, 5); ok {
+		t.Error("the debug build found the release artifact")
+	}
+}

@@ -31,7 +31,17 @@ const GPUPkgPath = lower.GPUPkgPath
 // Everything the kernel cannot express on a device is reported here, with a
 // position, rather than left for NVRTC to complain about in generated code the
 // author never wrote.
-func Transpile(fsys fs.FS, fn string) (*Unit, error) {
+//
+// It takes the same BuildOption type Build does, although only the options
+// that change what is emitted mean anything here -- lowering is the first step
+// of a build, and WithCacheDir and WithoutPrebuilt concern the loading that
+// comes after it. Sharing one option type is what lets a caller ask what a
+// debug build would generate without a device or a toolkit anywhere in reach.
+func Transpile(fsys fs.FS, fn string, opts ...BuildOption) (*Unit, error) {
+	var o buildOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
 	pkg, diags, err := lower.LoadPackage(fsys)
 	if err != nil {
 		return nil, fmt.Errorf("simt: %w", err)
@@ -39,7 +49,7 @@ func Transpile(fsys fs.FS, fn string) (*Unit, error) {
 	if len(diags) > 0 {
 		return nil, newUnsupportedError(pkg.Fset, fn, diags)
 	}
-	u, diags, err := pkg.Kernel(fn)
+	u, diags, err := pkg.Kernel(fn, o.lowerOptions()...)
 	if err != nil {
 		return nil, fmt.Errorf("simt: %w", err)
 	}

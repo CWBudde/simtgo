@@ -7,6 +7,7 @@ import (
 
 	"github.com/CWBudde/gocuda/cuda"
 	"github.com/CWBudde/gocuda/internal/jit"
+	"github.com/CWBudde/gocuda/internal/lower"
 )
 
 // Kernel is a Go kernel that has been transpiled, compiled and loaded.
@@ -49,8 +50,18 @@ type Kernel struct {
 type BuildOption func(*buildOptions)
 
 type buildOptions struct {
-	cacheDir   string
-	noPrebuilt bool
+	cacheDir     string
+	noPrebuilt   bool
+	boundsChecks bool
+}
+
+// lowerOptions is what of a build's options the lowering is allowed to see.
+// Two of the three concern loading and are simply not consulted there.
+func (o buildOptions) lowerOptions() []lower.Option {
+	if o.boundsChecks {
+		return []lower.Option{lower.WithBoundsChecks()}
+	}
+	return nil
 }
 
 // WithCacheDir chooses where the generated .cu and the PTX that was loaded are
@@ -75,6 +86,25 @@ func WithoutPrebuilt() BuildOption {
 	return func(o *buildOptions) { o.noPrebuilt = true }
 }
 
+// WithBoundsChecks builds the kernel with a range check at every slice, array
+// and shared-tile subscript. An index outside its buffer calls __trap()
+// instead of reading or writing memory that belongs to something else.
+//
+// This is the debug build, and it is a build option rather than something a
+// kernel says about itself precisely so that the released path pays nothing:
+// without it not one character of the generated C changes. It also means a
+// debug build never loads a prebuilt artifact -- the checks and a marker line
+// are both in the source the hash is taken over -- so it always goes through
+// NVRTC and needs a toolkit.
+//
+// What the device can tell you afterwards is that it trapped, and not which
+// index did it: a trap carries no payload and the context does not survive
+// it. Running the same kernel under gpu.RunCPU is what names the index, the
+// length and the thread, because there a kernel is ordinary Go.
+func WithBoundsChecks() BuildOption {
+	return func(o *buildOptions) { o.boundsChecks = true }
+}
+
 // Build transpiles the named Go kernel from fsys and loads it into dev: the
 // whole SIMT pipeline, Go source to CUDA C to PTX.
 //
@@ -93,7 +123,7 @@ func Build(dev *cuda.Context, fsys fs.FS, name string, opts ...BuildOption) (*Ke
 		opt(&o)
 	}
 
-	u, err := Transpile(fsys, name)
+	u, err := Transpile(fsys, name, opts...)
 	if err != nil {
 		return nil, err
 	}

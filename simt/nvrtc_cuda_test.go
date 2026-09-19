@@ -450,6 +450,20 @@ func TestGeneratedCCompiles(t *testing.T) {
 			if strings.TrimSpace(u.Source) == "" {
 				t.Fatalf("%s lowered to nothing", name)
 			}
+
+			// And again with the checks on. A debug build never loads a
+			// prebuilt, so NVRTC is the only thing standing between it and a
+			// launch -- which makes this the gate for the emitted helper and
+			// for every place a subscript was wrapped in it. The one thing
+			// the untagged emitter tests cannot say is whether a compiler
+			// accepts the result.
+			d, err := simt.Transpile(gocuda.Kernels(), name, simt.WithBoundsChecks())
+			if err != nil {
+				t.Fatalf("Transpile(WithBoundsChecks): %v", err)
+			}
+			if _, err := cuda.Compile(d.Source, name+".debug.cu", arch); err != nil {
+				t.Fatalf("NVRTC refused the bounds-checked %s: %v\n%s", name, err, d.Source)
+			}
 		})
 	}
 }

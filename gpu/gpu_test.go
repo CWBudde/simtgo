@@ -649,3 +649,32 @@ func TestFmin64Fmax64FollowTheBuiltinTheyClaimToBe(t *testing.T) {
 		t.Error("Fmax64 of the two zeros should be +0 either way round")
 	}
 }
+
+// TestOutOfRangeIndexIsDiagnosedWithTheIndex is the emulator half of the
+// SIMT track's bounds checking, and it needs no option to turn on: a kernel
+// under RunCPU is ordinary Go, so gc's own bounds check is already there and
+// is already unconditional.
+//
+// It is pinned here because of what the device half cannot do. simt's
+// WithBoundsChecks traps, and a trap carries no payload -- the launch fails,
+// the context dies, and nothing says which index or how far out it was. The
+// error simt returns for a trapped launch therefore points the reader at
+// RunCPU, so this message is part of that contract and must not be able to
+// lose the index, the length or the thread without a test noticing.
+func TestOutOfRangeIndexIsDiagnosedWithTheIndex(t *testing.T) {
+	// Exactly one thread goes out of range, so the message is the same on
+	// every run: several racing panics would report whichever landed first.
+	y := make([]float32, 4)
+	msg := mustPanic(t, func() {
+		gpu.RunCPU(1, 8, func(ctx gpu.Ctx) {
+			if i := ctx.GlobalID(); i == 7 {
+				y[i] = 1
+			}
+		})
+	})
+	for _, want := range []string{"index out of range [7]", "with length 4", "block 0, thread 7"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("the diagnosis does not mention %q:\n%s", want, msg)
+		}
+	}
+}
