@@ -137,3 +137,55 @@ func TestLaunchSharedElementCount(t *testing.T) {
 		t.Errorf("a shared tile of %d elements gave %v, want the launch to reach its argument check", n, err)
 	}
 }
+
+// TestTrapErrorOnlyWrapsADeviceFault pins which failures a bounds-checked
+// launch is allowed to call a trap.
+//
+// The wrapper used to catch every error the driver returned, and the two
+// cases below are why that was wrong. A configuration failure means the
+// kernel never ran, so calling it a fault sends the reader hunting an index
+// that was never read. A ContextPoisonedError means an *earlier* kernel
+// faulted and this one never got past bind, so naming this kernel accuses one
+// that did not execute -- and replaces the one sentence in the whole library
+// that already says what happened.
+//
+// No device: diagnose is pure, and handing it the errors the driver would
+// have produced is what makes the untagged build able to check this at all.
+func TestTrapErrorOnlyWrapsADeviceFault(t *testing.T) {
+	k := &Kernel{Name: "Overrun", BoundsChecks: true}
+
+	for _, tc := range []struct {
+		name string
+		err  error
+		trap bool
+	}{
+		{"an unspecified launch failure, which is what __trap surfaces as",
+			&cuda.Error{Op: "cuCtxSynchronize", Code: cuda.ErrLaunchFailed}, true},
+		{"an illegal address, which an overrun the checks missed lands on",
+			&cuda.Error{Op: "cuCtxSynchronize", Code: cuda.ErrIllegalAddress}, true},
+		{"out of resources, where the launch was refused and nothing ran",
+			&cuda.Error{Op: "cuLaunchKernel", Code: cuda.ErrLaunchOutOfResources}, false},
+		{"an invalid value, likewise",
+			&cuda.Error{Op: "cuLaunchKernel", Code: cuda.ErrInvalidValue}, false},
+		{"a context already poisoned by some earlier kernel",
+			&cuda.ContextPoisonedError{Op: "cuCtxSynchronize", Code: cuda.ErrLaunchFailed}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := k.diagnose(tc.err)
+			var trap *TrapError
+			if errors.As(got, &trap) != tc.trap {
+				t.Fatalf("diagnose(%v) = %v; wrapped as a TrapError = %v, want %v", tc.err, got, !tc.trap, tc.trap)
+			}
+			if !errors.Is(got, tc.err) {
+				t.Errorf("diagnose(%v) = %v, which no longer unwraps to what the driver said", tc.err, got)
+			}
+		})
+	}
+
+	// And nothing is wrapped at all in a release build, whatever the code.
+	plain := &Kernel{Name: "Overrun"}
+	var trap *TrapError
+	if got := plain.diagnose(&cuda.Error{Op: "cuCtxSynchronize", Code: cuda.ErrLaunchFailed}); errors.As(got, &trap) {
+		t.Errorf("a kernel built without bounds checks reported %v, and it has no checks to blame", got)
+	}
+}

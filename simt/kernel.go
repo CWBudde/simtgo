@@ -1,6 +1,7 @@
 package simt
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"math"
@@ -444,11 +445,55 @@ func (k *Kernel) launch(grid, block cuda.Dim3, dynBytes int, args []any) error {
 	if err != nil {
 		return err
 	}
-	err = k.fn.LaunchSync(grid, block, dynBytes, flat...)
-	if err != nil && k.BoundsChecks {
-		return &TrapError{Kernel: k.Name, Err: err}
+	return k.diagnose(k.fn.LaunchSync(grid, block, dynBytes, flat...))
+}
+
+// diagnose turns a failed launch into a TrapError, but only for the failures
+// a __trap() can actually have produced.
+//
+// Wrapping every error was wrong in two directions, and both of them point
+// the reader at the wrong thing. A launch that never started -- the wrong
+// argument count, a block the device cannot fit, too few registers -- is not
+// a fault at all, so "its launch faulted, which an index outside a slice
+// would do" sends somebody hunting an index that was never read. And once a
+// context is poisoned, every later launch fails in Context.bind before the
+// kernel is dispatched: naming *that* kernel accuses one that did not run,
+// and buries the ContextPoisonedError that says which one did.
+//
+// So: the poisoned case passes through untouched, because it already carries
+// a better sentence than this one could write, and everything else has to
+// name a result code a device-side fault produces.
+func (k *Kernel) diagnose(err error) error {
+	if err == nil || !k.BoundsChecks {
+		return err
 	}
-	return err
+	var poisoned *cuda.ContextPoisonedError
+	if errors.As(err, &poisoned) {
+		return err
+	}
+	var e *cuda.Error
+	if !errors.As(err, &e) || !faulted(e.Code) {
+		return err
+	}
+	return &TrapError{Kernel: k.Name, Err: err}
+}
+
+// faulted reports whether a result code means the kernel ran and the device
+// faulted, as opposed to the launch being refused before it started.
+//
+// 719 is what a __trap() was measured to surface as here
+// (docs/toolchain.md#what-the-host-sees-after-a-trap). 700 is on the list
+// because it is what an out-of-range access that the checks did *not* cover
+// lands on -- a raw overrun in a helper the emitter had no length for -- and
+// under a bounds-checked build that is the same mistake wearing a different
+// code, which is exactly what TrapError says out loud. Every other code,
+// ErrLaunchOutOfResources and the argument errors among them, is left alone.
+func faulted(r cuda.Result) bool {
+	switch r {
+	case cuda.ErrLaunchFailed, cuda.ErrIllegalAddress:
+		return true
+	}
+	return false
 }
 
 // TrapError is a bounds-checked launch that faulted.
@@ -456,11 +501,15 @@ func (k *Kernel) launch(grid, block cuda.Dim3, dynBytes int, args []any) error {
 // It exists because the device cannot say anything useful about the fault
 // itself. __trap() carries no payload, so the driver reports an unspecified
 // launch failure and the context does not survive it -- which is
-// indistinguishable, from the error alone, from a genuine illegal address or
-// a kernel that ran out of resources. What the caller does know, and what
-// this says, is that this build asked for the checks, so an index outside its
+// indistinguishable, from the error alone, from a genuine illegal address in
+// code the checks never covered. What the caller does know, and what this
+// says, is that this build asked for the checks, so an index outside its
 // buffer is by far the most likely cause and there is a way to find out which
 // one.
+//
+// It is raised only for those two codes; see diagnose. A launch that was
+// refused before it started, or one failing because an earlier trap poisoned
+// the context, is not evidence of anything a bounds check saw.
 type TrapError struct {
 	Kernel string
 	Err    error
