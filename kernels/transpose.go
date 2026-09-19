@@ -1,6 +1,6 @@
 package kernels
 
-import "github.com/CWBudde/gocuda/gpu"
+import "github.com/CWBudde/simtgo/gpu"
 
 // TransposeTile is the edge of the square tile Transpose stages, and with it
 // the block geometry the kernel demands: TransposeTile x TransposeTile

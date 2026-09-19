@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"go/token"
 
-	"github.com/CWBudde/gocuda/gpu"
+	"github.com/CWBudde/simtgo/gpu"
 )
 
 // This file is the second rendering of the IR: a func(gpu.Ctx) that gpu.RunCPU

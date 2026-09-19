@@ -6,12 +6,12 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/CWBudde/gocuda"
-	"github.com/CWBudde/gocuda/cuda"
-	"github.com/CWBudde/gocuda/gpu"
-	"github.com/CWBudde/gocuda/internal/tolerance"
-	"github.com/CWBudde/gocuda/kernels"
-	"github.com/CWBudde/gocuda/simt"
+	"github.com/CWBudde/simtgo"
+	"github.com/CWBudde/simtgo/cuda"
+	"github.com/CWBudde/simtgo/gpu"
+	"github.com/CWBudde/simtgo/internal/tolerance"
+	"github.com/CWBudde/simtgo/kernels"
+	"github.com/CWBudde/simtgo/simt"
 )
 
 // The warp primitives are the one part of the vocabulary where the CPU
@@ -60,7 +60,7 @@ func TestWarpReduceSumParity(t *testing.T) {
 	gpu.RunCPU(grid, block, func(c gpu.Ctx) { kernels.WarpReduceSum(c, cpu, x) })
 	tolerance.AssertEqual(t, "cpu sums", cpu, want)
 
-	k, err := simt.Build(ctx, gocuda.Kernels(), "WarpReduceSum")
+	k, err := simt.Build(ctx, simtgo.Kernels(), "WarpReduceSum")
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestWarpVocabularyParity(t *testing.T) {
 
 	const probe = `package kernels
 
-import "github.com/CWBudde/gocuda/gpu"
+import "github.com/CWBudde/simtgo/gpu"
 
 func WarpProbe(ctx gpu.Ctx, bcast, up []float32, mask, vote []int32, x []float32) {
 	i := ctx.GlobalID()

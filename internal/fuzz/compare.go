@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/CWBudde/gocuda/internal/tolerance"
+	"github.com/CWBudde/simtgo/internal/tolerance"
 )
 
 // A Mismatch is one element two backends disagreed about.

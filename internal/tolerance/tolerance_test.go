@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/CWBudde/gocuda/internal/tolerance"
+	"github.com/CWBudde/simtgo/internal/tolerance"
 )
 
 // TestAgreeOnTheValuesNoToleranceRelates pins the order of Agree's questions,

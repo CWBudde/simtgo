@@ -1,6 +1,6 @@
 package kernels
 
-import "github.com/CWBudde/gocuda/gpu"
+import "github.com/CWBudde/simtgo/gpu"
 
 // softclip is the transfer curve Softclip applies, as an ordinary Go
 // function: below the threshold the signal passes through, above it the

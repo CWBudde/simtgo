@@ -210,7 +210,7 @@ type compileOptions struct {
 // That single flag sets four: --ftz=true, --prec-div=false, --prec-sqrt=false
 // and --fmad=true. NUMERICS.md records what each one does to the emitted PTX
 // and what a test may still assert about a kernel compiled this way. It is
-// never inferred -- simt reaches it only from a kernel's //gocuda:fastmath
+// never inferred -- simt reaches it only from a kernel's //simtgo:fastmath
 // directive, which is also recorded in the generated source so that the two
 // compilations hash differently.
 func WithFastMath() CompileOption { return func(o *compileOptions) { o.fastMath = true } }

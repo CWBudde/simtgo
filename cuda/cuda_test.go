@@ -12,14 +12,14 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/CWBudde/gocuda/cuda"
-	"github.com/CWBudde/gocuda/internal/jit"
+	"github.com/CWBudde/simtgo/cuda"
+	"github.com/CWBudde/simtgo/internal/jit"
 )
 
 // requireDevice skips a test that needs a GPU, or fails it when the caller has
 // promised one.
 //
-// GOCUDA_REQUIRE_DEVICE is what a job sets when the whole point of the run is
+// SIMTGO_REQUIRE_DEVICE is what a job sets when the whole point of the run is
 // that kernels executed -- a compute-sanitizer sweep, say. There a silent skip
 // is the worst outcome available: the job goes green having launched nothing.
 // See .github/workflows/sanitizer.yml.
@@ -31,8 +31,8 @@ func requireDevice(t testing.TB) {
 	if cuda.Available() {
 		return
 	}
-	if os.Getenv("GOCUDA_REQUIRE_DEVICE") != "" {
-		t.Fatal("GOCUDA_REQUIRE_DEVICE is set, but no CUDA device is available")
+	if os.Getenv("SIMTGO_REQUIRE_DEVICE") != "" {
+		t.Fatal("SIMTGO_REQUIRE_DEVICE is set, but no CUDA device is available")
 	}
 	t.Skip("no CUDA device available")
 }

@@ -7,11 +7,11 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/CWBudde/gocuda/cuda"
-	"github.com/CWBudde/gocuda/internal/lower"
+	"github.com/CWBudde/simtgo/cuda"
+	"github.com/CWBudde/simtgo/internal/lower"
 )
 
-// Prebuilt is PTX that "gocuda generate" produced ahead of time for one
+// Prebuilt is PTX that "simtgo generate" produced ahead of time for one
 // kernel, registered from the generated file's init so that Build can load it
 // instead of calling NVRTC.
 type Prebuilt struct {

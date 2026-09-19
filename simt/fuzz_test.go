@@ -6,9 +6,9 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/CWBudde/gocuda/internal/fuzz"
-	"github.com/CWBudde/gocuda/internal/fuzz/hostrun"
-	"github.com/CWBudde/gocuda/simt"
+	"github.com/CWBudde/simtgo/internal/fuzz"
+	"github.com/CWBudde/simtgo/internal/fuzz/hostrun"
+	"github.com/CWBudde/simtgo/simt"
 )
 
 // seeds is the committed corpus, and it is committed because Go runs a fuzz

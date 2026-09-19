@@ -9,9 +9,9 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/CWBudde/gocuda/cuda"
-	"github.com/CWBudde/gocuda/internal/fuzz"
-	"github.com/CWBudde/gocuda/simt"
+	"github.com/CWBudde/simtgo/cuda"
+	"github.com/CWBudde/simtgo/internal/fuzz"
+	"github.com/CWBudde/simtgo/simt"
 )
 
 // fuzzArch is what the generated C is compiled for, and it matches the
@@ -39,7 +39,7 @@ const fuzzArch = "compute_75"
 // skips -- ci.yml compiles this file and skips the assertion, which is the
 // whole reason the build tag is here rather than a runtime check.
 //
-// That skip is also why fuzz.yml's nvrtc leg sets GOCUDA_REQUIRE_NVRTC. A leg
+// That skip is also why fuzz.yml's nvrtc leg sets SIMTGO_REQUIRE_NVRTC. A leg
 // that installed the library and then failed to find it would otherwise search
 // for nothing and report success; see requireNVRTC.
 func FuzzNVRTCAcceptsTheGeneratedC(f *testing.F) {

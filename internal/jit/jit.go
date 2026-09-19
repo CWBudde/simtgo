@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/CWBudde/gocuda/cuda"
+	"github.com/CWBudde/simtgo/cuda"
 )
 
 // DefaultCacheDir is where the generated CUDA and the PTX that was actually
@@ -19,7 +19,7 @@ import (
 // a caller starts from rather than a process-wide switch: each Request carries
 // its own directory, so one track's debugging preference cannot silently
 // change the other's.
-const DefaultCacheDir = ".gocuda-cache"
+const DefaultCacheDir = ".simtgo-cache"
 
 // Request is one kernel to load.
 type Request struct {
@@ -37,7 +37,7 @@ type Request struct {
 
 	// FastMath compiles with --use_fast_math. It needs no place in cacheKey:
 	// simt sets it only for a kernel whose generated Src carries the
-	// "// gocuda: fastmath" marker, so the source the key already hashes
+	// "// simtgo: fastmath" marker, so the source the key already hashes
 	// differs, and the two builds cannot collide in the module cache.
 	FastMath bool
 

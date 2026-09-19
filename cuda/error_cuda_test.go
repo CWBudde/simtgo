@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/CWBudde/gocuda/cuda"
+	"github.com/CWBudde/simtgo/cuda"
 )
 
 // TestComputeCapability checks the numeric form of the architecture against

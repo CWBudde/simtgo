@@ -6,10 +6,10 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/CWBudde/gocuda/simt"
+	"github.com/CWBudde/simtgo/simt"
 )
 
-const diagPrelude = "package kernels\n\nimport \"github.com/CWBudde/gocuda/gpu\"\n\n"
+const diagPrelude = "package kernels\n\nimport \"github.com/CWBudde/simtgo/gpu\"\n\n"
 
 // refuse lowers a kernel expected to fail and returns its diagnostics.
 func refuse(t *testing.T, body string) []simt.Diagnostic {
@@ -106,7 +106,7 @@ func TestSignatureRefusalIsAlone(t *testing.T) {
 func TestSingleDiagnosticTextIsUnchanged(t *testing.T) {
 	// The subject is the rendering -- "simt: file:line:col: msg" -- not this
 	// particular refusal, so the fixture only has to be something still
-	// refused. It was []float64 until //gocuda:float64 made that a question
+	// refused. It was []float64 until //simtgo:float64 made that a question
 	// about a directive rather than about a type, and []int8 until narrow
 	// integer storage made that one a question about position.
 	src := diagPrelude + "func K(ctx gpu.Ctx, a []int) { a[0] = 1 }\n"
@@ -176,7 +176,7 @@ func TestGenericKernelRefused(t *testing.T) {
 // reporting it directly gets the import's own position rather than burying it
 // in the type checker's complaint about an unresolvable package.
 func TestImportRefusedWithPosition(t *testing.T) {
-	src := "package kernels\n\nimport (\n\t\"math\"\n\n\t\"github.com/CWBudde/gocuda/gpu\"\n)\n\n" +
+	src := "package kernels\n\nimport (\n\t\"math\"\n\n\t\"github.com/CWBudde/simtgo/gpu\"\n)\n\n" +
 		"func K(ctx gpu.Ctx, a []float32) { a[0] = float32(math.Pi) }\n"
 	_, err := simt.Transpile(fstest.MapFS{"k.go": &fstest.MapFile{Data: []byte(src)}}, "K")
 	if err == nil {

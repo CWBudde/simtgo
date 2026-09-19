@@ -7,29 +7,29 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/CWBudde/gocuda"
-	"github.com/CWBudde/gocuda/simt"
+	"github.com/CWBudde/simtgo"
+	"github.com/CWBudde/simtgo/simt"
 )
 
 // TestGolden pins the generated CUDA for every example kernel. Run with
-// GOCUDA_UPDATE=1 to refresh the golden files after an intentional change.
+// SIMTGO_UPDATE=1 to refresh the golden files after an intentional change.
 func TestGolden(t *testing.T) {
 	for _, name := range []string{"VecAdd", "Magnitude", "MagnitudeFast", "Scale", "FIR", "Classify", "Softclip", "Transpose", "Quantize", "BandGain", "Gray", "Histogram", "WarpReduceSum"} {
 		t.Run(name, func(t *testing.T) {
-			u, err := simt.Transpile(gocuda.Kernels(), name)
+			u, err := simt.Transpile(simtgo.Kernels(), name)
 			if err != nil {
 				t.Fatalf("Transpile: %v", err)
 			}
 			got := u.Source
 			path := filepath.Join("testdata", name+".cu")
-			if os.Getenv("GOCUDA_UPDATE") == "1" {
+			if os.Getenv("SIMTGO_UPDATE") == "1" {
 				if err := os.WriteFile(path, []byte(got), 0o644); err != nil {
 					t.Fatal(err)
 				}
 			}
 			want, err := os.ReadFile(path)
 			if err != nil {
-				t.Fatalf("read golden (set GOCUDA_UPDATE=1 to create): %v", err)
+				t.Fatalf("read golden (set SIMTGO_UPDATE=1 to create): %v", err)
 			}
 			if got != string(want) {
 				t.Errorf("generated CUDA differs from %s:\n--- got ---\n%s", path, got)
@@ -42,7 +42,7 @@ func TestGolden(t *testing.T) {
 // readable source string rather than a fixture.
 func transpile(t *testing.T, body string) *simt.Unit {
 	t.Helper()
-	src := "package kernels\n\nimport \"github.com/CWBudde/gocuda/gpu\"\n\n" + body + "\n"
+	src := "package kernels\n\nimport \"github.com/CWBudde/simtgo/gpu\"\n\n" + body + "\n"
 	u, err := simt.Transpile(fstest.MapFS{"k.go": &fstest.MapFile{Data: []byte(src)}}, "K")
 	if err != nil {
 		t.Fatalf("Transpile: %v", err)
@@ -186,7 +186,7 @@ func TestUnaryOperatorsDoNotFuse(t *testing.T) {
 // thing either way, and every kernel in this repository and every golden file
 // is that case.
 func TestRangeIndexIsPerIteration(t *testing.T) {
-	const prelude = "package kernels\n\nimport \"github.com/CWBudde/gocuda/gpu\"\n\n"
+	const prelude = "package kernels\n\nimport \"github.com/CWBudde/simtgo/gpu\"\n\n"
 	cases := []struct {
 		name, body string
 		want, not  []string
@@ -240,7 +240,7 @@ func TestRangeIndexIsPerIteration(t *testing.T) {
 // has nothing to define, since its arithmetic already wraps in C; and a float
 // has no wrapping to speak of.
 func TestWrappingArithmetic(t *testing.T) {
-	const prelude = "package kernels\n\nimport \"github.com/CWBudde/gocuda/gpu\"\n\n"
+	const prelude = "package kernels\n\nimport \"github.com/CWBudde/simtgo/gpu\"\n\n"
 	cases := []struct{ name, body, want string }{{
 		// One conversion back, three operands converted in -- not one cast
 		// pair per operator, which is the point of the whole design.
@@ -307,7 +307,7 @@ func TestWrappingArithmetic(t *testing.T) {
 // it is also outside what anything checks is stated in SPEC.md rather than
 // left to be discovered here.
 func TestShiftsThatStayAccepted(t *testing.T) {
-	const prelude = "package kernels\n\nimport \"github.com/CWBudde/gocuda/gpu\"\n\n"
+	const prelude = "package kernels\n\nimport \"github.com/CWBudde/simtgo/gpu\"\n\n"
 	cases := []struct{ name, body string }{{
 		name: "an int shifted left by a constant",
 		body: "func K(ctx gpu.Ctx, y []int32) { o := ctx.GlobalID(); y[0] = int32(o << 3) }",
@@ -413,7 +413,7 @@ func TestShadowedLen(t *testing.T) {
 // out of its source, so that Build and Launch can enforce it without the call
 // site having to repeat it.
 func TestUnitRequirements(t *testing.T) {
-	u, err := simt.Transpile(gocuda.Kernels(), "FIR")
+	u, err := simt.Transpile(simtgo.Kernels(), "FIR")
 	if err != nil {
 		t.Fatalf("Transpile: %v", err)
 	}
@@ -452,7 +452,7 @@ func TestUnitRequirements(t *testing.T) {
 		{"SharedU64(4)", 32},
 	} {
 		t.Run(tc.call, func(t *testing.T) {
-			u := transpile(t, "//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float32) { s := ctx."+tc.call+"; y[0] = float32(s[0]) }")
+			u := transpile(t, "//simtgo:float64\nfunc K(ctx gpu.Ctx, y []float32) { s := ctx."+tc.call+"; y[0] = float32(s[0]) }")
 			if u.SharedBytes != tc.want {
 				t.Errorf("SharedBytes = %d, want %d", u.SharedBytes, tc.want)
 			}
@@ -492,7 +492,7 @@ func TestSharedTiles(t *testing.T) {
 		want: "__shared__ float s[8];",
 	}, {
 		name: "float64",
-		body: "//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float64) { s := ctx.SharedF64(8); y[0] = s[0] }",
+		body: "//simtgo:float64\nfunc K(ctx gpu.Ctx, y []float64) { s := ctx.SharedF64(8); y[0] = s[0] }",
 		want: "__shared__ double s[8];",
 	}, {
 		name: "int32",
@@ -533,7 +533,7 @@ func TestSharedTiles(t *testing.T) {
 // and counted on the kernel that reaches it because that is what has to ask
 // the device for it.
 func TestSharedTileInADeviceFunction(t *testing.T) {
-	u := transpile(t, "//gocuda:ignore\nfunc stage(ctx gpu.Ctx, x []float32) float32 {\n"+
+	u := transpile(t, "//simtgo:ignore\nfunc stage(ctx gpu.Ctx, x []float32) float32 {\n"+
 		"\ttile := ctx.SharedF32(64)\n"+
 		"\ttile[ctx.ThreadIdx()%64] = x[0]\n"+
 		"\tctx.SyncThreads()\n"+
@@ -594,7 +594,7 @@ func TestDynamicSharedTile(t *testing.T) {
 		})
 	}
 	t.Run("SharedDynF64", func(t *testing.T) {
-		got := transpile(t, "//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float64) { s := ctx.SharedDynF64(); y[0] = s[0] }").Source
+		got := transpile(t, "//simtgo:float64\nfunc K(ctx gpu.Ctx, y []float64) { s := ctx.SharedDynF64(); y[0] = s[0] }").Source
 		if want := "extern __shared__ double s[];"; !strings.Contains(got, want) {
 			t.Errorf("generated CUDA does not contain %q:\n%s", want, got)
 		}
@@ -806,7 +806,7 @@ func TestDeviceFunctions(t *testing.T) {
 		// signature and from the call, the way a kernel's own is. The marker
 		// is what stops the helper being taken for a kernel in its own right.
 		name: "a helper taking gpu.Ctx, marked as a device function",
-		body: "//gocuda:device\nfunc where(ctx gpu.Ctx) int { return ctx.GlobalID() }\n\n" +
+		body: "//simtgo:device\nfunc where(ctx gpu.Ctx) int { return ctx.GlobalID() }\n\n" +
 			"func K(ctx gpu.Ctx, y []float32) { i := where(ctx); if i < len(y) { y[i] = 1 } }",
 		want: []string{"__device__ int where();", "int i = where();"},
 	}, {
@@ -816,17 +816,17 @@ func TestDeviceFunctions(t *testing.T) {
 		// still splits into a pointer and a length on both sides. An emitter
 		// that dropped it on one side only would emit a call C rejects.
 		name: "a marked helper whose Ctx is followed by a slice",
-		body: "//gocuda:device\nfunc mine(ctx gpu.Ctx, xs []float32) float32 { return xs[ctx.GlobalID()%len(xs)] }\n\n" +
+		body: "//simtgo:device\nfunc mine(ctx gpu.Ctx, xs []float32) float32 { return xs[ctx.GlobalID()%len(xs)] }\n\n" +
 			"func K(ctx gpu.Ctx, y, x []float32) { y[0] = mine(ctx, x) }",
 		want: []string{
 			"__device__ float mine(const float* __restrict__ xs, int xs_len);",
 			"y[0] = mine(x, x_len);",
 		},
 	}, {
-		// //gocuda:ignore keeps meaning what it always meant: not a kernel.
+		// //simtgo:ignore keeps meaning what it always meant: not a kernel.
 		// A helper that carries it is still lowered when a kernel calls it.
-		name: "//gocuda:ignore still opts a Ctx helper out of being a kernel",
-		body: "//gocuda:ignore\nfunc where(ctx gpu.Ctx) int { return ctx.GlobalID() }\n\n" +
+		name: "//simtgo:ignore still opts a Ctx helper out of being a kernel",
+		body: "//simtgo:ignore\nfunc where(ctx gpu.Ctx) int { return ctx.GlobalID() }\n\n" +
 			"func K(ctx gpu.Ctx, y []float32) { i := where(ctx); if i < len(y) { y[i] = 1 } }",
 		want: []string{"__device__ int where();", "int i = where();"},
 	}}
@@ -1224,7 +1224,7 @@ func TestWideScalars(t *testing.T) {
 // TestFloat64Directive covers both spellings of the opt-in, and that a double
 // constant keeps its precision rather than being rounded to a float.
 func TestFloat64Directive(t *testing.T) {
-	onFunc := transpile(t, "//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float64) { y[0] = 0.1 }")
+	onFunc := transpile(t, "//simtgo:float64\nfunc K(ctx gpu.Ctx, y []float64) { y[0] = 0.1 }")
 	if !strings.Contains(onFunc.Source, "double* __restrict__ y") {
 		t.Errorf("directive on the function had no effect:\n%s", onFunc.Source)
 	}
@@ -1234,7 +1234,7 @@ func TestFloat64Directive(t *testing.T) {
 
 	// Directly above the package clause, with no blank line: that is what makes
 	// it the file's doc comment rather than a detached comment near the top.
-	src := "//gocuda:float64\npackage kernels\n\nimport \"github.com/CWBudde/gocuda/gpu\"\n\n" +
+	src := "//simtgo:float64\npackage kernels\n\nimport \"github.com/CWBudde/simtgo/gpu\"\n\n" +
 		"func K(ctx gpu.Ctx, y []float64) { y[0] = 1 }\n"
 	u, err := simt.Transpile(fstest.MapFS{"k.go": &fstest.MapFile{Data: []byte(src)}}, "K")
 	if err != nil {
@@ -1257,7 +1257,7 @@ func TestFloat64Directive(t *testing.T) {
 // TestStructLayoutRoundTrip in the parity tests measures them on a device.
 func TestStructLayoutIsAsserted(t *testing.T) {
 	u := transpile(t, "type Shape struct {\n\tFloor float32\n\tCount int32\n\tBias  float64\n}\n\n"+
-		"//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float32, cfg Shape) { y[0] = cfg.Floor }")
+		"//simtgo:float64\nfunc K(ctx gpu.Ctx, y []float32, cfg Shape) { y[0] = cfg.Floor }")
 	for _, want := range []string{
 		// Nothing but the three fields. Floor ends at 4, Count ends at 8 and
 		// Bias starts there, and 8 + 8 is the whole struct, so this is a Go
@@ -1403,7 +1403,7 @@ func TestAtomics(t *testing.T) {
 		// A slice parameter of a device function is a pointer like any other,
 		// so an atomic works across the call boundary with nothing special.
 		name: "inside a device function",
-		body: "//gocuda:ignore\nfunc bump(h []int32, i int) { gpu.AtomicAddI32(h, i, 1) }\n\n" +
+		body: "//simtgo:ignore\nfunc bump(h []int32, i int) { gpu.AtomicAddI32(h, i, 1) }\n\n" +
 			"func K(ctx gpu.Ctx, h []int32) { bump(h, ctx.GlobalID()) }",
 		want: "atomicAdd(&h[i], 1);",
 	}}
@@ -1422,7 +1422,7 @@ func TestAtomics(t *testing.T) {
 // built-ins. sqrt rather than sqrtf is the whole point: reaching the float32
 // table by accident would halve the precision the kernel asked for, silently.
 func TestFloat64Math(t *testing.T) {
-	const decl = "//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float64) "
+	const decl = "//simtgo:float64\nfunc K(ctx gpu.Ctx, y []float64) "
 	cases := []struct{ name, body, want string }{{
 		name: "sqrt is the double built-in, not sqrtf",
 		body: decl + "{ y[0] = gpu.Sqrt64(y[1]) }",
@@ -1528,15 +1528,15 @@ func TestStructPadding(t *testing.T) {
 	cases := []struct{ name, body, want string }{{
 		name: "an internal hole is declared",
 		body: "type S struct{ A int32; B float64 }\n\n" +
-			"//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float32, s S) { y[0] = float32(s.A) + float32(s.B) }",
-		want: "struct S\n{\n\tint A;\n\tunsigned char gocuda_pad0[4];\n\tdouble B;\n};",
+			"//simtgo:float64\nfunc K(ctx gpu.Ctx, y []float32, s S) { y[0] = float32(s.A) + float32(s.B) }",
+		want: "struct S\n{\n\tint A;\n\tunsigned char simtgo_pad0[4];\n\tdouble B;\n};",
 	}, {
 		// The blind spot the trailing member closes: a byte inserted earlier
 		// could hide inside the slack at the end and leave sizeof unchanged.
 		name: "trailing slack is declared too",
 		body: "type S struct{ A float64; B int32 }\n\n" +
-			"//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float32, s S) { y[0] = float32(s.A) + float32(s.B) }",
-		want: "struct S\n{\n\tdouble A;\n\tint B;\n\tunsigned char gocuda_pad0[4];\n};",
+			"//simtgo:float64\nfunc K(ctx gpu.Ctx, y []float32, s S) { y[0] = float32(s.A) + float32(s.B) }",
+		want: "struct S\n{\n\tdouble A;\n\tint B;\n\tunsigned char simtgo_pad0[4];\n};",
 	}, {
 		name: "a layout with no holes gets no padding",
 		body: "type S struct{ A, B float32 }\n\n" +
@@ -1545,15 +1545,15 @@ func TestStructPadding(t *testing.T) {
 	}, {
 		name: "a positional literal steps over the padding",
 		body: "type S struct{ A int32; B float64 }\n\n" +
-			"//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float32) { s := S{1, 2}; y[0] = float32(s.A) + float32(s.B) }",
+			"//simtgo:float64\nfunc K(ctx gpu.Ctx, y []float32) { s := S{1, 2}; y[0] = float32(s.A) + float32(s.B) }",
 		want: "S s = S{1, {}, 2.0};",
 	}, {
 		// An over-aligned field, where the hole is larger than the field before
 		// it rather than a leftover byte or two.
 		name: "a one-byte field before an eight-byte one",
 		body: "type S struct{ A uint8; B float64 }\n\n" +
-			"//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float32, s S) { y[0] = float32(int32(s.A)) + float32(s.B) }",
-		want: "\tunsigned char A;\n\tunsigned char gocuda_pad0[7];\n\tdouble B;\n",
+			"//simtgo:float64\nfunc K(ctx gpu.Ctx, y []float32, s S) { y[0] = float32(int32(s.A)) + float32(s.B) }",
+		want: "\tunsigned char A;\n\tunsigned char simtgo_pad0[7];\n\tdouble B;\n",
 	}}
 
 	for _, tc := range cases {
@@ -1686,7 +1686,7 @@ func TestWarpPrimitives(t *testing.T) {
 		// with nothing special: they are not promises about a launch, which is
 		// what SharedF32 and AssumeBlockDim are refused in one for.
 		name: "inside a device function taking a Ctx",
-		body: "//gocuda:ignore\nfunc lane(ctx gpu.Ctx) int { return ctx.LaneID() }\n\n" +
+		body: "//simtgo:ignore\nfunc lane(ctx gpu.Ctx) int { return ctx.LaneID() }\n\n" +
 			"func K(ctx gpu.Ctx, y []float32) { y[0] = float32(lane(ctx)) }",
 		want: "return (int)((threadIdx.x + blockDim.x * (threadIdx.y + blockDim.y * threadIdx.z)) % 32);",
 	}}
@@ -1745,7 +1745,7 @@ func TestUniformBarriersLower(t *testing.T) {
 		// The barrier is inside the __device__ function and the call is on the
 		// block's common path, which is what makes it every thread's barrier.
 		name: "a barrier inside a device function called by everyone",
-		body: "//gocuda:ignore\nfunc stage(ctx gpu.Ctx) float32 { s := ctx.SharedF32(4)\n" +
+		body: "//simtgo:ignore\nfunc stage(ctx gpu.Ctx) float32 { s := ctx.SharedF32(4)\n" +
 			"ctx.SyncThreads()\nreturn s[0] }\n\n" +
 			"func K(ctx gpu.Ctx, y []float32) { v := stage(ctx)\n" +
 			"if ctx.GlobalID() < len(y) { y[0] = v } }",
@@ -1777,7 +1777,7 @@ func TestFastMathDirective(t *testing.T) {
 	const body = "func K(ctx gpu.Ctx, y []float32, d float32) { y[0] = gpu.Sqrt(y[1]) / d }"
 
 	plain := transpile(t, body)
-	onFunc := transpile(t, "//gocuda:fastmath\n"+body)
+	onFunc := transpile(t, "//simtgo:fastmath\n"+body)
 
 	if !onFunc.FastMath {
 		t.Error("directive on the function did not set Unit.FastMath")
@@ -1791,7 +1791,7 @@ func TestFastMathDirective(t *testing.T) {
 
 	// Directly above the package clause, with no blank line: that is what makes
 	// it the file's doc comment rather than a detached comment near the top.
-	src := "//gocuda:fastmath\npackage kernels\n\nimport \"github.com/CWBudde/gocuda/gpu\"\n\n" + body + "\n"
+	src := "//simtgo:fastmath\npackage kernels\n\nimport \"github.com/CWBudde/simtgo/gpu\"\n\n" + body + "\n"
 	onFile, err := simt.Transpile(fstest.MapFS{"k.go": &fstest.MapFile{Data: []byte(src)}}, "K")
 	if err != nil {
 		t.Fatalf("directive in the package comment was not honoured: %v", err)
@@ -1810,8 +1810,8 @@ func TestFastMathDirective(t *testing.T) {
 // kernel, or the flag would be silently dropped on the ahead-of-time path.
 func TestFastMathPrebuiltDoesNotCrossOver(t *testing.T) {
 	const body = "func K(ctx gpu.Ctx, y []float32, d float32) { y[0] = gpu.Sqrt(y[1]) / d }"
-	plainSrc := "package kernels\n\nimport \"github.com/CWBudde/gocuda/gpu\"\n\n" + body + "\n"
-	fastSrc := "package kernels\n\nimport \"github.com/CWBudde/gocuda/gpu\"\n\n//gocuda:fastmath\n" + body + "\n"
+	plainSrc := "package kernels\n\nimport \"github.com/CWBudde/simtgo/gpu\"\n\n" + body + "\n"
+	fastSrc := "package kernels\n\nimport \"github.com/CWBudde/simtgo/gpu\"\n\n//simtgo:fastmath\n" + body + "\n"
 
 	plainFS := fstest.MapFS{"k.go": &fstest.MapFile{Data: []byte(plainSrc)}}
 	fastFS := fstest.MapFS{"k.go": &fstest.MapFile{Data: []byte(fastSrc)}}
@@ -1843,7 +1843,7 @@ func TestFastMathPrebuiltDoesNotCrossOver(t *testing.T) {
 func TestBoundsChecksCoverWhatTheyClaim(t *testing.T) {
 	const src = `package kernels
 
-import "github.com/CWBudde/gocuda/gpu"
+import "github.com/CWBudde/simtgo/gpu"
 
 type Cfg struct {
 	Taps [4]float32
@@ -1867,7 +1867,7 @@ func Probe(ctx gpu.Ctx, y, x []float32, cfg Cfg) {
 	if err != nil {
 		t.Fatalf("Transpile: %v", err)
 	}
-	if strings.Contains(rel.Source, "gocuda_bounds") {
+	if strings.Contains(rel.Source, "simtgo_bounds") {
 		t.Fatalf("the release build emitted a check:\n%s", rel.Source)
 	}
 
@@ -1877,15 +1877,15 @@ func Probe(ctx gpu.Ctx, y, x []float32, cfg Cfg) {
 	}
 
 	checked := []struct{ what, want string }{
-		{"a slice read at a computed index", "x[gocuda_bounds(i, x_len)]"},
-		{"a shared tile written at a computed index", "tile[gocuda_bounds((int)threadIdx.x, 64)]"},
-		{"a slice read at a constant index", "x[gocuda_bounds(0, x_len)]"},
-		{"a slice written at a constant index", "y[gocuda_bounds(0, y_len)]"},
+		{"a slice read at a computed index", "x[simtgo_bounds(i, x_len)]"},
+		{"a shared tile written at a computed index", "tile[simtgo_bounds((int)threadIdx.x, 64)]"},
+		{"a slice read at a constant index", "x[simtgo_bounds(0, x_len)]"},
+		{"a slice written at a constant index", "y[simtgo_bounds(0, y_len)]"},
 		// A shared tile is a Go slice, whatever it lowers to, so go/types has
 		// refused nothing about a constant index into one -- tile[300] on a
 		// 64-element tile compiles in Go and this is the only thing that
 		// catches it.
-		{"a constant index into a shared tile", "tile[gocuda_bounds(3, 64)]"},
+		{"a constant index into a shared tile", "tile[simtgo_bounds(3, 64)]"},
 	}
 	for _, c := range checked {
 		if !strings.Contains(dbg.Source, c.want) {
@@ -1905,7 +1905,7 @@ func Probe(ctx gpu.Ctx, y, x []float32, cfg Cfg) {
 	}
 
 	// The helper is defined exactly when something calls it.
-	if !strings.Contains(dbg.Source, "__device__ __forceinline__ long long gocuda_bounds") {
+	if !strings.Contains(dbg.Source, "__device__ __forceinline__ long long simtgo_bounds") {
 		t.Errorf("the helper is called but never defined:\n%s", dbg.Source)
 	}
 }
@@ -1916,7 +1916,7 @@ func Probe(ctx gpu.Ctx, y, x []float32, cfg Cfg) {
 func TestBoundsChecksDefineNoHelperWhenNothingIsIndexed(t *testing.T) {
 	fsys := fstest.MapFS{"k.go": &fstest.MapFile{Data: []byte(`package kernels
 
-import "github.com/CWBudde/gocuda/gpu"
+import "github.com/CWBudde/simtgo/gpu"
 
 func NoIndex(ctx gpu.Ctx) {
 	ctx.SyncThreads()
@@ -1926,13 +1926,13 @@ func NoIndex(ctx gpu.Ctx) {
 	if err != nil {
 		t.Fatalf("Transpile(WithBoundsChecks): %v", err)
 	}
-	if strings.Contains(dbg.Source, "gocuda_bounds") {
+	if strings.Contains(dbg.Source, "simtgo_bounds") {
 		t.Errorf("a helper was defined for a kernel that indexes nothing:\n%s", dbg.Source)
 	}
 	// The marker is still there, and it is the whole reason it exists: without
 	// it this kernel's debug build would hash to its release build and load
 	// the release artifact.
-	if !strings.Contains(dbg.Source, "// gocuda: bounds") {
+	if !strings.Contains(dbg.Source, "// simtgo: bounds") {
 		t.Errorf("no marker, so this kernel's debug build is indistinguishable from its release build:\n%s", dbg.Source)
 	}
 }

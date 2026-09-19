@@ -163,7 +163,7 @@ func ArgU64(v uint64) Arg {
 	return Arg{b: b[:]}
 }
 
-// ArgF64 passes a double, which only a kernel carrying //gocuda:float64 can
+// ArgF64 passes a double, which only a kernel carrying //simtgo:float64 can
 // declare a parameter for.
 func ArgF64(v float64) Arg {
 	var b [8]byte

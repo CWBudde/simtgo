@@ -50,7 +50,7 @@ func (p *Program) Source() string {
 }
 
 // gpuImportPath is the only import a kernel package may have.
-const gpuImportPath = "github.com/CWBudde/gocuda/gpu"
+const gpuImportPath = "github.com/CWBudde/simtgo/gpu"
 
 // srcWriter accumulates Go text at an indentation.
 type srcWriter struct {
@@ -71,15 +71,15 @@ func (w *srcWriter) out() { w.depth-- }
 
 // writeFunc renders one declaration, directives included.
 //
-// //gocuda:float64 belongs on the kernel and nowhere else: it is a promise
+// //simtgo:float64 belongs on the kernel and nowhere else: it is a promise
 // about what a launch costs, so it covers the whole translation unit including
 // every helper the kernel reaches, and a helper carrying its own is refused.
 func (p *Program) writeFunc(w *srcWriter, fn *Func) {
 	if fn.Kernel && p.Float64 {
-		w.line("//gocuda:float64")
+		w.line("//simtgo:float64")
 	}
 	if fn.Device {
-		w.line("//gocuda:device")
+		w.line("//simtgo:device")
 	}
 	var params []string
 	if fn.Ctx {

@@ -8,7 +8,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/CWBudde/gocuda/cuda"
+	"github.com/CWBudde/simtgo/cuda"
 )
 
 // device opens a context for one test or benchmark and closes it afterwards.

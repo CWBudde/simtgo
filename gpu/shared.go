@@ -93,7 +93,7 @@ func sharedTile[T any](c Ctx, n int, kind string) []T {
 // the same buffer, so n must be a constant expression the transpiler can fold.
 func (c Ctx) SharedF32(n int) []float32 { return sharedTile[float32](c, n, "SharedF32") }
 
-// SharedF64 is SharedF32 for float64, and needs //gocuda:float64 on the kernel
+// SharedF64 is SharedF32 for float64, and needs //simtgo:float64 on the kernel
 // for the reason every other double on the device does: the permission is
 // about what the launch costs, and a tile of doubles is also twice the shared
 // memory a block has to find.
@@ -149,7 +149,7 @@ func dynamicTile[T any](c Ctx, kind string) []T {
 // refuses it with a position instead of leaving the aliasing to be discovered.
 func (c Ctx) SharedDynF32() []float32 { return dynamicTile[float32](c, "SharedDynF32") }
 
-// SharedDynF64 is SharedDynF32 for float64, and needs //gocuda:float64 for the
+// SharedDynF64 is SharedDynF32 for float64, and needs //simtgo:float64 for the
 // same reason SharedF64 does.
 func (c Ctx) SharedDynF64() []float64 { return dynamicTile[float64](c, "SharedDynF64") }
 

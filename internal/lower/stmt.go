@@ -446,7 +446,7 @@ func (t *transpiler) returnStmt(s *ast.ReturnStmt) {
 // Everything else about a tile is derived from that one entry -- the C element
 // type through ctypeElem, the width through the same types.Sizes the rest of
 // the emitter measures with -- so a new element type is a row here and nothing
-// else. That is also what makes SharedF64 need //gocuda:float64 without a rule
+// else. That is also what makes SharedF64 need //simtgo:float64 without a rule
 // of its own: ctypeElem refuses float64 on a kernel that did not opt in,
 // wherever the type came from, so membership of the double-precision
 // vocabulary is what demands the permission rather than a second list that a

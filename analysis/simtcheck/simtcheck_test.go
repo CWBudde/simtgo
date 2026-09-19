@@ -5,7 +5,7 @@ import (
 
 	"golang.org/x/tools/go/analysis/analysistest"
 
-	"github.com/CWBudde/gocuda/analysis/simtcheck"
+	"github.com/CWBudde/simtgo/analysis/simtcheck"
 )
 
 // TestAnalyzer checks the wiring, not the subset: which functions are treated
@@ -22,5 +22,5 @@ import (
 // the entire point of running the lowering from an analysis pass.
 func TestAnalyzer(t *testing.T) {
 	analysistest.Run(t, analysistest.TestData(), simtcheck.Analyzer,
-		"gocuda.test/kernels", "gocuda.test/nokernels")
+		"simtgo.test/kernels", "simtgo.test/nokernels")
 }

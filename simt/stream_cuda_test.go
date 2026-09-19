@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/CWBudde/gocuda/cuda"
+	"github.com/CWBudde/simtgo/cuda"
 )
 
 // TestLaunchOnQueuesOnAStream is the simt side of the asynchronous launch:

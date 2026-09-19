@@ -18,9 +18,9 @@ import (
 func redirect(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	t.Setenv("GOCUDA_PTX_CACHE", dir)
+	t.Setenv("SIMTGO_PTX_CACHE", dir)
 	if got := diskCacheDir(); got != dir {
-		t.Fatalf("GOCUDA_PTX_CACHE = %q but the cache resolved to %q", dir, got)
+		t.Fatalf("SIMTGO_PTX_CACHE = %q but the cache resolved to %q", dir, got)
 	}
 	return dir
 }
@@ -139,7 +139,7 @@ func TestDiskMissesRatherThanFails(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(ro, "probe"), []byte("x"), 0o644); err == nil {
 		t.Skip("the directory mode did not take on this filesystem")
 	}
-	t.Setenv("GOCUDA_PTX_CACHE", filepath.Join(ro, "ptx"))
+	t.Setenv("SIMTGO_PTX_CACHE", filepath.Join(ro, "ptx"))
 	blocked := diskKey("blocked", "compute_75", "nvrtc12.8")
 	writeDisk(blocked, []byte("the ptx")) // must not panic
 	if got := readDisk(blocked); got != nil {

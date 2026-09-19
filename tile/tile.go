@@ -14,7 +14,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/CWBudde/gocuda/cuda"
+	"github.com/CWBudde/simtgo/cuda"
 )
 
 const (

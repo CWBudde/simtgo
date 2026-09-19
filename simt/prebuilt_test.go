@@ -148,7 +148,7 @@ func TestVerifyPrebuilt(t *testing.T) {
 	swapRegistry(t)
 	fsys := fstest.MapFS{"k.go": &fstest.MapFile{Data: []byte(`package kernels
 
-import "github.com/CWBudde/gocuda/gpu"
+import "github.com/CWBudde/simtgo/gpu"
 
 func Scale(ctx gpu.Ctx, y, x []float32, a float32) {
 	i := ctx.GlobalID()
@@ -204,7 +204,7 @@ func TestBoundsChecksMissThePrebuilt(t *testing.T) {
 
 	src := fstest.MapFS{"k.go": &fstest.MapFile{Data: []byte(`package kernels
 
-import "github.com/CWBudde/gocuda/gpu"
+import "github.com/CWBudde/simtgo/gpu"
 
 func Scale(ctx gpu.Ctx, y, x []float32, a float32) {
 	i := ctx.GlobalID()
@@ -229,10 +229,10 @@ func Scale(ctx gpu.Ctx, y, x []float32, a float32) {
 	if release.SourceHash == debug.SourceHash {
 		t.Fatal("the two builds hash the same, so a debug build would load a release artifact")
 	}
-	if !strings.Contains(debug.Source, "gocuda_bounds") {
+	if !strings.Contains(debug.Source, "simtgo_bounds") {
 		t.Errorf("no check in the debug source:\n%s", debug.Source)
 	}
-	if strings.Contains(release.Source, "gocuda_bounds") {
+	if strings.Contains(release.Source, "simtgo_bounds") {
 		t.Errorf("a check reached the release source:\n%s", release.Source)
 	}
 

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/CWBudde/gocuda/gpu"
+	"github.com/CWBudde/simtgo/gpu"
 )
 
 // mustPanic runs fn and returns the message it panicked with, failing the test

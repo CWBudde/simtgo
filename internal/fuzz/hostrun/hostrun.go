@@ -65,8 +65,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/CWBudde/gocuda/gpu"
-	"github.com/CWBudde/gocuda/internal/lower"
+	"github.com/CWBudde/simtgo/gpu"
+	"github.com/CWBudde/simtgo/internal/lower"
 )
 
 // ErrNoCompiler reports that no host C++ compiler was found.
@@ -402,19 +402,19 @@ var compiler = sync.OnceValues(func() (string, error) {
 
 // cacheDir is where compiled drivers live.
 //
-// The user cache directory rather than the repository's .gocuda-cache, because
+// The user cache directory rather than the repository's .simtgo-cache, because
 // these are not artifacts of a build anyone inspects and a fuzzer produces one
-// per kernel shape; GOCUDA_HOSTRUN_CACHE overrides it for a caller that wants
+// per kernel shape; SIMTGO_HOSTRUN_CACHE overrides it for a caller that wants
 // them somewhere it can delete.
 var cacheDir = sync.OnceValue(func() string {
-	if dir := os.Getenv("GOCUDA_HOSTRUN_CACHE"); dir != "" {
+	if dir := os.Getenv("SIMTGO_HOSTRUN_CACHE"); dir != "" {
 		return dir
 	}
 	base, err := os.UserCacheDir()
 	if err != nil {
 		base = os.TempDir()
 	}
-	return filepath.Join(base, "gocuda", "hostrun")
+	return filepath.Join(base, "simtgo", "hostrun")
 })
 
 // A slot is one kernel parameter, resolved against the Go value bound to it.

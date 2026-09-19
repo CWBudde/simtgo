@@ -276,7 +276,7 @@ func runSources(t *testing.T, progs []*Program, args []*Args) [][]string {
 		writeRunner(&body, i, p, args[i])
 	}
 
-	mod := fmt.Sprintf("module fuzzprobe\n\ngo %s\n\nrequire github.com/CWBudde/gocuda v0.0.0\n\nreplace github.com/CWBudde/gocuda => %s\n",
+	mod := fmt.Sprintf("module fuzzprobe\n\ngo %s\n\nrequire github.com/CWBudde/simtgo v0.0.0\n\nreplace github.com/CWBudde/simtgo => %s\n",
 		goModVersion(), repoRoot(t))
 	write(t, filepath.Join(dir, "go.mod"), mod)
 	write(t, filepath.Join(dir, "main.go"), mainSource(imports.String(), body.String()))
@@ -351,7 +351,7 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/CWBudde/gocuda/gpu"
+	"github.com/CWBudde/simtgo/gpu"
 ` + imports + `)
 
 func main() {

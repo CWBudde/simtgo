@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/CWBudde/gocuda/gpu"
+	"github.com/CWBudde/simtgo/gpu"
 )
 
 // TestSharedTileElementTypeMismatch is the size check's sibling, and the one

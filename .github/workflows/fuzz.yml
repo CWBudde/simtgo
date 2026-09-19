@@ -16,7 +16,7 @@
 #
 # The NVRTC oracle runs here too, in a job of its own. It needs a CUDA toolkit
 # and not a device -- NVRTC compiles to PTX and nothing is launched -- so the
-# nvrtc-cu12 wheel is enough, and GOCUDA_LIBNVRTC points the loader's search at
+# nvrtc-cu12 wheel is enough, and SIMTGO_LIBNVRTC points the loader's search at
 # it. That is the same trick docs/toolchain.md records for running
 # TestGeneratedCCompiles on a machine with no GPU.
 #
@@ -130,20 +130,20 @@ jobs:
       - name: Install NVRTC
         run: |
           pip install --target "$RUNNER_TEMP/nvrtc" nvidia-cuda-nvrtc-cu12==12.8.93
-          echo "GOCUDA_LIBNVRTC=$RUNNER_TEMP/nvrtc/nvidia/cuda_nvrtc/lib/libnvrtc.so.12" >>"$GITHUB_ENV"
+          echo "SIMTGO_LIBNVRTC=$RUNNER_TEMP/nvrtc/nvidia/cuda_nvrtc/lib/libnvrtc.so.12" >>"$GITHUB_ENV"
 
       # Says out loud that the library landed where the previous step promised,
-      # the way the other jobs assert g++ and nvidia-smi. GOCUDA_REQUIRE_NVRTC
+      # the way the other jobs assert g++ and nvidia-smi. SIMTGO_REQUIRE_NVRTC
       # below would catch it anyway, but it would catch it after a checkout, a
       # toolchain download and a compile, and name a Go test rather than a pip.
       - name: Show the NVRTC library
-        run: ls -l "$GOCUDA_LIBNVRTC"
+        run: ls -l "$SIMTGO_LIBNVRTC"
 
-      # GOCUDA_REQUIRE_NVRTC turns the target's "no CUDA toolkit available"
+      # SIMTGO_REQUIRE_NVRTC turns the target's "no CUDA toolkit available"
       # skip into a failure. Without it this job is the worst outcome
-      # available: with GOCUDA_LIBNVRTC pointing anywhere wrong, the leg passes
+      # available: with SIMTGO_LIBNVRTC pointing anywhere wrong, the leg passes
       # in three milliseconds having compiled nothing, and reports success.
-      # GOCUDA_WARNING_TRIAGE gives the target a second look at the warnings
+      # SIMTGO_WARNING_TRIAGE gives the target a second look at the warnings
       # its allowlist suppressed, because that allowlist keys on the NVRTC
       # diagnostic number and the number is the same for a dropped use and for
       # the generator's own filler -- docs/verification.md's layer 10. It can
@@ -154,8 +154,8 @@ jobs:
       # a service.
       - name: Search
         env:
-          GOCUDA_REQUIRE_NVRTC: "1"
-          GOCUDA_WARNING_TRIAGE: "1"
+          SIMTGO_REQUIRE_NVRTC: "1"
+          SIMTGO_WARNING_TRIAGE: "1"
           TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
         run: |
           go test -tags cuda -timeout 0 -run '^$' \

@@ -3,7 +3,7 @@ package tile
 import (
 	"fmt"
 
-	"github.com/CWBudde/gocuda/cuda"
+	"github.com/CWBudde/simtgo/cuda"
 )
 
 // AliasError is a materialisation whose output buffer overlapped one of the

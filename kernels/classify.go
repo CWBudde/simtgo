@@ -1,6 +1,6 @@
 package kernels
 
-import "github.com/CWBudde/gocuda/gpu"
+import "github.com/CWBudde/simtgo/gpu"
 
 // ClassifyGroup is how many edges the band search scans at a time.
 const ClassifyGroup = 4

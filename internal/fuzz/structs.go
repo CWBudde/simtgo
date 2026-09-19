@@ -20,7 +20,7 @@ package fuzz
 // # Why these four
 //
 // They are chosen for their holes, which is what a struct is here to test. The
-// emitter emits every hole as a gocuda_padN member and asserts the whole
+// emitter emits every hole as a simtgo_padN member and asserts the whole
 // struct's size, and that assertion is what stands in for the field offsets
 // NVRTC has no offsetof to check. A shape with no padding would exercise none
 // of it.

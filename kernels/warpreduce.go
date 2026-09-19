@@ -1,6 +1,6 @@
 package kernels
 
-import "github.com/CWBudde/gocuda/gpu"
+import "github.com/CWBudde/simtgo/gpu"
 
 // WarpReduceBlock is the block size WarpReduceSum must be launched with.
 //

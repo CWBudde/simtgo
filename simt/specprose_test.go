@@ -8,13 +8,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/CWBudde/gocuda/internal/typesafe"
+	"github.com/CWBudde/simtgo/internal/typesafe"
 )
 
 // DocReviewEnv turns the advisory document reviews on. They are off by default
 // because they reach a network service, and ci.yml must keep running on a
 // machine with nothing installed.
-const DocReviewEnv = "GOCUDA_DOC_REVIEW"
+const DocReviewEnv = "SIMTGO_DOC_REVIEW"
 
 // What spec_test.go checks is that SPEC.md and simt/errors_test.go quote the
 // same diagnostic phrase, in both directions. What nothing checks is the

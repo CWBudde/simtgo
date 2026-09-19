@@ -3,7 +3,7 @@ package fuzz
 import (
 	"fmt"
 
-	"github.com/CWBudde/gocuda/gpu"
+	"github.com/CWBudde/simtgo/gpu"
 )
 
 // A Program is one generated kernel package, together with the launch it is
@@ -24,7 +24,7 @@ type Program struct {
 	Funcs []*Func // in the order the source declares them
 	Main  *Func   // the kernel; also a member of Funcs
 
-	// Float64 says the program carries //gocuda:float64, which it does exactly
+	// Float64 says the program carries //simtgo:float64, which it does exactly
 	// when something in it is double precision.
 	Float64 bool
 

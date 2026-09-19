@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/CWBudde/gocuda/cuda"
+	"github.com/CWBudde/simtgo/cuda"
 )
 
 // The persistent PTX cache. It removes NVRTC from process start for a kernel
@@ -69,13 +69,13 @@ var nvrtcTag = sync.OnceValue(func() string {
 
 // diskCacheDir is where compiled PTX lives.
 //
-// The user cache directory rather than the repository's .gocuda-cache, for the
+// The user cache directory rather than the repository's .simtgo-cache, for the
 // same reason internal/fuzz/hostrun keeps its binaries there: these are not
 // artifacts anyone inspects, they accumulate one per kernel shape, and a
 // library has no business writing them into whatever directory its caller
 // happened to start in.
 //
-// GOCUDA_PTX_CACHE moves them. That is not the process-wide switch
+// SIMTGO_PTX_CACHE moves them. That is not the process-wide switch
 // docs/decisions.md rejected for bounds checks: it says where bytes are kept
 // and never what is compiled, so no program's output changes because another
 // part of it set the variable. Whether the cache is used at all is a build
@@ -89,7 +89,7 @@ var nvrtcTag = sync.OnceValue(func() string {
 // variable that takes effect when it is set is the less surprising of the two
 // behaviours anyway.
 func diskCacheDir() string {
-	if dir := os.Getenv("GOCUDA_PTX_CACHE"); dir != "" {
+	if dir := os.Getenv("SIMTGO_PTX_CACHE"); dir != "" {
 		return dir
 	}
 	return defaultDiskCacheDir()
@@ -100,7 +100,7 @@ var defaultDiskCacheDir = sync.OnceValue(func() string {
 	if err != nil {
 		base = os.TempDir()
 	}
-	return filepath.Join(base, "gocuda", "ptx")
+	return filepath.Join(base, "simtgo", "ptx")
 })
 
 // diskLocks is one mutex per cache entry rather than one for the package: two

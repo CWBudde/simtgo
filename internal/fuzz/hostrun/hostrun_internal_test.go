@@ -6,8 +6,8 @@ import (
 	"testing/fstest"
 	"time"
 
-	"github.com/CWBudde/gocuda/gpu"
-	"github.com/CWBudde/gocuda/simt"
+	"github.com/CWBudde/simtgo/gpu"
+	"github.com/CWBudde/simtgo/simt"
 )
 
 // TestNonTerminatingKernelTimesOut pins the bound rather than the hang.
@@ -44,7 +44,7 @@ func TestNonTerminatingKernelTimesOut(t *testing.T) {
 	runTimeout = 2 * time.Second
 	t.Cleanup(func() { runTimeout = saved })
 
-	const src = "package kernels\n\nimport \"github.com/CWBudde/gocuda/gpu\"\n\n" +
+	const src = "package kernels\n\nimport \"github.com/CWBudde/simtgo/gpu\"\n\n" +
 		"func Spin(ctx gpu.Ctx, y []uint32, n uint32) {\n" +
 		"\tfor i := uint32(0); i != n; i += 2 {\n\t\ty[0] = i\n\t}\n}\n"
 	u, err := simt.Transpile(fstest.MapFS{"k.go": &fstest.MapFile{Data: []byte(src)}}, "Spin")

@@ -2,17 +2,19 @@
 // functions and lowered to CUDA C, which NVRTC compiles to PTX at run time.
 //
 // Go's gc compiler has no pluggable code generation backend, so the route CUDA
-// Rust takes -- a custom rustc backend emitting PTX -- is not open to Go. What
-// Go does have, and Rust does not, is a parser and a type checker in its
-// standard library. Translating a well-defined subset of Go at the source
-// level gets most of the way there, and keeps kernels runnable on the CPU.
+// Rust takes -- a custom rustc backend emitting PTX -- is not open inside gc.
+// It is open outside it, through an LLVM-based Go compiler such as llgo, at
+// the price of an out-of-tree toolchain; see the README. What Go does have, and
+// Rust does not, is a parser and a type checker in its standard library.
+// Translating a well-defined subset of Go at the source level gets most of the
+// way there, and keeps kernels runnable on the CPU.
 package simt
 
 import (
 	"fmt"
 	"io/fs"
 
-	"github.com/CWBudde/gocuda/internal/lower"
+	"github.com/CWBudde/simtgo/internal/lower"
 )
 
 // Unit is one transpiled kernel: the generated CUDA C together with what its

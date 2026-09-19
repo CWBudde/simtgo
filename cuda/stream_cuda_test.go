@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/CWBudde/gocuda/cuda"
+	"github.com/CWBudde/simtgo/cuda"
 )
 
 // spinSrc is a kernel with a dial on it.

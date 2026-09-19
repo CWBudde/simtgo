@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/CWBudde/gocuda/cuda"
+	"github.com/CWBudde/simtgo/cuda"
 )
 
 // The launch-time half of __restrict__, tested without a device.

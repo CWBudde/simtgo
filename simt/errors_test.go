@@ -5,7 +5,7 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/CWBudde/gocuda/simt"
+	"github.com/CWBudde/simtgo/simt"
 )
 
 // refusal is one construct outside the subset, the kernel that spells it, and
@@ -19,7 +19,7 @@ import (
 type refusal struct{ name, body, want string }
 
 // refusalPrelude is what every case's body is glued to.
-const refusalPrelude = "package kernels\n\nimport \"github.com/CWBudde/gocuda/gpu\"\n\n"
+const refusalPrelude = "package kernels\n\nimport \"github.com/CWBudde/simtgo/gpu\"\n\n"
 
 // refusals pin the edge of the subset: every construct outside it must be
 // refused with a message that says where and why, never mistranslated.
@@ -34,18 +34,18 @@ var refusals = []refusal{{
 }, {
 	name: "float64 without the directive",
 	body: "func K(ctx gpu.Ctx, a []float64) { a[0] = 1 }",
-	want: "float64 needs //gocuda:float64 on kernel K",
+	want: "float64 needs //simtgo:float64 on kernel K",
 }, {
-	name: "//gocuda:float64 on a device function",
-	body: "//gocuda:float64\nfunc half(x float32) float32 { return x / 2 }\n\nfunc K(ctx gpu.Ctx, a []float32) { a[0] = half(a[1]) }",
+	name: "//simtgo:float64 on a device function",
+	body: "//simtgo:float64\nfunc half(x float32) float32 { return x / 2 }\n\nfunc K(ctx gpu.Ctx, a []float32) { a[0] = half(a[1]) }",
 	want: "belongs on the kernel, not on device function half",
 }, {
 	// Refused for the reason the float64 one above is, with a sharper edge:
 	// --use_fast_math is handed to a compilation, not to a function, so NVRTC
 	// could not honour it for one helper and not the rest of the unit even if
 	// the emitter tried.
-	name: "//gocuda:fastmath on a device function",
-	body: "//gocuda:fastmath\nfunc scaled(x float32) float32 { return x / 2 }\n\nfunc K(ctx gpu.Ctx, a []float32) { a[0] = scaled(a[1]) }",
+	name: "//simtgo:fastmath on a device function",
+	body: "//simtgo:fastmath\nfunc scaled(x float32) float32 { return x / 2 }\n\nfunc K(ctx gpu.Ctx, a []float32) { a[0] = scaled(a[1]) }",
 	want: "belongs on the kernel, not on device function scaled",
 }, {
 	// The four narrow integers are storage and nothing else. They cross as
@@ -126,7 +126,7 @@ var refusals = []refusal{{
 	want: "write gpu.Fmin(a, b)",
 }, {
 	name: "the builtin max on float64",
-	body: "//gocuda:float64\nfunc K(ctx gpu.Ctx, y []float64, a, b float64) { y[0] = max(a, b) }",
+	body: "//simtgo:float64\nfunc K(ctx gpu.Ctx, y []float64, a, b float64) { y[0] = max(a, b) }",
 	want: "write gpu.Fmax64(a, b)",
 }, {
 	// The narrowing SPEC.md calls the one deliberate infidelity, caught where
@@ -167,7 +167,7 @@ var refusals = []refusal{{
 	want: "Go passes an array by value and C would pass a pointer to it",
 }, {
 	name: "an array result",
-	body: "//gocuda:ignore\nfunc pair() [2]float32 { var a [2]float32; return a }\n\nfunc K(ctx gpu.Ctx, y []float32) { y[0] = pair()[0] }",
+	body: "//simtgo:ignore\nfunc pair() [2]float32 { var a [2]float32; return a }\n\nfunc K(ctx gpu.Ctx, y []float32) { y[0] = pair()[0] }",
 	want: "C cannot return an array",
 }, {
 	name: "whole-array assignment",
@@ -193,8 +193,8 @@ var refusals = []refusal{{
 	// padding the emitter adds to pin the offsets, because two members
 	// with one name is an NVRTC error about code nobody wrote.
 	name: "a field named like the emitted padding",
-	body: "type P struct{ gocuda_pad0 int32 }\n\nfunc K(ctx gpu.Ctx, y []float32, ps []P) { y[0] = float32(ps[0].gocuda_pad0) }",
-	want: "spelled like the padding gocuda emits",
+	body: "type P struct{ simtgo_pad0 int32 }\n\nfunc K(ctx gpu.Ctx, y []float32, ps []P) { y[0] = float32(ps[0].simtgo_pad0) }",
+	want: "spelled like the padding simtgo emits",
 }, {
 	name: "an embedded field",
 	body: "type Inner struct{ X float32 }\ntype Outer struct{ Inner }\n\nfunc K(ctx gpu.Ctx, y []float32, os []Outer) { y[0] = os[0].X }",
@@ -275,12 +275,12 @@ var refusals = []refusal{{
 	// the dynamic one cannot be, because its length is a parameter of the
 	// kernel and a helper has no way to reach it.
 	name: "a dynamically sized shared tile inside a device function",
-	body: "//gocuda:ignore\nfunc stage(ctx gpu.Ctx) float32 { s := ctx.SharedDynF32()\nreturn s[0] }\n\n" +
+	body: "//simtgo:ignore\nfunc stage(ctx gpu.Ctx) float32 { s := ctx.SharedDynF32()\nreturn s[0] }\n\n" +
 		"func K(ctx gpu.Ctx, a []float32) { a[0] = stage(ctx) }",
 	want: "may only be declared in a kernel: its length is a launch parameter",
 }, {
 	name: "AssumeBlockDim inside a device function",
-	body: "//gocuda:ignore\nfunc stage(ctx gpu.Ctx) float32 { ctx.AssumeBlockDim(256)\nreturn 1 }\n\n" +
+	body: "//simtgo:ignore\nfunc stage(ctx gpu.Ctx) float32 { ctx.AssumeBlockDim(256)\nreturn 1 }\n\n" +
 		"func K(ctx gpu.Ctx, a []float32) { a[0] = stage(ctx) }",
 	want: "AssumeBlockDim may only be called in a kernel",
 }, {
@@ -294,11 +294,11 @@ var refusals = []refusal{{
 }, {
 	name: "a float64 tile without the directive",
 	body: "func K(ctx gpu.Ctx, y []float32) { s := ctx.SharedF64(4); y[0] = float32(s[0]) }",
-	want: "float64 needs //gocuda:float64 on kernel K",
+	want: "float64 needs //simtgo:float64 on kernel K",
 }, {
 	name: "a dynamically sized float64 tile without the directive",
 	body: "func K(ctx gpu.Ctx, y []float32) { s := ctx.SharedDynF64(); y[0] = float32(s[0]) }",
-	want: "float64 needs //gocuda:float64 on kernel K",
+	want: "float64 needs //simtgo:float64 on kernel K",
 }, {
 	// The refusal names the launch-sized constructor of the same element
 	// type, because that is what the author wanted and could not spell.
@@ -341,23 +341,23 @@ var refusals = []refusal{{
 	name: "the refusal names the device marker",
 	body: "func where(ctx gpu.Ctx) int { return ctx.GlobalID() }\n\n" +
 		"func K(ctx gpu.Ctx, a []float32) { a[0] = float32(where(ctx)) }",
-	want: "Mark it //gocuda:device",
+	want: "Mark it //simtgo:device",
 }, {
 	// The marker only means anything where the signature rule would
 	// otherwise make a kernel. Anywhere else it is decoration, and a
 	// marker that is decoration half the time is read as decoration.
-	name: "//gocuda:device on a function that takes no gpu.Ctx",
-	body: "//gocuda:device\nfunc half(x float32) float32 { return x / 2 }\n\n" +
+	name: "//simtgo:device on a function that takes no gpu.Ctx",
+	body: "//simtgo:device\nfunc half(x float32) float32 { return x / 2 }\n\n" +
 		"func K(ctx gpu.Ctx, a []float32) { a[0] = half(a[1]) }",
-	want: "//gocuda:device does nothing on half, which takes no gpu.Ctx",
+	want: "//simtgo:device does nothing on half, which takes no gpu.Ctx",
 }, {
 	// Refused even though nothing reaches it: the mistake is easiest to
 	// make on a function no kernel calls, so a check that only ran along
 	// the lowering paths would pass over exactly that case.
-	name: "//gocuda:device on a function nothing calls",
-	body: "//gocuda:device\nfunc unused(x float32) float32 { return x }\n\n" +
+	name: "//simtgo:device on a function nothing calls",
+	body: "//simtgo:device\nfunc unused(x float32) float32 { return x }\n\n" +
 		"func K(ctx gpu.Ctx, a []float32) { a[0] = 1 }",
-	want: "//gocuda:device does nothing on unused",
+	want: "//simtgo:device does nothing on unused",
 }, {
 	// A static tile in a helper is fine -- it is block-scoped storage the
 	// compiler allocates once per function, and its bytes are accounted
@@ -366,7 +366,7 @@ var refusals = []refusal{{
 	// kernel, which a helper has no way to be handed. The marker changes
 	// neither answer: what a helper lacks is a launch, not a name.
 	name: "a dynamic shared tile inside a marked device function",
-	body: "//gocuda:device\nfunc stage(ctx gpu.Ctx) float32 { s := ctx.SharedDynF32()\nreturn s[0] }\n\n" +
+	body: "//simtgo:device\nfunc stage(ctx gpu.Ctx) float32 { s := ctx.SharedDynF32()\nreturn s[0] }\n\n" +
 		"func K(ctx gpu.Ctx, a []float32) { a[0] = stage(ctx) }",
 	want: "device function",
 }, {
@@ -376,11 +376,11 @@ var refusals = []refusal{{
 	// kernel would have run a double it never named.
 	name: "a float64 helper whose type never surfaces",
 	body: "func K(ctx gpu.Ctx, y []float32) { y[0] = float32(gpu.Sqrt64(2)) }",
-	want: "gpu.Sqrt64 is double precision and needs //gocuda:float64 on kernel K",
+	want: "gpu.Sqrt64 is double precision and needs //simtgo:float64 on kernel K",
 }, {
 	name: "a float64 helper on a float64 kernel without the directive",
 	body: "func K(ctx gpu.Ctx, y []float64) { y[0] = gpu.Hypot64(y[1], y[2]) }",
-	want: "needs //gocuda:float64 on kernel K",
+	want: "needs //simtgo:float64 on kernel K",
 }, {
 	// An atomic names a buffer and an index rather than a pointer, so the
 	// emitter is what writes the "&". A slice expression has no address to
@@ -453,20 +453,20 @@ var refusals = []refusal{{
 	body: "func K(ctx gpu.Ctx, x []float32) { x_len := int32(3)\nif ctx.GlobalID() < len(x) { x[0] = float32(x_len) } }",
 	want: "x_len is the length generated for slice parameter x",
 }, {
-	// gocuda_bounds is the range check WithBoundsChecks emits at file scope,
+	// simtgo_bounds is the range check WithBoundsChecks emits at file scope,
 	// and it is a legal Go identifier, so a local of that name shadows the
 	// helper and NVRTC rejects the call. Refused for every build rather than
 	// only the checked one: a build option that moves the subset would make
-	// `gocuda vet` -- which has no build options -- wrong about what builds.
+	// `simtgo vet` -- which has no build options -- wrong about what builds.
 	name: "a local in the emitter's namespace",
-	body: "func K(ctx gpu.Ctx, x []float32) { gocuda_bounds := int32(3)\nx[0] = float32(gocuda_bounds) }",
-	want: "gocuda_bounds is reserved: names beginning with gocuda_ belong to the emitter",
+	body: "func K(ctx gpu.Ctx, x []float32) { simtgo_bounds := int32(3)\nx[0] = float32(simtgo_bounds) }",
+	want: "simtgo_bounds is reserved: names beginning with simtgo_ belong to the emitter",
 }, {
 	// The same name one scope out, where it is a redefinition rather than a
 	// shadow.
 	name: "a device function in the emitter's namespace",
-	body: "func gocuda_bounds(x float32) float32 { return x / 2 }\n\nfunc K(ctx gpu.Ctx, a []float32) { a[0] = gocuda_bounds(a[1]) }",
-	want: "gocuda_bounds is reserved: names beginning with gocuda_ belong to the emitter",
+	body: "func simtgo_bounds(x float32) float32 { return x / 2 }\n\nfunc K(ctx gpu.Ctx, a []float32) { a[0] = simtgo_bounds(a[1]) }",
+	want: "simtgo_bounds is reserved: names beginning with simtgo_ belong to the emitter",
 }, {
 	// cname spells a C++ keyword with a trailing underscore, so a variable
 	// already spelled that way becomes the same C identifier as the
@@ -568,7 +568,7 @@ var refusals = []refusal{{
 	// is interprocedural: nothing at this call site says a rendezvous is
 	// behind it.
 	name: "a barrier reached through a call, after a thread-varying return",
-	body: "//gocuda:ignore\nfunc stage(ctx gpu.Ctx) float32 { s := ctx.SharedF32(4)\n" +
+	body: "//simtgo:ignore\nfunc stage(ctx gpu.Ctx) float32 { s := ctx.SharedF32(4)\n" +
 		"ctx.SyncThreads()\nreturn s[0] }\n\n" +
 		"func K(ctx gpu.Ctx, y []float32) { if ctx.GlobalID() >= len(y) { return }\ny[0] = stage(ctx) }",
 	want: "stage, which reaches ctx.SyncThreads(), is preceded by a return at",
@@ -600,7 +600,7 @@ func TestUnsupported(t *testing.T) {
 // Kernels run on a device with no runtime and no standard library, so imports
 // other than package gpu have to be refused outright.
 func TestImportRefused(t *testing.T) {
-	src := "package kernels\n\nimport (\n\t\"math\"\n\n\t\"github.com/CWBudde/gocuda/gpu\"\n)\n\n" +
+	src := "package kernels\n\nimport (\n\t\"math\"\n\n\t\"github.com/CWBudde/simtgo/gpu\"\n)\n\n" +
 		"func K(ctx gpu.Ctx, a []float32) { a[0] = float32(math.Pi) }\n"
 	fsys := fstest.MapFS{"k.go": &fstest.MapFile{Data: []byte(src)}}
 	_, err := simt.Transpile(fsys, "K")
@@ -615,7 +615,7 @@ func TestImportRefused(t *testing.T) {
 // or a warp primitive in a place the rules have to leave alone, and each one
 // is a shape the kernels in kernels/ actually use.
 func TestUniformBarriersAccepted(t *testing.T) {
-	const prelude = "package kernels\n\nimport \"github.com/CWBudde/gocuda/gpu\"\n\n"
+	const prelude = "package kernels\n\nimport \"github.com/CWBudde/simtgo/gpu\"\n\n"
 	cases := []struct{ name, body string }{{
 		// blockIdx is the same in every thread of a block, so a branch on it
 		// is one the whole block takes together. Refusing this would be the
@@ -665,7 +665,7 @@ func TestUniformBarriersAccepted(t *testing.T) {
 	}, {
 		// The barrier is behind a call, and every thread makes the call.
 		name: "a barrier reached through a call on the common path",
-		body: "//gocuda:ignore\nfunc stage(ctx gpu.Ctx) float32 { s := ctx.SharedF32(4)\n" +
+		body: "//simtgo:ignore\nfunc stage(ctx gpu.Ctx) float32 { s := ctx.SharedF32(4)\n" +
 			"ctx.SyncThreads()\nreturn s[0] }\n\n" +
 			"func K(ctx gpu.Ctx, y []float32) { v := stage(ctx)\n" +
 			"if ctx.GlobalID() < len(y) { y[0] = v } }",

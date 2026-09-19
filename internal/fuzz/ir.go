@@ -309,7 +309,7 @@ func (p *Pos) varies() bool { return p.Vary }
 
 // MathCall is one of package gpu's math functions. Fn is the Go spelling; K is
 // float32 for the unsuffixed half and float64 for the 64 half, whose use is
-// what makes a program need //gocuda:float64.
+// what makes a program need //simtgo:float64.
 type MathCall struct {
 	Fn   string
 	Args []Expr
@@ -623,13 +623,13 @@ func (*Discard) stmt() {}
 // A Func is one generated function: the kernel, or a helper it reaches.
 //
 // Ctx says the function takes a gpu.Ctx, which is what makes a function a
-// kernel -- so a helper that takes one must carry //gocuda:device, and that is
+// kernel -- so a helper that takes one must carry //simtgo:device, and that is
 // exactly the pair Device records.
 type Func struct {
 	Name   string
 	Kernel bool
 	Ctx    bool
-	Device bool // emit //gocuda:device
+	Device bool // emit //simtgo:device
 	Params []*Var
 	Result Kind // KInvalid when the function returns nothing
 	Body   []Stmt

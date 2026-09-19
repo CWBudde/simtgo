@@ -10,9 +10,9 @@ import (
 	"math"
 	"math/rand/v2"
 
-	"github.com/CWBudde/gocuda"
-	"github.com/CWBudde/gocuda/cuda"
-	"github.com/CWBudde/gocuda/simt"
+	"github.com/CWBudde/simtgo"
+	"github.com/CWBudde/simtgo/cuda"
+	"github.com/CWBudde/simtgo/simt"
 )
 
 const (
@@ -41,7 +41,7 @@ func run() error {
 	}
 	defer ctx.Close()
 
-	k, err := simt.Build(ctx, gocuda.Kernels(), "Magnitude")
+	k, err := simt.Build(ctx, simtgo.Kernels(), "Magnitude")
 	if err != nil {
 		return err
 	}

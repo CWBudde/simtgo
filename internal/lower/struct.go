@@ -115,9 +115,9 @@ func (t *transpiler) structType(named *types.Named, pos token.Pos) string {
 	// new, which is most of them -- the two structs committed in kernels/ are
 	// both in that case -- so this does not churn the generated C to say
 	// something it was already saying.
-	fmt.Fprintf(&b, "static_assert(sizeof(%s) == %d, \"gocuda: %s is a different size in CUDA than in Go\");\n",
+	fmt.Fprintf(&b, "static_assert(sizeof(%s) == %d, \"simtgo: %s is a different size in CUDA than in Go\");\n",
 		name, t.sizes.Sizeof(named), named.Obj().Name())
-	fmt.Fprintf(&b, "static_assert(alignof(%s) == %d, \"gocuda: %s is differently aligned in CUDA than in Go\");\n",
+	fmt.Fprintf(&b, "static_assert(alignof(%s) == %d, \"simtgo: %s is differently aligned in CUDA than in Go\");\n",
 		name, t.sizes.Alignof(named), named.Obj().Name())
 
 	if len(t.diags) > before {
@@ -131,10 +131,10 @@ func (t *transpiler) structType(named *types.Named, pos token.Pos) string {
 	return name
 }
 
-// padPrefix names the members gocuda emits to fill Go's holes. A field spelled
+// padPrefix names the members simtgo emits to fill Go's holes. A field spelled
 // this way is refused rather than renamed, because two members with one name is
 // an NVRTC error about generated code and a silently renamed field is worse.
-const padPrefix = "gocuda_pad"
+const padPrefix = "simtgo_pad"
 
 // structLayout records where those members sit, so that a positional literal
 // can step over them. C++17 has no designated initialisers -- which is why
@@ -161,7 +161,7 @@ type structLayout struct {
 func (t *transpiler) cfield(named *types.Named, f *types.Var) string {
 	name := cname(f.Name())
 	if strings.HasPrefix(name, padPrefix) {
-		t.fail(f.Pos(), "field %s of %s is spelled like the padding gocuda emits to pin the field offsets; rename it", f.Name(), named.Obj().Name())
+		t.fail(f.Pos(), "field %s of %s is spelled like the padding simtgo emits to pin the field offsets; rename it", f.Name(), named.Obj().Name())
 		return ""
 	}
 	if isArray(f.Type()) {

@@ -1,4 +1,4 @@
-// Package simtcheck provides the analyzer behind "gocuda vet": it reports Go
+// Package simtcheck provides the analyzer behind "simtgo vet": it reports Go
 // constructs that a CUDA kernel cannot use.
 //
 // Without it a kernel that cannot be lowered compiles like any other Go
@@ -15,10 +15,10 @@ import (
 
 	"golang.org/x/tools/go/analysis"
 
-	"github.com/CWBudde/gocuda/internal/lower"
+	"github.com/CWBudde/simtgo/internal/lower"
 )
 
-// Doc is the analyzer's documentation, also shown by "gocuda vet -help".
+// Doc is the analyzer's documentation, also shown by "simtgo vet -help".
 const Doc = `report Go constructs a CUDA kernel cannot use
 
 A kernel is a function whose first parameter is a gpu.Ctx. This analyzer lowers
@@ -30,17 +30,17 @@ other than the kernel vocabulary package.
 Without it those refusals only surface when the kernel is built at run time.
 
 A function that takes a gpu.Ctx but is deliberately never lowered can be
-excluded with a //gocuda:ignore line in its doc comment; the same line in a
+excluded with a //simtgo:ignore line in its doc comment; the same line in a
 file's package comment excludes the whole file. A helper that takes a gpu.Ctx
 because it needs the thread's position, and is meant to be called by a kernel,
-says so with //gocuda:device instead.`
+says so with //simtgo:device instead.`
 
-// Analyzer is the gocuda vet check. It is exported so that it can be composed
+// Analyzer is the simtgo vet check. It is exported so that it can be composed
 // into someone else's multichecker.
 var Analyzer = &analysis.Analyzer{
 	Name: "simt",
 	Doc:  Doc,
-	URL:  "https://github.com/CWBudde/gocuda",
+	URL:  "https://github.com/CWBudde/simtgo",
 	Run:  run,
 	// The traversal is a flat loop over each file's declarations, so the AST
 	// index that passes/inspect builds would be pure cost for the many
@@ -87,7 +87,7 @@ func run(pass *analysis.Pass) (any, error) {
 	for _, f := range files {
 		report(pass, lower.CheckImports(f))
 		// Also a property of the package: the function carrying a pointless
-		// //gocuda:device may be one no kernel reaches, so nothing in the
+		// //simtgo:device may be one no kernel reaches, so nothing in the
 		// per-kernel lowering below would ever look at it.
 		report(pass, lower.CheckDeviceMarkers(pass.TypesInfo, f))
 	}

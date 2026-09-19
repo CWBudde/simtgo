@@ -1,4 +1,4 @@
-module github.com/CWBudde/gocuda
+module github.com/CWBudde/simtgo
 
 go 1.26.0
 

@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/CWBudde/gocuda/gpu"
+	"github.com/CWBudde/simtgo/gpu"
 )
 
 // The warp primitives are a rendezvous between goroutines, so these tests ask

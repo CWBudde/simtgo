@@ -9,12 +9,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/CWBudde/gocuda/internal/typesafe"
+	"github.com/CWBudde/simtgo/internal/typesafe"
 )
 
 // DocReviewEnv turns this on. It is off by default: it reaches a network
 // service, and ci.yml runs on a machine with nothing installed.
-const DocReviewEnv = "GOCUDA_DOC_REVIEW"
+const DocReviewEnv = "SIMTGO_DOC_REVIEW"
 
 // This asks, for each section of the engineering record, which page owns its
 // subject, and reports the ones it would have filed elsewhere.
