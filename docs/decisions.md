@@ -50,17 +50,45 @@ decision stays open as a measurement rather than a conviction — PLAN.md carrie
 a spike to emit PTX for `VecAdd` and compare — and Phase 5 is where it would be
 revisited, if NVRTC turns out to be the performance ceiling.
 
-## The driver API is synchronous, so there is no `context.Context`
+## `context.Context` cancels the wait, and says so
 
-Every driver call this repository makes is synchronous and uncancellable:
-`cuCtxSynchronize`, `cuMemcpyHtoD` and `cuLaunchKernel` cannot be interrupted
-once issued. Accepting a `context.Context` would advertise semantics that do not
-exist, and a cancellation that does nothing is worse than no cancellation at
-all, because callers write recovery code against it.
+This section used to read _"the driver API is synchronous, so there is no
+`context.Context`"_, and the reasoning it gave was right: every call was
+synchronous and uncancellable, so accepting a context could only have meant
+ignoring it, and a cancellation that does nothing is worse than none at all
+because callers write recovery code against it. It parked the question in
+Phase 4, where `cuStreamQuery` would make polling possible.
 
-It belongs in Phase 4, where `cuStreamQuery` can genuinely `select` on
-`ctx.Done()`. Adding it before then would be an API that has to change meaning
-later.
+Phase 4 arrived. `cuda.Stream.Wait(ctx)` is the one entry point in the package
+that takes a context, and the premise that changed is that there is now
+something to poll.
+
+**What it does not do is stop the device.** There is no call in the driver API
+that abandons queued work — no `cuStreamCancel`, no interruptible
+`cuStreamSynchronize`. So cancelling `Wait` returns control to the caller and
+leaves the kernel running, the copies in flight, and every buffer the stream
+touches in use. The dangerous next line is not the cancellation itself; it is
+the `Free()` that usually follows a wait returning, which would hand the
+allocator memory the device is still reading. The host cannot see that go
+wrong, because the memory is the device's.
+
+That is why the honesty is enforced and not only documented. A `Stream` whose
+`Wait` returned early is marked, and `Close` on it refuses with a
+`*BusyStreamError` naming the situation; `Sync` clears the mark, because at
+that point the work genuinely has finished; and `CloseAbandoned` is there for
+a caller who means it. The refusal is the only moment between a cancelled wait
+and a use-after-free at which anything can be said, so something is said.
+
+`Wait` polls rather than blocking, which looks like the worse implementation
+until the alternative is written out. A goroutine parked in
+`cuStreamSynchronize` cannot be released by a closed channel — there is
+nothing to select on — and parking a locked OS thread there so it can close a
+channel when it returns makes the cancellation a lie in the other direction,
+since the thread stays until the device is done either way. The poll backs off
+from 10 µs to a 500 µs ceiling, so work already finished costs one query.
+
+The convention the package comment promised holds: `context.Context` first and
+named `ctx`, the CUDA context second and named `dev`.
 
 ## Atomics take a buffer and an index, not a pointer
 
@@ -550,3 +578,74 @@ reachable in any of the three terms today — the source is generated CUDA C,
 the other two are short machine-written strings — but "not reachable today" is
 how a joined key becomes ambiguous later, and a length prefix is one line.
 That was found by the test rather than by reading the code.
+
+## A buffer outside the Go heap holds no pointers
+
+`cuda.HostSlice` is generic over `any`, which is more than it can honour, so
+`NewHostSlice` refuses an element type carrying a pointer — a pointer, string,
+slice, map, channel, function, interface, or a struct or array containing one.
+
+The memory comes from `cuMemHostAlloc` and the garbage collector does not scan
+it. Store the only reference to a Go object in a `[]T` over that memory and
+nothing keeps the object alive: the collector cannot see the reference, frees
+the target, and a later read through the slice returns a value that is simply
+wrong. No panic, no race-detector report, nothing to grep for — which is what
+makes it worth a refusal rather than a warning in a doc comment.
+
+`runtime.Pinner` does not rescue it. A `Pinner` holds one object for as long
+as the `Pinner` itself lives, and a buffer the caller fills whenever they like
+has no such moment to hang it on. That is the same reason the asynchronous
+copies refuse a `[]T`, one section down, and the two restrictions come from
+one fact about this memory rather than from two rules.
+
+Zero-sized element types are refused by the same check, for a duller reason:
+there is no allocation for the driver to make, so a `Len()` of a thousand
+would have no memory behind it and `Slice()` could not agree with it.
+
+The check is `reflect`, once, at allocation, before the context is touched —
+so it costs nothing against a driver call, and it is tested without a GPU,
+which is why the rule lives in an untagged file.
+
+**`cuda.Slice` is not yet guarded the same way**, and should be: its device
+memory is not scanned either, but `Download` builds a `[]T` on the Go heap and
+fills it with device bytes, so a pointer-bearing `T` would hand the collector
+addresses to follow. It is a pre-existing hazard rather than one this rule
+introduced, and `PLAN.md` carries it.
+
+## An asynchronous copy does not take a Go slice
+
+`Slice.UploadAsync` and `Slice.DownloadAsync` take a `*cuda.HostSlice` — a
+buffer from `cuMemHostAlloc` — and refuse a plain `[]T`. Every other copy in
+the package takes a `[]T`, so this is the one asymmetry in the API and it is
+worth the paragraph.
+
+Two independent reasons, and either alone would settle it.
+
+**The driver would not have made it asynchronous.** `cuMemcpyHtoDAsync` out of
+pageable memory is documented as falling back to a synchronous transfer: the
+copy engine needs a physical address that will not move, and ordinary host
+memory does not have one, so the driver stages through a page-locked bounce
+buffer of its own and blocks while it does. A `[]T` overload would therefore
+have compiled, run, returned an error-free `nil`, and quietly not overlapped
+anything — the worst available outcome for a feature whose entire purpose is
+overlap.
+
+**`runtime.Pinner` cannot hold Go memory still for long enough.** This package
+shows Go memory to the driver in three other places — the launch parameter
+block, the PTX image, the device-name buffer — and each pins it for the
+duration of the call, which is exactly as long as the driver needs it. An
+asynchronous copy breaks that: the call returns and the transfer has not
+started. Pinning until the stream drained would mean the `Pinner` outliving
+the function that created it, owned by the stream, released by whatever
+eventually synchronised — an ownership problem invented purely to keep a
+convenience overload. Memory from `cuMemHostAlloc` is not Go memory, is not
+the collector's business, and has none of this.
+
+So `HostSlice` is not merely the faster option for asynchronous work. It is
+what makes the operation expressible. That is also why it landed in the same
+batch: the "overlap copy with compute" item could not have been demonstrated
+without it, only claimed.
+
+The synchronous `CopyFrom`/`CopyTo` keep taking a `[]T`, and for the symmetric
+reason — they finish before they return, so there is nothing to outlive. A
+`HostSlice` works there too, through `Slice()`, and is simply faster.

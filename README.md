@@ -53,10 +53,11 @@ on a machine that has never had a CUDA toolkit. `compute-sanitizer` clean on
 `memcheck`, `racecheck`, `initcheck` and `synccheck`.
 
 **Not yet.** Linux only; Windows is planned and macOS is not possible, since
-NVIDIA ships no CUDA for it. The driver API is synchronous — no streams, no
-events, no async copies — so a `*cuda.Context` is safe to share between
-goroutines but nothing serialises what they do with it. Compiled PTX is cached
-on disk between runs, so only the first process start pays NVRTC.
+NVIDIA ships no CUDA for it. A `*cuda.Context` is safe to share between
+goroutines, but nothing serialises what they do with it. Streams, events,
+asynchronous copies and page-locked host memory are there; managed memory,
+buffer pooling and multi-GPU are not. Compiled PTX is cached on disk between
+runs, so only the first process start pays NVRTC.
 The tile track is 1-D `float32` with seven operations and no reductions. One
 architecture has been measured, `sm_75`, and CI has no GPU, so the parity tests
 are unverified anywhere but the machine they were written on.
@@ -117,8 +118,26 @@ extern "C" __global__ void FIR(float* __restrict__ y, int y_len, const float* __
 Launching mirrors the Go signature, minus the `gpu.Ctx`:
 
 ```go
-k, _ := simt.Build(ctx, gocuda.Kernels(), "FIR")
+k, _ := simt.Build(dev, gocuda.Kernels(), "FIR")
 k.LaunchN(n, kernels.FIRBlock, dy, dx, dh)
+```
+
+That launch waits for the kernel. To overlap the transfers with the compute —
+which is where the time goes, not in the kernel — queue the work on a stream
+and wait once:
+
+```go
+st, _ := dev.NewStream()
+defer st.Close()
+
+stage, _ := cuda.NewHostSlice[float32](dev, n) // page-locked; async copies need it
+defer stage.Free()
+copy(stage.Slice(), x)
+
+dx.UploadAsync(st, stage)
+k.LaunchOn(st, grid, block, dy, dx, dh)
+dy.DownloadAsync(st, stage)
+st.Wait(ctx) // a context.Context: cancelling stops the wait, not the device
 ```
 
 **The same source runs on both backends.** That is the part Rust does not

@@ -24,6 +24,15 @@ import (
 // went 64-bit. Both names are exported by libcuda, and the unsuffixed ones are
 // the pre-CUDA-3.2 API that takes 32-bit sizes, so binding those would
 // silently truncate every allocation and copy above 4 GiB.
+//
+// The rule is not "append _v2 and hope". Each name below was checked against
+// nm -D on the local libcuda, and three of them are instructive:
+// cuMemHostAlloc and cuMemFreeHost have no _v2 at all (cuMemAllocHost, a
+// different and older call, does); and cuEventElapsedTime has one that only
+// exists from CUDA 12.8. Binding that one would panic in bind() on every
+// older driver -- deliberately, since a missing symbol here means the library
+// is not libcuda -- so the unsuffixed name is the portable choice and the
+// difference between them is not a width but an error-reporting nicety.
 var (
 	cuInit                    func(flags uint32) Result
 	cuDeviceGetCount          func(count *int32) Result
@@ -38,6 +47,19 @@ var (
 	cuMemFree                 func(dptr uint64) Result
 	cuMemcpyHtoD              func(dst uint64, src unsafe.Pointer, size uint64) Result
 	cuMemcpyDtoH              func(dst unsafe.Pointer, src uint64, size uint64) Result
+	cuMemHostAlloc            func(pp *unsafe.Pointer, size uint64, flags uint32) Result
+	cuMemFreeHost             func(p unsafe.Pointer) Result
+	cuMemcpyHtoDAsync         func(dst uint64, src unsafe.Pointer, size uint64, stream uintptr) Result
+	cuMemcpyDtoHAsync         func(dst unsafe.Pointer, src uint64, size uint64, stream uintptr) Result
+	cuStreamCreate            func(stream *uintptr, flags uint32) Result
+	cuStreamDestroy           func(stream uintptr) Result
+	cuStreamSynchronize       func(stream uintptr) Result
+	cuStreamQuery             func(stream uintptr) Result
+	cuEventCreate             func(event *uintptr, flags uint32) Result
+	cuEventDestroy            func(event uintptr) Result
+	cuEventRecord             func(event, stream uintptr) Result
+	cuEventSynchronize        func(event uintptr) Result
+	cuEventElapsedTime        func(ms *float32, start, end uintptr) Result
 	cuModuleLoadData          func(mod *uintptr, image unsafe.Pointer) Result
 	cuModuleUnload            func(mod uintptr) Result
 	cuModuleGetFunction       func(fn *uintptr, mod uintptr, name string) Result
@@ -93,6 +115,19 @@ func loadDriver() error {
 			"cuMemFree_v2":                 &cuMemFree,
 			"cuMemcpyHtoD_v2":              &cuMemcpyHtoD,
 			"cuMemcpyDtoH_v2":              &cuMemcpyDtoH,
+			"cuMemHostAlloc":               &cuMemHostAlloc,
+			"cuMemFreeHost":                &cuMemFreeHost,
+			"cuMemcpyHtoDAsync_v2":         &cuMemcpyHtoDAsync,
+			"cuMemcpyDtoHAsync_v2":         &cuMemcpyDtoHAsync,
+			"cuStreamCreate":               &cuStreamCreate,
+			"cuStreamDestroy_v2":           &cuStreamDestroy,
+			"cuStreamSynchronize":          &cuStreamSynchronize,
+			"cuStreamQuery":                &cuStreamQuery,
+			"cuEventCreate":                &cuEventCreate,
+			"cuEventDestroy_v2":            &cuEventDestroy,
+			"cuEventRecord":                &cuEventRecord,
+			"cuEventSynchronize":           &cuEventSynchronize,
+			"cuEventElapsedTime":           &cuEventElapsedTime,
 			"cuModuleLoadData":             &cuModuleLoadData,
 			"cuModuleUnload":               &cuModuleUnload,
 			"cuModuleGetFunction":          &cuModuleGetFunction,

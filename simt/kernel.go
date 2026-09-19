@@ -393,7 +393,37 @@ func (k *Kernel) LaunchDim(grid, block cuda.Dim3, args ...any) error {
 	if k.DynSharedWidth != 0 {
 		return &DynamicSharedError{Kernel: k.Name, Dynamic: true}
 	}
-	return k.launch(grid, block, 0, args)
+	return k.launch(nil, grid, block, 0, args)
+}
+
+// LaunchOn queues the kernel on a stream and returns without waiting for it.
+//
+// Every check Launch makes is made here too -- the block-size contract, the
+// argument count, the aliasing rule -- because all of them are host-side and
+// none of them need the kernel to have run. What changes is when a *device*
+// fault is reported: not by this call, which returns before the kernel
+// starts, but by the stream's Sync or Wait. See cuda.Stream.
+//
+// The buffers the arguments name must stay allocated until then. That is the
+// part a synchronous launch did for free.
+func (k *Kernel) LaunchOn(s *cuda.Stream, grid, block int, args ...any) error {
+	return k.LaunchOnDim(s, cuda.D1(grid), cuda.D1(block), args...)
+}
+
+// LaunchOnDim is LaunchOn over a grid of any rank.
+//
+// There is deliberately no asynchronous twin of LaunchShared yet: a dynamic
+// shared tile and a stream are two new things at once, and nothing has asked
+// for both. A kernel that declares one is refused here rather than launched
+// without its tile.
+func (k *Kernel) LaunchOnDim(s *cuda.Stream, grid, block cuda.Dim3, args ...any) error {
+	if s == nil {
+		return fmt.Errorf("simt: %s: LaunchOn needs a stream; use Launch for the synchronous form", k.Name)
+	}
+	if k.DynSharedWidth != 0 {
+		return &DynamicSharedError{Kernel: k.Name, Dynamic: true}
+	}
+	return k.launch(s, grid, block, 0, args)
 }
 
 // LaunchN runs the kernel over enough blocks to cover n threads. Kernels guard
@@ -447,12 +477,15 @@ func (k *Kernel) LaunchSharedDim(grid, block cuda.Dim3, n int, args ...any) erro
 	// array whenever they passed one with room to spare.
 	full := make([]any, 0, len(args)+1)
 	full = append(append(full, args...), int32(n))
-	return k.launch(grid, block, dynBytes, full)
+	return k.launch(nil, grid, block, dynBytes, full)
 }
 
-// launch is the half both spellings share: the block-size contract, the
+// launch is the half every spelling shares: the block-size contract, the
 // argument marshalling, and the launch itself.
-func (k *Kernel) launch(grid, block cuda.Dim3, dynBytes int, args []any) error {
+//
+// A nil stream means the synchronous launch, which is what every form but
+// LaunchOn asks for.
+func (k *Kernel) launch(s *cuda.Stream, grid, block cuda.Dim3, dynBytes int, args []any) error {
 	threads := int(block.X) * int(block.Y) * int(block.Z)
 	if k.RequiredBlock != 0 && threads != k.RequiredBlock {
 		return &BlockSizeError{Kernel: k.Name, Want: k.RequiredBlock, Got: threads}
@@ -467,7 +500,17 @@ func (k *Kernel) launch(grid, block cuda.Dim3, dynBytes int, args []any) error {
 	if err != nil {
 		return err
 	}
-	return k.diagnose(k.fn.LaunchSync(grid, block, dynBytes, flat...))
+	if s == nil {
+		return k.diagnose(k.fn.LaunchSync(grid, block, dynBytes, flat...))
+	}
+	// diagnose gets much less to work with here, and that is not a gap that
+	// can be closed at this level: an asynchronous launch returns before the
+	// kernel runs, so a device fault it causes is reported by whatever
+	// synchronises next -- the stream's Sync or Wait, or any later call on
+	// the context once the fault has poisoned it. What this still catches is
+	// the launch refusing outright, which is a host-side failure and happens
+	// before the return.
+	return k.diagnose(k.fn.Launch(s, grid, block, dynBytes, flat...))
 }
 
 // diagnose turns a failed launch into a TrapError, but only for the failures

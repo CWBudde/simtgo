@@ -2,6 +2,11 @@
 
 package cuda
 
+import (
+	"context"
+	"time"
+)
+
 // This file keeps the package's API available when the module is built
 // without the "cuda" build tag, so the transpiler and its tests compile on
 // machines with no CUDA toolchain. Every call fails with ErrNoCUDA.
@@ -91,6 +96,12 @@ func Upload[T any](c *Context, xs []T) (*Slice[T], error) { return nil, ErrNoCUD
 // Download copies the buffer back to the host.
 func (s *Slice[T]) Download() ([]T, error) { return nil, ErrNoCUDA }
 
+// CopyFrom fills the buffer from a host slice of the same length.
+func (s *Slice[T]) CopyFrom(xs []T) error { return ErrNoCUDA }
+
+// CopyTo reads the buffer into a host slice of the same length.
+func (s *Slice[T]) CopyTo(xs []T) error { return ErrNoCUDA }
+
 // Len reports the number of elements.
 func (s *Slice[T]) Len() int { return s.n }
 
@@ -105,3 +116,68 @@ func (s *Slice[T]) DeviceRange() (DevPtr, int) { return 0, 0 }
 
 // Free releases the buffer.
 func (s *Slice[T]) Free() {}
+
+// HostSlice is a placeholder for a page-locked host buffer.
+type HostSlice[T any] struct{ n int }
+
+// NewHostSlice allocates page-locked host memory.
+func NewHostSlice[T any](c *Context, n int) (*HostSlice[T], error) { return nil, ErrNoCUDA }
+
+// Slice returns the buffer as an ordinary Go slice.
+func (h *HostSlice[T]) Slice() []T { return nil }
+
+// Len reports the number of elements.
+func (h *HostSlice[T]) Len() int { return h.n }
+
+// Free releases the page-locked memory.
+func (h *HostSlice[T]) Free() {}
+
+// Stream is a placeholder for an ordered queue of device work.
+type Stream struct{}
+
+// NewStream creates a stream in this context.
+func (c *Context) NewStream() (*Stream, error) { return nil, ErrNoCUDA }
+
+// Close destroys the stream.
+func (s *Stream) Close() error { return ErrNoCUDA }
+
+// CloseAbandoned destroys the stream despite outstanding work.
+func (s *Stream) CloseAbandoned() error { return ErrNoCUDA }
+
+// Sync blocks until the stream has drained.
+func (s *Stream) Sync() error { return ErrNoCUDA }
+
+// Done reports whether the stream has finished its work.
+func (s *Stream) Done() (bool, error) { return false, ErrNoCUDA }
+
+// Wait blocks until the stream drains or ctx is done.
+func (s *Stream) Wait(ctx context.Context) error { return ErrNoCUDA }
+
+// UploadAsync queues a copy from page-locked host memory into the buffer.
+func (s *Slice[T]) UploadAsync(st *Stream, src *HostSlice[T]) error { return ErrNoCUDA }
+
+// DownloadAsync queues a copy from the buffer into page-locked host memory.
+func (s *Slice[T]) DownloadAsync(st *Stream, dst *HostSlice[T]) error { return ErrNoCUDA }
+
+// Launch queues the kernel on a stream without waiting.
+func (f *Function) Launch(s *Stream, grid, block Dim3, sharedBytes int, args ...Arg) error {
+	return ErrNoCUDA
+}
+
+// Event is a placeholder for a marker in a stream.
+type Event struct{}
+
+// NewEvent creates an event in this context.
+func (c *Context) NewEvent() (*Event, error) { return nil, ErrNoCUDA }
+
+// Close destroys the event.
+func (e *Event) Close() error { return ErrNoCUDA }
+
+// Record places the event in the stream.
+func (e *Event) Record(s *Stream) error { return ErrNoCUDA }
+
+// Sync blocks until the event has been reached.
+func (e *Event) Sync() error { return ErrNoCUDA }
+
+// Elapsed reports the device time between two recorded events.
+func Elapsed(start, end *Event) (time.Duration, error) { return 0, ErrNoCUDA }
