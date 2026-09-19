@@ -78,9 +78,27 @@ measured **one spelling at a time**, not assumed:
 | `min` / `max` on `double`                                                 | resolve   |
 | `extern __shared__`                                                       | accepted  |
 | `static_assert`, `sizeof`, `alignof`                                      | available |
+| `__trap()`                                                                | declared  |
+| `asm("trap;")`                                                            | accepted  |
+| `printf`, including the variadic form with a `float` and a runtime value  | declared  |
+| `__forceinline__`                                                         | accepted  |
 
 The whole committed kernel set compiles as well as lowers, so the vocabulary did
 not have to shrink to fit.
+
+The last four rows were measured for a debug mode
+(`TestNVRTCDeclaresTrapAndPrintf`, 2026-09-19, NVRTC 12.8), and the answer was
+yes to every one of them. That settles two questions the roadmap had left open.
+A bounds check can trap through `__trap()` rather than through inline PTX or a
+deliberate null store, so the emitted check says what it means. And **device
+`printf` is not the obstacle** — it is declared, the variadic form resolves, and
+`%f` with a runtime argument compiles. Whether it belongs in the `gpu`
+vocabulary is therefore a design question and no longer a capability one, which
+is a different and smaller thing to decide.
+
+What this does **not** measure is whether a `printf` issued before a `__trap()`
+reaches stdout. The output buffer is flushed at a synchronisation point, and a
+trapped launch may never reach one — that needs a device, not a compiler.
 
 ## What NVRTC does not have
 
