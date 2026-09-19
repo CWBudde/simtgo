@@ -2,9 +2,9 @@
 
 A Go answer to NVIDIA's [_Introducing CUDA Rust: Two Tracks for Writing GPU
 Kernels_](https://developer.nvidia.com/blog/introducing-cuda-rust-two-tracks-for-writing-gpu-kernels/).
-Not by the same means — Go has no pluggable codegen backend and no macros — but
-both of NVIDIA's tracks have a working analogue here, and both run real kernels
-on real hardware.
+Not by the same means — `gc` has no pluggable codegen backend and Go has no
+macros — but both of NVIDIA's tracks have a working analogue here, and both run
+real kernels on real hardware.
 
 A kernel is an ordinary Go function. It runs unchanged on a CPU emulator and on
 the device, and what the subset accepts is [a written contract](SPEC.md) checked
@@ -23,14 +23,20 @@ verified, and on what, is stated below.
 | **When errors surface** | `rustc` rejects the kernel                                                                            | `simtgo vet` rejects it, and `go generate` makes an unlowerable kernel fail `go build`                                     |
 | **Toolchain**           | Pinned nightly Rust, custom LLVM                                                                      | Plain `go1.26`, no cgo, NVRTC loaded at run time. One dependency, purego; the `simtgo` tool also uses `golang.org/x/tools` |
 
-### Why Go cannot take Rust's route
+### Why this does not take Rust's route
 
 - **`gc` has no pluggable codegen backend.** There is no Go equivalent of a
-  custom `rustc` backend, so compiling the real language to PTX is not on the
-  table.
-- **TinyGo is the only Go toolchain on LLVM**, and its LLVM does register the
-  `nvptx64` target — but 0.37 accepts only Go 1.19–1.24, and its runtime and
-  garbage collector assume a host, not a device.
+  custom `rustc` backend, so inside the toolchain `go build` runs, PTX is not
+  a reachable output.
+- **The LLVM route exists, but only outside `gc`.** TinyGo and `llgo` both
+  compile Go through LLVM, and LLVM has the NVPTX backend, so Go → LLVM IR →
+  PTX is a working pipeline rather than a hypothetical one:
+  [`cuda-ir.go`](#what-already-exists-in-go) takes exactly it, through `llgo`
+  and `llc`. What it costs is the build — an out-of-tree Go compiler, LLVM 22
+  and an `llgo` checkout — against the stock `go1.26` and one dependency this
+  repository is willing to require. TinyGo carries a further problem on top of
+  that: 0.37 accepts only Go 1.19–1.24, and its runtime and garbage collector
+  assume a host, not a device.
 - **Go has no macros**, so `cutile`'s trick of embedding a kernel AST at
   compile time has no direct counterpart.
 
