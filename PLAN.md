@@ -453,7 +453,7 @@ launch path is not where the time goes.
         thread with it. Unfixed, 15 runs of 15 fail in about 0.4 s; fixed, 15
         of 15 pass, under `-race` and all four `compute-sanitizer` tools too.
   - [x] Document the resulting guarantee on `cuda.Context`: what may be shared
-        between goroutines and what may not. (2026-09-19) — a *Context is safe
+        between goroutines and what may not. (2026-09-19) — a `*cuda.Context` is safe
         to share; ordering is not promised, and a device buffer two goroutines
         reach needs the same care as any other shared memory. `README.md`'s
         "not safe to share between goroutines" went with it.

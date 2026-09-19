@@ -139,6 +139,11 @@ setup-deps:
     #!/usr/bin/env bash
     set -euo pipefail
 
+    # Kept beside CI's own pin in .github/workflows/ci.yml; if the two drift,
+    # the workflow is right and this file is stale, as the head of this file
+    # says of everything else here.
+    PRETTIER=3.8.1
+
     # golangci-lint has to be built with this module's own Go: the version
     # check compares the toolchain that built the linter against go.mod, and a
     # release binary built with an older Go refuses the module outright.
@@ -160,10 +165,16 @@ setup-deps:
 
     # prettier formats the Markdown, YAML and JSON. Pinned for the same reason
     # CI pins it: a formatter's idea of correct output changes between releases.
-    command -v prettier >/dev/null 2>&1 || {
-        echo "Installing prettier..."
-        npm install --global prettier@3.8.1 || echo "prettier needs npm; install Node.js first."
-    }
+    #
+    # The version is checked and not merely the presence, because `command -v`
+    # alone let an older or newer global prettier win the pin silently -- and
+    # that is not hypothetical. A machine with 3.9.6 installed formatted a
+    # bare *Context in Markdown as-is where CI's 3.8.1 escapes it to \*, so
+    # `just check` was green and the format job was red over one byte.
+    if [ "$(prettier --version 2>/dev/null || true)" != "$PRETTIER" ]; then
+        echo "Installing prettier@$PRETTIER (found: $(prettier --version 2>/dev/null || echo none))..."
+        npm install --global "prettier@$PRETTIER" || echo "prettier needs npm; install Node.js first."
+    fi
 
     echo "Done. $(go env GOPATH)/bin must be on PATH."
 
