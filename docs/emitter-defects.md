@@ -221,6 +221,42 @@ Two more were found along the way and are the same defect twice:
 
 ## Infrastructure defects
 
+### NVRTC's remark swallowed the warning behind it
+
+The fuzzer treats a clean compile that still warned as a finding, after
+filtering out the four diagnostic numbers the generator's own filler produces.
+The filter finished by asking whether what was left began with NVRTC's
+`Remark: The warnings can be suppressed`, and read yes as "the log was
+entirely noise".
+
+But the remark is printed after the **first** warning, not at the end. So a
+log whose first warning was allowlisted and whose second was a finding
+filtered down to a residue starting with the remark, and the finding went out
+with it. The diagnostic that arrives second is as likely as any to be `#549-D`
+— the one that caught both halves of the shadowed-initialiser defect above.
+
+Found by reading the filter against real `nvcc` output rather than against the
+idealised log the code assumed. The remark is boilerplate and is now dropped
+wherever it appears, which makes an empty residue mean what it says. Pinned by
+`TestRemarkDoesNotSwallowALaterFinding` in `simt/triagefilter_cuda_test.go`.
+
+### The noise allowlist is keyed on something that does not carry the distinction
+
+Still open, and not fixable where it lives. `generatorNoise` decides that a
+warning says nothing about the translation by looking up its **diagnostic
+number**, and the number does not separate the two cases. An emitter that
+declares a variable the Go source uses and then drops the use produces
+`#177-D: declared but never referenced` — the same number, and very nearly the
+same sentence, as the generator's own unused filler. `#550-D`, `#186-D` and
+`#128-D` each have such a twin.
+
+The allowlist therefore suppresses that whole class silently, and no amount of
+work on the list fixes it: the input it keys on lacks the information.
+`TestAllowlistCannotTellFillerFromADroppedUse` records the blind spot rather
+than closing it. What closes part of it is the triage in
+[`verification.md`](verification.md#10-nvrtc-warning-triage-opt-in), which
+re-reads the suppressed warnings against the Go source they came from.
+
 ### `//go:embed kernels/*.go` matched `*_test.go`
 
 Which then joined the type-check and failed on `import "testing"`: **a kernel

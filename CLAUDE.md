@@ -76,6 +76,21 @@ would turn a passing test into a failed sweep. It is a package of its own for
 a second reason: a trap ends the whole process's use of CUDA and not merely
 the context's, so it needs a test binary nobody else is sharing.
 
+Three checks reach a decision model instead of parsing, and all three are
+**off unless asked for**, so nothing above changes without an environment
+variable. `GOCUDA_WARNING_TRIAGE=1` gives the fuzzer's NVRTC oracle a second
+look at the warnings its allowlist suppressed — it may only put a warning
+back, never drop one — and `GOCUDA_DOC_REVIEW=1` enables two advisory reviews
+that log and cannot fail (`just review-spec`, `just review-docs`, or
+`just review` for all three). Each needs `TYPESAFE_API_KEY` and skips without
+it. `internal/typesafe` is stdlib only and imported from tests alone, so
+`go.mod` is unchanged; nothing in `internal/lower`, `simt.Build`, the analyzer
+or the driver goes anywhere near it. Why the line is drawn at direction rather
+than at confidence is in
+[`docs/decisions.md`](docs/decisions.md#a-judgment-may-add-a-finding-and-may-never-remove-one),
+and what it is worth is measured in
+[`docs/verification.md`](docs/verification.md#10-nvrtc-warning-triage-opt-in).
+
 There is a `justfile` carrying all of the above under shorter names, and
 `just check` is the whole non-GPU sequence in CI's order. It mirrors the
 workflow rather than being called by it, so the workflow stays authoritative:

@@ -79,6 +79,27 @@ test-golden:
     go test -run TestGolden ./simt/
 
 #################################
+# Advisory reviews -- opt-in, need TYPESAFE_API_KEY, never gate anything
+#################################
+
+# These read rather than decide, and both have a measured error rate written
+# down next to them (docs/verification.md, layer 10). They log and cannot
+# fail, so run them with -v or they will look like they did nothing. None of
+# this is in `check`, and none of it is in ci.yml.
+
+# Does each SPEC.md refusal sentence still describe the rule its test pins?
+review-spec:
+    GOCUDA_DOC_REVIEW=1 go test -v -count=1 -run TestSpecProseDescribesTheRule ./simt/
+
+# Is each section of docs/ filed under the subject docs/README.md gives it?
+review-docs:
+    GOCUDA_DOC_REVIEW=1 go test -v -count=1 -run TestDocSectionsAreFiledBySubject ./internal/docreview/
+
+# Both, plus the corpus that pins the NVRTC warning triage the fuzzer uses.
+review: review-spec review-docs
+    GOCUDA_WARNING_TRIAGE=1 go test -v -count=1 -tags cuda -run TestTriageSeparatesNoiseFromMistranslation ./simt/
+
+#################################
 # Generated artifacts
 #################################
 
