@@ -90,15 +90,17 @@ type Context struct {
 	cache   map[string]*Module // the subset loaded through LoadPTXCached
 	closed  bool
 
-	// poisoned: see the comment below.
-	poisoned atomic.Pointer[ContextPoisonedError]
+	// poisoned: see the comment below. It is shared with every other Context
+	// wrapping the same device's primary context, so it is a pointer to the
+	// cell rather than the cell itself, and NewContext fills it in.
+	poisoned *atomic.Pointer[ContextPoisonedError]
 }
 
-// poisoned is the first sticky fault this context saw, set once and never
-// cleared. Every later call reports it instead of the driver's own repetition
-// of the same code with no explanation of where it came from -- the
-// difference between "cuMemAlloc failed: unspecified launch failure" ten
-// calls later and a sentence naming the kernel fault that caused it. See
+// poisoned is the first sticky fault this device's primary context saw, set
+// once and never cleared. Every later call reports it instead of the driver's
+// own repetition of the same code with no explanation of where it came from
+// -- the difference between "cuMemAlloc failed: unspecified launch failure"
+// ten calls later and a sentence naming the kernel fault that caused it. See
 // ContextPoisonedError.
 //
 // It is an atomic rather than a field under mu, and that is not a
@@ -106,6 +108,36 @@ type Context struct {
 // already held by LoadPTX or LoadPTXCached; a sync.Mutex is not reentrant, so
 // reading this under mu deadlocks the first Build that ever runs. That was
 // not reasoned out in advance -- it was written that way, and it hung.
+//
+// It lives in a package-level table rather than in the struct because the
+// struct is not what the driver poisoned. NewContext(0) twice retains the
+// same primary context and hands back two *Context values around one
+// CUcontext; a marker on whichever wrapper happened to launch the faulting
+// kernel left the other one handing out bare 719s, which is the obscurity
+// ContextPoisonedError exists to replace. The entry outlives Close on
+// purpose, and that is measured rather than assumed: after a trap
+// cuDevicePrimaryCtxRetain fails too, so a replacement Context for that
+// device is already unusable when it is made.
+//
+// Keyed by device ordinal and not process-wide, although the measurement here
+// found the process finished with CUDA altogether. That machine has one GPU.
+// Saying a fault on device 0 implies anything about device 1 would be a claim
+// nothing has measured, and this file does not make those.
+var (
+	poisonMu sync.Mutex
+	poison   = map[int32]*atomic.Pointer[ContextPoisonedError]{}
+)
+
+func poisonFor(dev int32) *atomic.Pointer[ContextPoisonedError] {
+	poisonMu.Lock()
+	defer poisonMu.Unlock()
+	p, ok := poison[dev]
+	if !ok {
+		p = &atomic.Pointer[ContextPoisonedError]{}
+		poison[dev] = p
+	}
+	return p
+}
 
 // NewContext retains the primary context of the given device ordinal.
 func NewContext(device int) (*Context, error) {
@@ -116,8 +148,23 @@ func NewContext(device int) (*Context, error) {
 	if err := check(cuDeviceGet(&c.dev, int32(device)), "cuDeviceGet"); err != nil {
 		return nil, err
 	}
-	if err := check(cuDevicePrimaryCtxRetain(&c.ctx, c.dev), "cuDevicePrimaryCtxRetain"); err != nil {
+	// Before the retain, which is the first call here that can fault, and
+	// before the bind at the bottom, which reads it.
+	c.poisoned = poisonFor(c.dev)
+	if err := c.fault(check(cuDevicePrimaryCtxRetain(&c.ctx, c.dev), "cuDevicePrimaryCtxRetain")); err != nil {
+		// The driver's own error, not the poison marker, deliberately: on the
+		// machine this was measured on the retain is what fails after a trap,
+		// and that measurement is what docs/toolchain.md rests on. A caller
+		// who just asked for a context needs no explanation of which call
+		// went wrong.
 		return nil, err
+	}
+	// The retain succeeding does not mean the device is usable -- another
+	// wrapper may already have seen a sticky fault on this same primary
+	// context. Refused here rather than at the bind below, which would hand
+	// back a live-looking *Context beside its error.
+	if p := c.poisoned.Load(); p != nil {
+		return nil, p
 	}
 	var major, minor int32
 	if err := check(cuDeviceGetAttribute(&major, attrComputeCapabilityMajor, c.dev), "cuDeviceGetAttribute"); err != nil {
@@ -178,6 +225,13 @@ func sticky(r Result) bool {
 // Only the first one is kept. A sticky fault makes every subsequent call fail
 // with the same code, so the second is a consequence of the first and saying
 // so is the whole point.
+//
+// Every call that can be the one to observe a device-side fault goes through
+// here, not just Sync and the launch. A host program that allocates or copies
+// after launching is the ordinary shape, so cuMemAlloc, cuMemFree and both
+// copies are just as likely to be where the driver first admits to 719 -- and
+// a call that recognises the code but does not record it leaves the *next*
+// one repeating the bare number.
 func (c *Context) fault(err error) error {
 	var e *Error
 	if !errors.As(err, &e) || !sticky(e.Code) {
@@ -269,7 +323,7 @@ func (c *Context) Alloc(n int) (DevPtr, error) {
 		return 0, err
 	}
 	var p uint64
-	if err := check(cuMemAlloc(&p, uint64(n)), "cuMemAlloc"); err != nil {
+	if err := c.fault(check(cuMemAlloc(&p, uint64(n)), "cuMemAlloc")); err != nil {
 		return 0, err
 	}
 	return DevPtr(p), nil
@@ -280,21 +334,21 @@ func (c *Context) Free(p DevPtr) error {
 	if err := c.bind(); err != nil {
 		return err
 	}
-	return check(cuMemFree(uint64(p)), "cuMemFree")
+	return c.fault(check(cuMemFree(uint64(p)), "cuMemFree"))
 }
 
 func (c *Context) copyHtoD(dst DevPtr, src unsafe.Pointer, n int) error {
 	if err := c.bind(); err != nil {
 		return err
 	}
-	return check(cuMemcpyHtoD(uint64(dst), src, uint64(n)), "cuMemcpyHtoD")
+	return c.fault(check(cuMemcpyHtoD(uint64(dst), src, uint64(n)), "cuMemcpyHtoD"))
 }
 
 func (c *Context) copyDtoH(dst unsafe.Pointer, src DevPtr, n int) error {
 	if err := c.bind(); err != nil {
 		return err
 	}
-	return check(cuMemcpyDtoH(dst, uint64(src), uint64(n)), "cuMemcpyDtoH")
+	return c.fault(check(cuMemcpyDtoH(dst, uint64(src), uint64(n)), "cuMemcpyDtoH"))
 }
 
 // Module is a loaded PTX module. It belongs to the context it was loaded into

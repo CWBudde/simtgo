@@ -53,6 +53,16 @@ func device(t *testing.T) *cuda.Context {
 func TestTrapPoisonsTheContextAndSaysSo(t *testing.T) {
 	ctx := device(t)
 
+	// A second wrapper around the same device, made before anything faults.
+	// cuDevicePrimaryCtxRetain hands both of these the same CUcontext, so the
+	// trap below happens to this one too -- and it has to say so. It used to
+	// keep returning bare 719s, because the marker lived on whichever *Context
+	// the faulting launch went through.
+	other, err := cuda.NewContext(0)
+	if err != nil {
+		t.Fatalf("a second NewContext on the same device: %v", err)
+	}
+
 	src := fstest.MapFS{"k.go": &fstest.MapFile{Data: []byte(probe)}}
 	k, err := simt.Build(ctx, src, "Overrun", simt.WithBoundsChecks())
 	if err != nil {
@@ -112,6 +122,17 @@ func TestTrapPoisonsTheContextAndSaysSo(t *testing.T) {
 	}
 	t.Logf("a later call reports: %v", ctx.Sync())
 
+	// The other wrapper, which never launched anything, reports the same
+	// fault -- because the fault belongs to the primary context, not to the
+	// Go value in front of it.
+	var second *cuda.ContextPoisonedError
+	if err := other.Sync(); !errors.As(err, &second) {
+		t.Errorf("Sync on a second wrapper of the same device returned %v, not a *cuda.ContextPoisonedError", err)
+	}
+	if _, err := cuda.NewSlice[float32](other, 4); !errors.As(err, &second) {
+		t.Errorf("Alloc on a second wrapper of the same device returned %v, not a *cuda.ContextPoisonedError", err)
+	}
+
 	// Close is deliberately not in that list. It holds the context's own
 	// mutex and never calls bind, because its job is to unload what it owns
 	// and let go -- so it reports the driver's error as it always has. That
@@ -120,12 +141,30 @@ func TestTrapPoisonsTheContextAndSaysSo(t *testing.T) {
 		t.Errorf("Close after a trap = %v, want the driver's own code", err)
 	}
 
+	// The second wrapper closes too, and that is load-bearing rather than
+	// tidy: the measurement below is about a primary context whose reference
+	// count has reached zero. With one reference still outstanding
+	// cuDevicePrimaryCtxRetain hands the same poisoned context straight back
+	// and succeeds, which measures nothing about whether a replacement can be
+	// made. The result is discarded deliberately -- it is the sticky code
+	// ctx.Close just returned, and it was asserted there.
+	_ = other.Close()
+
 	// And the measurement the documentation rests on: a replacement context
 	// cannot be made either, which is stronger than "the context is unusable"
-	// and is why the error says the process has to exit.
-	if _, err := cuda.NewContext(0); err == nil {
+	// and is why the error says the process has to exit. NewContext reports
+	// the driver's own failure here rather than the poison marker, precisely
+	// so this stays a measurement of cuDevicePrimaryCtxRetain.
+	fresh, err := cuda.NewContext(0)
+	if err == nil {
 		t.Error("a fresh context was retained after a trap; docs/toolchain.md says it cannot be, and that claim is now wrong")
 	} else {
+		if fresh != nil {
+			t.Error("NewContext returned both a context and an error after a trap")
+		}
+		if !errors.Is(err, cuda.ErrLaunchFailed) {
+			t.Errorf("a fresh context after a trap failed with %v, which is not the sticky code", err)
+		}
 		t.Logf("a fresh context after a trap: %v", err)
 	}
 }
