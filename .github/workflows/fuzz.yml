@@ -29,9 +29,15 @@ name: Fuzz
 
 on:
   schedule:
-    # 03:17 UTC daily. The time is arbitrary; what matters is that it is not
-    # the top of the hour, where every scheduled workflow on GitHub queues.
-    - cron: "17 3 * * *"
+    # 03:17 UTC, Monday to Saturday. The time is arbitrary; what matters is
+    # that it is not the top of the hour, where every scheduled workflow on
+    # GitHub queues.
+    #
+    # Sunday is excluded rather than left to run: the weekly leg below starts
+    # an hour earlier and searches the same targets for four hours, so a daily
+    # run on top of it duplicates all three jobs for twenty minutes and finds
+    # what the longer one is already finding.
+    - cron: "17 3 * * 1-6"
     # Sundays, 02:17 UTC. A different minute as well as a different day, so a
     # glance at a run's cron says which budget it got.
     - cron: "17 2 * * 0"
@@ -103,8 +109,10 @@ jobs:
   # The other oracle. It takes the whole of what the generator produces rather
   # than the third the host oracle is in scope for -- barriers, warp
   # primitives, atomics and shared tiles all compile here -- because it never
-  # executes anything. Four of the defect catalogue's eight ranks were found by
-  # NVRTC and only by NVRTC.
+  # executes anything, and those constructs are where four of the defect
+  # catalogue's eight ranks live. The defects NVRTC found and nothing else
+  # would have are the three compile failures named in the target's own
+  # comment; that is a different count and worth not merging into one.
   nvrtc:
     runs-on: ubuntu-latest
     steps:

@@ -22,18 +22,18 @@ Roughly 11,500 lines of library and tool, 7,100 of fuzzing infrastructure and
 11,400 of tests; twelve kernels, each with a golden file, an NVRTC compile test
 and a CPU/GPU parity test.
 
-| Verified                                                                          | Missing                                         |
-| --------------------------------------------------------------------------------- | ----------------------------------------------- |
-| Both tracks, against independent Go references                                    | on **one** GPU: T550, `sm_75`, CUDA 12.8, Linux |
-| The subset, as a contract checked in both directions                              | —                                               |
-| A differential fuzzer over three oracles, all three in CI daily, one weekly at 4h | the device oracle; a GPU runner to host it      |
-| `compute-sanitizer` clean on all four tools                                       | it runs by hand, not in CI                      |
-| A kernel that cannot be lowered fails `go build`                                  | —                                               |
-| Builds and ships with no CUDA installed, no cgo anywhere                          | Windows                                         |
-| 1-D/2-D/3-D grids, structs, arrays, atomics, warp vocabulary                      | tuple returns                                   |
-| Opt-in fast math, with the hash split that keeps it honest                        | a timing harness to say it is faster            |
-| Driver API: 18 calls, fully synchronous                                           | streams, events, async copies, pinned memory    |
-| Tile track: 7 ops, 1-D `float32`, one windowed                                    | reductions, 2-D, fusion planning                |
+| Verified                                                                 | Missing                                         |
+| ------------------------------------------------------------------------ | ----------------------------------------------- |
+| Both tracks, against independent Go references                           | on **one** GPU: T550, `sm_75`, CUDA 12.8, Linux |
+| The subset, as a contract checked in both directions                     | —                                               |
+| A differential fuzzer: the host and NVRTC oracles in CI daily, 4h weekly | the device oracle; a GPU runner to host it      |
+| `compute-sanitizer` clean on all four tools                              | it runs by hand, not in CI                      |
+| A kernel that cannot be lowered fails `go build`                         | —                                               |
+| Builds and ships with no CUDA installed, no cgo anywhere                 | Windows                                         |
+| 1-D/2-D/3-D grids, structs, arrays, atomics, warp vocabulary             | tuple returns                                   |
+| Opt-in fast math, with the hash split that keeps it honest               | a timing harness to say it is faster            |
+| Driver API: 18 calls, fully synchronous                                  | streams, events, async copies, pinned memory    |
+| Tile track: 7 ops, 1-D `float32`, one windowed                           | reductions, 2-D, fusion planning                |
 
 The single largest gap is **a GPU in CI** (Phase 1.4). It blocks the fuzzer's
 device leg, the sanitizer workflow, every parity test written since 2026-09-18,
@@ -289,9 +289,9 @@ The machinery is described in
       ordinary Go, where aliasing is defined.
 
 - [ ] **Differential fuzzing.** The generator, the corpus and three oracles
-      exist, and all three now run in `.github/workflows/fuzz.yml`. The box
-      stays open because the device oracle — the one the item's own definition
-      names — is the one that is missing.
+      exist, and two of them — the host and NVRTC oracles — now run in
+      `.github/workflows/fuzz.yml`. The box stays open because the device
+      oracle, the one the item's own definition names, is the third.
   - [ ] The device leg: run the generated program on the GPU and compare against
         the emulator. Blocked on 1.4.
   - [x] The NVRTC oracle in CI, which needs a toolkit on the runner rather than

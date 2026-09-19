@@ -89,6 +89,7 @@ var coverageFloors = map[string]float64{
 	"float64":               0.18,
 	"device funcs declared": 0.15,
 	"warp _sync vocabulary": 0.15,
+	"LaneID":                0.18,
 }
 
 // TestFeatureCoverage measures what fraction of generated programs reach each
@@ -126,16 +127,25 @@ func TestFeatureCoverage(t *testing.T) {
 	}
 }
 
-// TestEveryFloorNamesAFeature keeps the two tables from drifting apart. A
-// floor for a feature nobody measures is a check that never runs, which is the
-// quietest way for this test to stop being one.
-func TestEveryFloorNamesAFeature(t *testing.T) {
-	known := map[string]bool{}
+// TestTheTwoTablesAgree keeps coverageFeatures and coverageFloors from
+// drifting apart, and it checks **both** directions because each has its own
+// way of going quiet.
+//
+// A floor for a feature nobody measures is a check that never runs. A feature
+// with no floor is worse and less obvious: TestFeatureCoverage iterates the
+// floors, so such a row is printed and then not asserted, and the generator
+// could stop emitting it entirely with the table still green. LaneID was
+// exactly that until review caught it.
+func TestTheTwoTablesAgree(t *testing.T) {
+	measured := map[string]bool{}
 	for _, f := range coverageFeatures {
-		known[f.name] = true
+		measured[f.name] = true
+		if _, ok := coverageFloors[f.name]; !ok {
+			t.Errorf("coverageFeatures measures %q, which has no floor -- it would be reported and never asserted", f.name)
+		}
 	}
 	for name := range coverageFloors {
-		if !known[name] {
+		if !measured[name] {
 			t.Errorf("coverageFloors has %q, which coverageFeatures does not measure", name)
 		}
 	}
