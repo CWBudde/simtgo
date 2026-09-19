@@ -22,18 +22,18 @@ Roughly 11,500 lines of library and tool, 7,100 of fuzzing infrastructure and
 11,400 of tests; twelve kernels, each with a golden file, an NVRTC compile test
 and a CPU/GPU parity test.
 
-| Verified                                                     | Missing                                         |
-| ------------------------------------------------------------ | ----------------------------------------------- |
-| Both tracks, against independent Go references               | on **one** GPU: T550, `sm_75`, CUDA 12.8, Linux |
-| The subset, as a contract checked in both directions         | —                                               |
-| A differential fuzzer over three oracles, two daily in CI    | the device oracle; a GPU runner to host it      |
-| `compute-sanitizer` clean on all four tools                  | it runs by hand, not in CI                      |
-| A kernel that cannot be lowered fails `go build`             | —                                               |
-| Builds and ships with no CUDA installed, no cgo anywhere     | Windows                                         |
-| 1-D/2-D/3-D grids, structs, arrays, atomics, warp vocabulary | tuple returns                                   |
-| Opt-in fast math, with the hash split that keeps it honest   | a timing harness to say it is faster            |
-| Driver API: 18 calls, fully synchronous                      | streams, events, async copies, pinned memory    |
-| Tile track: 7 ops, 1-D `float32`, one windowed               | reductions, 2-D, fusion planning                |
+| Verified                                                                 | Missing                                         |
+| ------------------------------------------------------------------------ | ----------------------------------------------- |
+| Both tracks, against independent Go references                           | on **one** GPU: T550, `sm_75`, CUDA 12.8, Linux |
+| The subset, as a contract checked in both directions                     | —                                               |
+| A differential fuzzer: the host and NVRTC oracles in CI daily, 4h weekly | the device oracle; a GPU runner to host it      |
+| `compute-sanitizer` clean on all four tools                              | it runs by hand, not in CI                      |
+| A kernel that cannot be lowered fails `go build`                         | —                                               |
+| Builds and ships with no CUDA installed, no cgo anywhere                 | Windows                                         |
+| 1-D/2-D/3-D grids, structs, arrays, atomics, warp vocabulary             | tuple returns                                   |
+| Opt-in fast math, with the hash split that keeps it honest               | a timing harness to say it is faster            |
+| Driver API: 18 calls, fully synchronous                                  | streams, events, async copies, pinned memory    |
+| Tile track: 7 ops, 1-D `float32`, one windowed                           | reductions, 2-D, fusion planning                |
 
 The single largest gap is **a GPU in CI** (Phase 1.4). It blocks the fuzzer's
 device leg, the sanitizer workflow, every parity test written since 2026-09-18,
@@ -258,7 +258,7 @@ Two remain.
         statement before `expr` runs, which is where `ctx.SharedF32(n)` is
         special-cased.
 
-## Phase 3 — Correctness at scale (L) — 4 of 8
+## Phase 3 — Correctness at scale (L) — 5 of 8
 
 A transpiler is trusted through evidence, not review. This phase built the
 evidence: a written contract checked against the implementation in both
@@ -289,32 +289,61 @@ The machinery is described in
       ordinary Go, where aliasing is defined.
 
 - [ ] **Differential fuzzing.** The generator, the corpus and three oracles
-      exist; `.github/workflows/fuzz.yml` runs daily with one matrix leg per
-      target. The box stays open because the device oracle — the one the item's
-      own definition names — is the one that is missing.
+      exist, and two of them — the host and NVRTC oracles — now run in
+      `.github/workflows/fuzz.yml`. The box stays open because the device
+      oracle, the one the item's own definition names, is the third.
   - [ ] The device leg: run the generated program on the GPU and compare against
         the emulator. Blocked on 1.4.
-  - [ ] The NVRTC oracle in CI, which needs a toolkit on the runner rather than
+  - [x] The NVRTC oracle in CI, which needs a toolkit on the runner rather than
         a device, and would catch every struct-layout disagreement on every push.
+        (2026-09-19) — a job of its own installing the `nvidia-cuda-nvrtc-cu12`
+        wheel and pointing `GOCUDA_LIBNVRTC` at it; no device, no `nvcc`. It
+        sets the new `GOCUDA_REQUIRE_NVRTC`, because the skip it otherwise takes
+        is indistinguishable from a clean search — measured, a leg with the
+        library missing passes in **three milliseconds** having compiled nothing.
   - [ ] Raise the daily budget above 20m, or add a weekly leg that runs longer.
         Every defect so far was found in minutes, so the question the budget
         answers is whether a deeper one exists — and a 20m search cannot say.
-  - [ ] Raise warp-primitive coverage from 7.5%, the lowest figure in the
-        table and the least-exercised corner of the subset.
+        (2026-09-19) — partial: the weekly leg is written and `actionlint`-clean
+        — a second cron at `17 2 * * 0` and a `FUZZTIME` of `4h` — but no
+        command run here proves a schedule fires. The first weekly run is the
+        evidence, and this box is what is waiting for it.
+  - [x] Raise warp-primitive coverage from 7.5%, the lowest figure in the
+        table and the least-exercised corner of the subset. (2026-09-19) —
+        **10.7% → 19.8%**, and measured rather than asserted for the first time:
+        `TestFeatureCoverage` prints the whole table and holds each row to a
+        floor. None of the seven gates on a warp expression moved — each guards
+        real undefined behaviour — so the draws upstream of them did: a
+        statement slot of warp's own, a second slot in each expression switch,
+        and ten of sixteen whole-warp block widths. Yield still 1.0.
+        [The ceiling above it](docs/verification.md#warp-primitives-and-the-ceiling-over-them),
+        and why raising `g.sync` is the wrong next lever.
 
-- [ ] **Signed zero, host against emulator.** The one open fuzzer finding.
-      `fuzz.Generate(620)` with inputs `77` writes `+0` on the host where the
-      emulator writes `-0`, and it reproduces on the commit before the
-      signed-overflow fix, so that is not the cause.
-  - [ ] Reproduce and minimise the case.
-  - [ ] Establish which side is right, and whether it is a constant-folding
+- [x] **Signed zero, host against emulator.** (2026-09-19) — closed by
+      `53ab673` on 2026-09-18, and ticked here only now: the box outlived the
+      fix, and this plan and `docs/emitter-defects.md` both went on describing
+      an open finding for a day after it was answered. The answer is that
+      neither backend was wrong. `fmin`/`fmax` of two zeros of opposite signs
+      are unspecified in C and IEEE 754 alike, and the host does not answer it
+      stably — −0 at `-O1`, +0 at `-O0` — so `hostrun`'s shim pins the four
+      functions on the two zeros to the device's answer, which is not open.
+      `TestFminFmaxAgreeOnTheZeros` compares the bits and pins the direction.
+      [The post-mortem](docs/emitter-defects.md#signed-zero-host-against-emulator--and-it-was-neither-backends-fault).
+  - [x] Reproduce and minimise the case.
+  - [x] Establish which side is right, and whether it is a constant-folding
         difference — Go folds a float constant expression at arbitrary precision
-        and rounds once — or something in the translation.
-  - [ ] Decide whether `internal/tolerance` keeps treating the two zeros as
-        different results. It deliberately does today: a relative bound cannot
-        tell them apart, their difference being zero while their bits are not.
-  - [ ] Record the answer in `NUMERICS.md` and commit the corpus entry, which is
-        withheld today because an entry is a test and this one fails.
+        and rounds once — or something in the translation. It was neither: the
+        operation is unspecified, and the host compiler picks by optimisation
+        level.
+  - [x] Decide whether `internal/tolerance` keeps treating the two zeros as
+        different results. It does, unchanged: a relative bound cannot tell them
+        apart, their difference being zero while their bits are not, and the
+        finding was a reason to pin the oracle rather than to loosen the rule.
+  - [x] Record the answer in `NUMERICS.md` and commit the corpus entry. Both
+        done in `53ab673`. The entry is a **seed**, though, not a program, so it
+        tracks the generator rather than the case — raising the warp coverage
+        above moved it from skipping to passing without either being about the
+        zeros. [Why that is not what holds the case down](docs/verification.md#what-a-corpus-entry-does-not-pin).
 
 - [ ] **`compute-sanitizer` in CI.** The sweep exists, covers all twelve kernels
       plus the tile track's fused ones, and is clean on `memcheck`, `racecheck`,
@@ -477,7 +506,7 @@ Naming these keeps the scope honest:
 | 1.3 Error model & API | S    | done     | 1.1        | —                                                             |
 | 1.4 GPU CI            | M    | 1 of 2   | —          | hardware access and cost                                      |
 | 2 Language coverage   | L    | 14 of 16 | 1.1, 1.4   | fast math changes what a prebuilt artifact means              |
-| 3 Correctness         | L    | 4 of 8   | 1.4, 2     | the open oracles all need a device                            |
+| 3 Correctness         | L    | 5 of 8   | 1.4, 2     | the one oracle still open needs a device                      |
 | 4 Host runtime        | M    | 0 of 8   | 1.3        | streams change ownership semantics; the context bug is live   |
 | 5 Performance         | M    | 0 of 4   | 2, 4       | may expose NVRTC as the ceiling → revisit the PTX decision    |
 | 6 Tile maturity       | L    | 0 of 7   | 2, 4       | reductions and 2-D tiling are a rewrite of the code generator |

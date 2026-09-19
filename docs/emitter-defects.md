@@ -288,18 +288,41 @@ that never comes back.
   non-zero exit, because "does not finish" may be either the generator's fault or
   the emitter's and the caller has to be able to say which.
 
-## Still open
+## Signed zero, host against emulator — and it was neither backend's fault
 
-One finding has not been resolved: **signed zero, host against emulator.**
-`fuzz.Generate(620)` with inputs `77` writes `+0` on the host where the emulator
-writes `-0`, and it reproduces identically on the commit before the signed-
-overflow fix, so that is not the cause. `internal/tolerance` deliberately treats
-the two zeros as different results rather than a rounding — a relative bound
-cannot tell them apart, their difference being zero while their bits are not —
-so the differential reports it.
+The last open fuzzer finding, and the answer turned out not to be a defect at
+all, which is why it is filed here rather than above: it cost the same
+diagnosis and it is the same kind of thing to know.
 
-Which side is right is not established, nor whether it is a constant-folding
-difference (Go folds a float constant expression at arbitrary precision and
-rounds once) or something in the translation. It is **not** committed as a
-corpus entry, because an entry is a test and this one fails. Tracked in
-[`../PLAN.md`](../PLAN.md) under Phase 3.
+`fuzz.Generate(620)` with inputs `77` wrote `+0` on the host where the emulator
+wrote `-0`, and the differential reported it because `internal/tolerance`
+deliberately treats the two zeros as different results rather than a rounding —
+a relative bound cannot tell them apart, their difference being zero while their
+bits are not.
+
+Neither side was wrong. `fmin` and `fmax` of two zeros of opposite signs are
+**unspecified**, in C and in IEEE 754 alike — `minNum` "returns either one" —
+and the host does not even answer it stably: the same expression gives −0
+compiled at `-O1` and +0 at `-O0`, the compiler having picked a different
+instruction. `hostrun` builds at `-O1`.
+
+The device's answer is _not_ open, so that is the one both sides were pinned to.
+`gpu.Fmin` returns −0 and `gpu.Fmax` returns +0, which `NUMERICS.md` records and
+`TestFminFmaxParity` asserts against real hardware, and
+[`internal/fuzz/hostrun`](../internal/fuzz/hostrun)'s shim now pins `fmin`,
+`fmax`, `fminf` and `fmaxf` on the two zeros while leaving everything else — the
+NaN rule included — to the real functions. The alternative, excluding `fmin` and
+`fmax` from the differential the way the transcendentals are excluded, was
+measured before being rejected: it would have cut the host oracle's reach from
+34.8% of generated programs to 17.9%, for a case the shim settles in twenty
+lines.
+
+`TestFminFmaxAgreeOnTheZeros` compares the **bits**, because `+0 == -0` is true
+in both languages and an `==` would have passed whatever the shim did, and it
+pins the direction too, so a shim that made the two agree on the wrong answer
+would still fail. That test, and not the corpus entry, is what holds this down:
+`signed-zero-620` is committed, but an entry is a seed rather than a program, so
+what seed 620 renders moves whenever the generator does. See
+[`verification.md`](verification.md#what-a-corpus-entry-does-not-pin).
+
+Fixed in `53ab673`.

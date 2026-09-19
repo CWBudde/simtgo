@@ -308,7 +308,12 @@ func (g *gen) intExpr(k Kind, d int) Expr {
 		if e := g.callExpr(k, d); e != nil {
 			return e
 		}
-	case 7:
+	// Two slots rather than one, here and in floatExpr and boolExpr. warpExpr
+	// refuses far more often than the other builders do -- seven conditions
+	// have to hold at once -- so an equal share of the draw buys it a much
+	// smaller share of the output. The extra slot pays for the refusals, and
+	// costs the fallthrough a slot it has three of.
+	case 7, 8:
 		if e := g.warpExpr(k, d); e != nil {
 			return e
 		}
@@ -416,7 +421,9 @@ func (g *gen) mixed(k Kind, _ int) Expr {
 }
 
 func (g *gen) floatExpr(k Kind, d int) Expr {
-	switch g.r.IntN(10) {
+	// Eleven rather than ten, so the second warp slot below comes out of the
+	// draw rather than out of the plain binary expression's two.
+	switch g.r.IntN(11) {
 	case 0, 1:
 		return g.leaf(k)
 	case 2:
@@ -433,7 +440,7 @@ func (g *gen) floatExpr(k Kind, d int) Expr {
 		if e := g.callExpr(k, d); e != nil {
 			return e
 		}
-	case 7:
+	case 7, 8:
 		if e := g.warpExpr(k, d); e != nil {
 			return e
 		}
@@ -496,7 +503,7 @@ func (g *gen) boolExpr(d int) Expr {
 		if e := g.callExpr(KBool, d); e != nil {
 			return e
 		}
-	case 5:
+	case 5, 6:
 		if e := g.warpExpr(KBool, d); e != nil {
 			return e
 		}

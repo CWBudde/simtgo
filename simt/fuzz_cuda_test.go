@@ -36,8 +36,12 @@ const fuzzArch = "compute_75"
 //
 // This target needs the toolkit but no device: NVRTC compiles to PTX and
 // nothing is launched. Without libnvrtc there is no question to answer, so it
-// skips -- CI compiles this file and skips the assertion, which is the whole
-// reason the build tag is here rather than a runtime check.
+// skips -- ci.yml compiles this file and skips the assertion, which is the
+// whole reason the build tag is here rather than a runtime check.
+//
+// That skip is also why fuzz.yml's nvrtc leg sets GOCUDA_REQUIRE_NVRTC. A leg
+// that installed the library and then failed to find it would otherwise search
+// for nothing and report success; see requireNVRTC.
 func FuzzNVRTCAcceptsTheGeneratedC(f *testing.F) {
 	for _, s := range seeds {
 		f.Add(s[0])
@@ -48,9 +52,7 @@ func FuzzNVRTCAcceptsTheGeneratedC(f *testing.F) {
 		f.Add(s)
 	}
 
-	if _, _, err := cuda.NVRTCVersion(); errors.Is(err, cuda.ErrNoCUDA) {
-		f.Skipf("no CUDA toolkit available: %v", err)
-	}
+	requireNVRTC(f)
 
 	f.Fuzz(func(t *testing.T, seed int64) {
 		p := fuzz.Generate(seed)
