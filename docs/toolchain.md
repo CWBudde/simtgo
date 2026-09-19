@@ -258,6 +258,12 @@ and opening another does not work, so `cuda.ContextPoisonedError` tells the
 caller to exit rather than to reopen — advice that would have been wrong if it
 had been written from the documentation alone.
 
+It holds only once the primary context's reference count reaches **zero**, and
+that is a precondition rather than a footnote. `cuDevicePrimaryCtxRetain` is
+refcounted, so with any wrapper still open it returns the same poisoned
+context and succeeds — measuring nothing. The trap test closes every `Context`
+it made before asking, and found this out by not doing so.
+
 Two consequences follow, and they are why the trap test lives where it does.
 `go test` gives each package its own binary, which is the only isolation
 strong enough for a test that ends a process's use of CUDA, so

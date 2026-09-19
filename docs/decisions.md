@@ -368,3 +368,69 @@ launch path, and not just the source, differs between the two — and it lets a
 kernel carry on computing with wrong data, which is the opposite of what a
 panic is for. The trap ships first, as the roadmap asked; this is recorded so
 that adding it later is a decision with its trade already written down.
+
+### The `gocuda_` prefix is reserved, in every build
+
+The emitter writes two names of its own into the generated C: `gocuda_padN`,
+the explicit padding a struct's holes become, and `gocuda_bounds`, the range
+check `WithBoundsChecks` emits. Both are fixed spellings at file scope, and
+both are perfectly legal Go identifiers — so a kernel package can declare
+them, and then the emitter's definition and the author's are one C symbol. A
+local named `gocuda_bounds` shadows the helper and NVRTC rejects the call it
+cannot resolve; a device function of that name redefines it.
+
+Neither is a mistranslation, which is the only reason this is a refusal rather
+than an emitter defect: both fail loudly at compile time. What they fail with
+is a message about code the author never wrote.
+
+Two ways out were available. **Pick an unspellable helper name** — there is
+none: every C identifier is a legal Go identifier, so any fixed spelling is
+reachable. **Refuse the spelling** — which is what the field check for
+`gocuda_pad` already did, generalised to the prefix.
+
+It is refused **unconditionally**, not only when the checks are on, and that is
+the part worth recording. A build option must not move the subset: a kernel
+that `gocuda vet` accepts and `simt.Build(WithBoundsChecks())` then refuses
+would make the analyzer wrong about what builds, and the analyzer has no build
+options to be told about. The cost is that a name nobody would choose is
+refused in release builds too, where nothing would have collided.
+
+### A sticky fault belongs to the primary context, not to the `*Context`
+
+`cuda.NewContext(0)` twice retains the same primary context and hands back two
+Go wrappers around one `CUcontext`. The poison marker first lived on the
+struct, so a trap observed through one wrapper left the other handing out bare
+719s — which is the obscurity `ContextPoisonedError` exists to replace. The
+marker is now a package-level cell keyed by **device ordinal**, which is what
+identifies a primary context, and every wrapper of that device shares it.
+
+Not keyed process-wide, although the measurement in
+[`toolchain.md`](toolchain.md#what-the-host-sees-after-a-trap) found the whole
+process finished with CUDA. That machine has one GPU; saying a fault on device
+0 implies anything about device 1 would be a claim nothing has measured.
+
+Two consequences. The entry **outlives `Close`**, which is correct: the same
+measurement says a replacement context for that device cannot be retained, so
+one made anyway is unusable before it is used. And every call that can be the
+one to notice now records the fault — `cuMemAlloc`, `cuMemFree` and both
+copies, not just `Sync` and the launch. A host program that allocates after
+launching is the ordinary shape, and a call that recognised the code without
+recording it left the _next_ one repeating the bare number.
+
+### `TrapError` is raised for two result codes, not for every failed launch
+
+The first version wrapped whatever `LaunchSync` returned whenever the kernel
+carried bounds checks, and that was wrong in two directions. A launch refused
+before it started — the wrong argument count, a block the device cannot fit,
+`CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES` — is not a fault at all, so "its launch
+faulted, which an index outside a slice would do" sends the reader hunting an
+index that was never read. And once the context is poisoned every later launch
+fails in `Context.bind` before dispatch: naming _that_ kernel accuses one that
+did not run, and buries the `ContextPoisonedError` that says which one did.
+
+So `Kernel.diagnose` passes a poisoned context straight through, and otherwise
+wraps only `CUDA_ERROR_LAUNCH_FAILED` — what a `__trap()` was measured to
+surface as — and `CUDA_ERROR_ILLEGAL_ADDRESS`, which is where an overrun the
+checks did _not_ cover lands. Under a bounds-checked build those two are the
+same mistake wearing different codes, which is what the error already says out
+loud. Everything else is returned untouched.

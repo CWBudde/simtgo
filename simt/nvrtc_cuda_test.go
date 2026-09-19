@@ -545,9 +545,14 @@ func TestNVRTCDeclaresTrapAndPrintf(t *testing.T) {
 		implies string
 	}{
 		{
-			name:     "__trap()",
-			body:     "__trap();",
-			required: false,
+			name: "__trap()",
+			body: "__trap();",
+			// Required, because the emitted bounds helper calls it. Recorded
+			// as a measurement and enforced as a dependency at the same time:
+			// if a future NVRTC stopped declaring it, every bounds-checked
+			// kernel would fail to compile, and a log line saying "NOT
+			// declared" in a passing test is not how anyone should find out.
+			required: true,
 			implies:  "a bounds check can trap through the documented intrinsic",
 		},
 		{
@@ -572,9 +577,12 @@ func TestNVRTCDeclaresTrapAndPrintf(t *testing.T) {
 			implies: "printf is usable for anything worth printing",
 		},
 		{
-			name:    "__forceinline__",
-			body:    "",
-			implies: "the emitted bounds helper may ask to be inlined",
+			name: "__forceinline__",
+			body: "",
+			// Required for the same reason: the helper carries the attribute,
+			// so a refusal is a broken emitter rather than a missing luxury.
+			required: true,
+			implies:  "the emitted bounds helper may ask to be inlined",
 		},
 	}
 
