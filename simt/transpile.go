@@ -34,9 +34,10 @@ const GPUPkgPath = lower.GPUPkgPath
 //
 // It takes the same BuildOption type Build does, although only the options
 // that change what is emitted mean anything here -- lowering is the first step
-// of a build, and WithCacheDir and WithoutPrebuilt concern the loading that
-// comes after it. Sharing one option type is what lets a caller ask what a
-// debug build would generate without a device or a toolkit anywhere in reach.
+// of a build, and WithCacheDir, WithoutPrebuilt and WithoutDiskCache all
+// concern the loading that comes after it. Sharing one option type is what
+// lets a caller ask what a debug build would generate without a device or a
+// toolkit anywhere in reach.
 func Transpile(fsys fs.FS, fn string, opts ...BuildOption) (*Unit, error) {
 	var o buildOptions
 	for _, opt := range opts {

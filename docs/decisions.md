@@ -434,3 +434,119 @@ surface as — and `CUDA_ERROR_ILLEGAL_ADDRESS`, which is where an overrun the
 checks did _not_ cover lands. Under a bounds-checked build those two are the
 same mistake wearing different codes, which is what the error already says out
 loud. Everything else is returned untouched.
+
+## A driver call holds its OS thread
+
+`cuCtxSetCurrent` binds a context to the **calling OS thread**, and Go moves
+goroutines between threads at any preemption point. `Context.bind` and the
+driver call after it were two statements, so a goroutine preempted between
+them could finish its call on a thread the context had never been made current
+on, and the driver answered `CUDA_ERROR_INVALID_CONTEXT`. This is not a data
+race and the race detector cannot see it: no Go memory is touched
+concurrently, only a per-thread state the driver keeps and Go does not know
+about.
+
+The fix is one choke point, `Context.call`, which locks the thread around the
+bind and the call together. There is nowhere left to write the bug: a method
+that forgets to lock also forgets to bind, and does not compile against a
+`call` that takes the entry point as a closure.
+
+Two other candidates were considered.
+
+|                                          | what it fixes             | why not                                                                                                                                         |
+| ---------------------------------------- | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `LockOSThread` + `cuCtxSetCurrent`       | the migration window      | — chosen                                                                                                                                        |
+| `cuCtxPushCurrent`/`cuCtxPopCurrent`     | nothing, on its own       | the goroutine can still migrate between push and call; it needs the lock too, and then only adds restoring a context somebody else made current |
+| bind once per thread, and prove it stays | the repeated `SetCurrent` | Go offers no hook on thread creation, so there is no "once" to hang it on — an optimisation over the first row, not an alternative to it        |
+
+Push/pop is the polite form: it gives a thread back whatever context was
+current on it before. Nothing needs that today, because Go's threads are Go's
+and no host application shares them, and it costs a second driver call on
+every operation. If gocuda is ever called on a thread it did not create, this
+is the row to revisit.
+
+### What it costs, and what the measurement actually was
+
+One OS thread pinned for the duration of one driver call. Those calls are
+microseconds to milliseconds and block in the driver anyway, so the scheduler
+loses nothing it could have run there; `LockOSThread` itself is a couple of
+pointer writes. `go test -tags cuda ./...` takes the same time it did.
+
+The interesting part is the reproduction, because the roadmap described a
+shape that **does not fail**. 64 goroutines doing 40 `Upload`/`Download` round
+trips each against one context passes every time on the unfixed code, measured
+here. The reason is that `cuCtxSetCurrent` is sticky: once a thread has been
+made current it stays current, so in a steady thread pool every migration
+lands somewhere already bound, and the bug is invisible.
+
+What is needed is a thread that has **never** bound — one the runtime created
+after the work started. `TestContextIsGoroutineSafe` manufactures those: a
+goroutine that exits while still holding `runtime.LockOSThread` takes its OS
+thread down with it, so a loop of those retires threads continuously and
+obliges the scheduler to make fresh ones for the workers. On the unfixed code
+that fails in about 0.4 s, 15 runs out of 15, with three to six of 32 workers
+reporting `CUDA_ERROR_INVALID_CONTEXT`; with the fix, 15 of 15 pass, under the
+race detector too.
+
+That is worth stating plainly: a concurrency bug that a thread pool hides is a
+bug that reaches production and not CI. Measured on the T550 — one machine is
+one machine, but the mechanism is in the driver's contract rather than in this
+one's behaviour.
+
+### What is still not promised
+
+Ordering. Every call is synchronous and has finished before it returns, but
+two goroutines allocating, copying and launching against one context interleave
+however the scheduler likes, and nothing serialises them. A device buffer
+shared between goroutines needs the same care as any other shared memory. That
+is now written on `cuda.Context` rather than left to be inferred.
+
+Multi-GPU is untested, not unsupported: `NewContext` takes a device ordinal and
+the poison table is already keyed by one, but this machine has one GPU, so
+nothing here has exercised two contexts on two devices.
+
+## The PTX cache is on by default, and only its location is an environment variable
+
+The persistent cache in `internal/jit/diskcache.go` is on unless a caller says
+`simt.WithoutDiskCache()`. An opt-in cache does not do the thing the roadmap
+asked for — taking NVRTC out of process start — because the programs that
+would most benefit are the ones that never learn the option exists.
+
+`GOCUDA_PTX_CACHE` moves the directory, and that is not the environment
+variable this file
+[rejected for bounds checks](#bounds-checks-are-a-build-option-and-the-checks-are-their-own-marker).
+The objection there was that a process-wide switch expressed in one corner of a
+program silently changes what an unrelated library _builds_: different bytes,
+different behaviour, and nothing at the call site saying so. A location says
+where bytes are kept and never what is compiled, so no program's output changes
+because another part of it set the variable. `internal/fuzz/hostrun` already
+does the same thing one layer down with `GOCUDA_HOSTRUN_CACHE`.
+
+Whether the cache is consulted at all stays a build option, for exactly the
+rejected reason: that one _is_ about whether a compiler runs.
+
+### Not the same thing as `WithCacheDir`
+
+Two caches, deliberately separate, and conflating them was the first design.
+
+|           | `WithCacheDir` / `.gocuda-cache`  | the PTX cache                       |
+| --------- | --------------------------------- | ----------------------------------- |
+| For       | a human to read                   | the next process                    |
+| Named     | after the kernel                  | after a hash of what produced it    |
+| Holds     | the `.cu` and the `.ptx` that ran | PTX only                            |
+| Read back | never                             | that is the point                   |
+| Keyed on  | nothing — it overwrites           | source, architecture, NVRTC version |
+
+A dump named `FIR-a1b2c3d4e5f6.cu` is the right thing for reading and the
+wrong thing to load from: the 12 hex digits in that name are a convenience,
+not collision resistance, which is stated where they are produced. Reusing it
+would have meant hanging a module lookup on a truncated hash.
+
+### The key is length-prefixed, and a test says why
+
+`sha256("a\0b" + "\0" + "c" + "\0" + "d")` and `sha256("a" + "\0" + "b\0c" +
+"\0" + "d")` are the same digest for two different triples. A NUL is not
+reachable in any of the three terms today — the source is generated CUDA C,
+the other two are short machine-written strings — but "not reachable today" is
+how a joined key becomes ambiguous later, and a length prefix is one line.
+That was found by the test rather than by reading the code.

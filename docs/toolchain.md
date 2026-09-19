@@ -288,6 +288,82 @@ measures the same as before (1.1 ms kernel, 9.4 ms transfers). That is the
 point: the launch path was never where its 10 ms went. The transfers are, which
 is what Phase 4 in [`../PLAN.md`](../PLAN.md) is aimed at.
 
+## The on-disk PTX cache brings a compiled kernel level with a prebuilt one
+
+The module cache on `*cuda.Context` dies with the context and so with the
+process, so a kernel with no prebuilt artifact paid NVRTC at every start. The
+persistent cache in `internal/jit/diskcache.go` keys compiled PTX on
+`(source, architecture, NVRTC version)` and keeps it under
+`$XDG_CACHE_HOME/gocuda/ptx`.
+
+`BenchmarkBuild` in `simt/prebuilt_cuda_test.go` measures a whole
+`simt.Build` — transpile, pick a path, load the module — in a context of its
+own per iteration, because a shared one would answer from the module cache and
+every number would converge on the cost of nothing happening. The minimum over
+600 iterations:
+
+| path                                          | min ns/op   |                                 |
+| --------------------------------------------- | ----------- | ------------------------------- |
+| context only                                  | 5,368       | the constant in all three below |
+| NVRTC (`WithoutPrebuilt`, `WithoutDiskCache`) | 111,459,496 |                                 |
+| on-disk cache (`WithoutPrebuilt`)             | 11,589,221  | **9.6× faster**                 |
+| prebuilt artifact                             | 10,439,211  | 10.7× faster                    |
+
+The result worth having is the last two rows, not the middle one: a kernel with
+no artifact and a kernel with one now cost the same to within the noise, which
+is what they should, because both do the same work — load PTX into a module —
+and differ only by one file read. Ahead-of-time generation remains worth having
+for reproducibility and for a machine with no toolkit; it is no longer what
+makes the second start fast.
+
+The **tile track gets the most out of this** and was not mentioned in the
+roadmap item. Every fused kernel it generates is NVRTC-compiled at run time and
+there is no prebuilt path for it at all, so before this the compile was
+unavoidable on every process start.
+
+**Two caveats, and the first is large.** These absolute numbers were taken on a
+machine under heavy load from an unrelated build — load average around 31 on 12
+cores, for the whole run — so they are inflated and the _ratio_ is the durable
+part. They are also **not** comparable to the 28.7 ms → 0.9 ms figures in
+[`decisions.md`](decisions.md#cuda-c-through-nvrtc-not-ptx-or-llvm-ir), which
+time transpile-plus-compile and stop before `cuModuleLoadData`; this benchmark
+includes the module load, which is most of what the bottom two rows are.
+
+### What the key has that the in-memory one does not
+
+The NVRTC version. A module cache lives inside one process, where the compiler
+cannot change under it; a file outlives the toolkit that wrote it, and PTX
+records an ISA version in its `.version` directive that the driver either
+accepts or does not. Serving a 12.8 artifact to a process that loaded NVRTC
+12.0 would hand back something the local compiler would never have produced.
+
+The origin term that `cacheKey` carries has no counterpart, because this cache
+only ever holds what NVRTC compiled — the prebuilt path already has its bytes.
+
+An entry the driver refuses is dropped and recompiled. What that recovers is a
+file which is not what NVRTC produced — truncated, tampered with, a write
+something else interrupted — and it is the likely case, because the key pins
+the source, the architecture and the compiler, so a hit means the local NVRTC
+would have produced these bytes.
+
+It does **not** recover a driver downgraded under an unchanged toolkit. There
+the cached `.version` is the one this NVRTC emits, so recompiling emits it
+again and the second load fails with the driver's own error — which is right
+for a machine that genuinely needs a different toolkit.
+
+The result code cannot tell the two apart, and that is measured rather than
+assumed: corrupt bytes behind a bogus `.version` come back as
+`CUDA_ERROR_UNSUPPORTED_PTX_VERSION`, the same code a real downgrade gives.
+(The codes are pinned in `cuda.TestLoadPTXError`, and there is a second
+surprise in them already: text with no PTX header at all is
+`CUDA_ERROR_INVALID_IMAGE`, not `CUDA_ERROR_INVALID_PTX`.) Narrowing the retry
+to the codes only corruption produces would therefore drop the recovery for
+the likelier cause in order to save one compile in the rarer one.
+
+Dropping the entry is right either way: a file the driver refuses is worthless
+whichever reason it refused it for. Every other way the cache can fail is a
+miss, because a cache is an optimisation and no build may sink on one.
+
 ## Where these numbers come from
 
 NVIDIA T550 Laptop (`sm_75`, 4 GB), CUDA 12.8 NVRTC, driver 580, go1.26.8,

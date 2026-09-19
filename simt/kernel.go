@@ -59,11 +59,14 @@ type BuildOption func(*buildOptions)
 type buildOptions struct {
 	cacheDir     string
 	noPrebuilt   bool
+	noDiskCache  bool
 	boundsChecks bool
 }
 
 // lowerOptions is what of a build's options the lowering is allowed to see.
-// Two of the three concern loading and are simply not consulted there.
+// Only WithBoundsChecks changes the generated C; WithCacheDir, WithoutPrebuilt
+// and WithoutDiskCache all concern the loading that comes after it and are
+// simply not consulted here.
 func (o buildOptions) lowerOptions() []lower.Option {
 	if o.boundsChecks {
 		return []lower.Option{lower.WithBoundsChecks()}
@@ -91,6 +94,19 @@ func WithCacheDir(dir string) BuildOption {
 // identically whichever path produced it.
 func WithoutPrebuilt() BuildOption {
 	return func(o *buildOptions) { o.noPrebuilt = true }
+}
+
+// WithoutDiskCache compiles with NVRTC rather than reading the persistent PTX
+// cache, and stores nothing in it.
+//
+// That cache is on by default, because an opt-in one does not do the thing it
+// is for: taking NVRTC out of process start. This is the way to measure what
+// it saves, and the way for a caller who would rather not have a library
+// writing to their user cache directory to say so. GOCUDA_PTX_CACHE moves the
+// directory; only this turns the cache off, because whether a compiler runs is
+// not something one corner of a program should decide for the rest of it.
+func WithoutDiskCache() BuildOption {
+	return func(o *buildOptions) { o.noDiskCache = true }
 }
 
 // WithBoundsChecks builds the kernel with a range check at every slice, array
@@ -141,7 +157,13 @@ func Build(dev *cuda.Context, fsys fs.FS, name string, opts ...BuildOption) (*Ke
 		return nil, &SharedMemoryError{Kernel: name, Bytes: u.SharedBytes, Limit: limit}
 	}
 
-	req := jit.Request{Src: u.Source, Name: name, CacheDir: o.cacheDir, FastMath: u.FastMath}
+	req := jit.Request{
+		Src:         u.Source,
+		Name:        name,
+		CacheDir:    o.cacheDir,
+		FastMath:    u.FastMath,
+		NoDiskCache: o.noDiskCache,
+	}
 	var pre Prebuilt
 	if !o.noPrebuilt {
 		major, minor := dev.ComputeCapability()

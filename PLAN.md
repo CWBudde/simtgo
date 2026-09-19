@@ -22,18 +22,18 @@ Roughly 11,500 lines of library and tool, 7,100 of fuzzing infrastructure and
 11,400 of tests; twelve kernels, each with a golden file, an NVRTC compile test
 and a CPU/GPU parity test.
 
-| Verified                                                                 | Missing                                         |
-| ------------------------------------------------------------------------ | ----------------------------------------------- |
-| Both tracks, against independent Go references                           | on **one** GPU: T550, `sm_75`, CUDA 12.8, Linux |
-| The subset, as a contract checked in both directions                     | —                                               |
-| A differential fuzzer: the host and NVRTC oracles in CI daily, 4h weekly | the device oracle; a GPU runner to host it      |
-| `compute-sanitizer` clean on all four tools                              | it runs by hand, not in CI                      |
-| A kernel that cannot be lowered fails `go build`                         | —                                               |
-| Builds and ships with no CUDA installed, no cgo anywhere                 | Windows                                         |
-| 1-D/2-D/3-D grids, structs, arrays, atomics, warp vocabulary             | tuple returns                                   |
-| Opt-in fast math, with the hash split that keeps it honest               | a timing harness to say it is faster            |
-| Driver API: 18 calls, fully synchronous                                  | streams, events, async copies, pinned memory    |
-| Tile track: 7 ops, 1-D `float32`, one windowed                           | reductions, 2-D, fusion planning                |
+| Verified                                                                  | Missing                                         |
+| ------------------------------------------------------------------------- | ----------------------------------------------- |
+| Both tracks, against independent Go references                            | on **one** GPU: T550, `sm_75`, CUDA 12.8, Linux |
+| The subset, as a contract checked in both directions                      | —                                               |
+| A differential fuzzer: the host and NVRTC oracles in CI daily, 4h weekly  | the device oracle; a GPU runner to host it      |
+| `compute-sanitizer` clean on all four tools                               | it runs by hand, not in CI                      |
+| A kernel that cannot be lowered fails `go build`                          | —                                               |
+| Builds and ships with no CUDA installed, no cgo anywhere                  | Windows                                         |
+| 1-D/2-D/3-D grids, structs, arrays, atomics, warp vocabulary              | tuple returns                                   |
+| Opt-in fast math, with the hash split that keeps it honest                | a timing harness to say it is faster            |
+| Driver API: 18 calls, fully synchronous, safe to share between goroutines | streams, events, async copies, pinned memory    |
+| Tile track: 7 ops, 1-D `float32`, one windowed                            | reductions, 2-D, fusion planning                |
 
 The single largest gap is **a GPU in CI** (Phase 1.4). It blocks the fuzzer's
 device leg, the sanitizer workflow, every parity test written since 2026-09-18,
@@ -399,7 +399,7 @@ The machinery is described in
         those bytes already; the marker line covers the kernel that indexes
         nothing, whose two builds would otherwise be identical.
 
-## Phase 4 — Host runtime for real workloads (M)
+## Phase 4 — Host runtime for real workloads (M) — 1 of 8
 
 The measurement that should drive this: the FIR example spends **1.0 ms in the
 kernel and 9.5 ms moving data**. Speed lives here, not in kernel
@@ -416,26 +416,47 @@ launch path is not where the time goes.
       [`docs/tile.md`](docs/tile.md#aliasing-the-promise-is-made-then-checked).
 - [ ] Block-size selection via `cuOccupancyMaxPotentialBlockSize` instead of a
       hard-coded 256.
-- [ ] **Persistent on-disk kernel cache** keyed by (source, arch, NVRTC
+- [x] **Persistent on-disk kernel cache** keyed by (source, arch, NVRTC
       version) — removes the compile from every process start for kernels with
-      no prebuilt artifact.
+      no prebuilt artifact. (2026-09-19) — `internal/jit/diskcache.go`, on by
+      default, under the user cache directory; `simt.WithoutDiskCache()` turns
+      it off and `GOCUDA_PTX_CACHE` moves it. 111.5 ms to 11.6 ms against
+      10.4 ms for a prebuilt artifact, so a kernel with no artifact and a
+      kernel with one now cost the same to within the noise. The tile track
+      gains the most and this item did not say so: its fused kernels have no
+      prebuilt path at all.
+      [What was measured](docs/toolchain.md#the-on-disk-ptx-cache-brings-a-compiled-kernel-level-with-a-prebuilt-one),
+      [why on by default and why only the location is an environment variable](docs/decisions.md#the-ptx-cache-is-on-by-default-and-only-its-location-is-an-environment-variable).
 - [ ] **Multi-GPU; explicit context and stream ownership; goroutine-safety
-      documented _and tested_.** The per-call `cuCtxSetCurrent` is broken, and
-      this is reproduced rather than suspected: `Context.bind` makes the context
-      current on the calling OS thread, but a goroutine may migrate to another
-      thread between that call and the next, which then sees a thread with no
-      current context.
-  - [ ] Choose the fix: `runtime.LockOSThread` around every driver call, a
+      documented _and tested_.** (2026-09-19) — partial: goroutine safety is
+      fixed, tested and written down; multi-GPU and stream ownership are not.
+      Multi-GPU needs a second device, which this machine does not have, and
+      stream ownership needs streams.
+      [The finding](docs/decisions.md#a-driver-call-holds-its-os-thread).
+  - [x] Choose the fix: `runtime.LockOSThread` around every driver call, a
         `cuCtxPushCurrent`/`cuCtxPopCurrent` pair, or binding once per thread and
-        proving it stays bound. All three change ownership semantics, which is
-        why this belongs here and not in Phase 0.
-  - [ ] A regression test that fails today. 64 goroutines each doing
-        `Upload`/`Download` 40 times against one context fail with
-        `CUDA_ERROR_INVALID_CONTEXT` within half a second, on `3d31a2e` and
-        after Phase 0 alike — pre-existing, not a regression — and the same bug
-        shows up as a rare spurious failure of `examples/tilefir`.
-  - [ ] Document the resulting guarantee on `cuda.Context`: what may be shared
-        between goroutines and what may not.
+        proving it stays bound. (2026-09-19) — the first, through one
+        `Context.call` that locks the thread around the bind and the driver
+        call together and takes the entry point as a closure, so a method that
+        forgets to lock also forgets to bind and does not compile. Push/pop
+        does not fix migration on its own and only restores a context nothing
+        here ever takes; per-thread binding has no hook to hang a "once" on.
+        `Module.Function` turned out to have no bind at all and now goes
+        through the same place.
+  - [x] A regression test that fails today. (2026-09-19) — and the shape this
+        item described is not one that fails: 64 goroutines doing 40
+        `Upload`/`Download` round trips pass every time, because
+        `cuCtxSetCurrent` is sticky and in a steady thread pool every
+        migration lands on a thread already bound. What is needed is a thread
+        that never bound, so `TestContextIsGoroutineSafe` shreds threads — a
+        goroutine exiting while holding `runtime.LockOSThread` takes its OS
+        thread with it. Unfixed, 15 runs of 15 fail in about 0.4 s; fixed, 15
+        of 15 pass, under `-race` and all four `compute-sanitizer` tools too.
+  - [x] Document the resulting guarantee on `cuda.Context`: what may be shared
+        between goroutines and what may not. (2026-09-19) — a `*cuda.Context` is safe
+        to share; ordering is not promised, and a device buffer two goroutines
+        reach needs the same care as any other shared memory. `README.md`'s
+        "not safe to share between goroutines" went with it.
 
 - [ ] Buffer pooling and leak detection.
 - [ ] CUDA graphs for launch-bound workloads (later, measure first).
@@ -540,7 +561,7 @@ Naming these keeps the scope honest:
 | 1.4 GPU CI            | M    | 1 of 2   | —          | hardware access and cost                                      |
 | 2 Language coverage   | L    | 14 of 16 | 1.1, 1.4   | fast math changes what a prebuilt artifact means              |
 | 3 Correctness         | L    | 5 of 8   | 1.4, 2     | the one oracle still open needs a device                      |
-| 4 Host runtime        | M    | 0 of 8   | 1.3        | streams change ownership semantics; the context bug is live   |
+| 4 Host runtime        | M    | 1 of 8   | 1.3        | streams change ownership semantics                            |
 | 5 Performance         | M    | 0 of 4   | 2, 4       | may expose NVRTC as the ceiling → revisit the PTX decision    |
 | 6 Tile maturity       | L    | 0 of 7   | 2, 4       | reductions and 2-D tiling are a rewrite of the code generator |
 | 7 Release             | S–M  | 5 of 9   | all        | —                                                             |

@@ -114,6 +114,14 @@ check: build vet test test-race build-nocgo check-generated test-cuda lint fmt-c
 # what makes it a gate at all. A clean run prints nothing: go test discards a
 # passing binary's stdout.
 # compute-sanitizer over every kernel, one tool at a time. Needs a device.
+#
+# It is taken from PATH, and on a machine with both the toolkit's copy and the
+# distribution's nvidia-cuda-toolkit package installed, /usr/bin wins and can
+# be years older than the driver. That failure looks nothing like an install
+# problem -- every package "FAIL"s in milliseconds with "Unable to find
+# injection library libsanitizer-collection.so" -- so if that is what comes
+# back, put the toolkit's own directory first:
+#   PATH=/usr/local/cuda-12.8/compute-sanitizer:$PATH just sanitize-all
 sanitize tool="memcheck":
     GOCUDA_REQUIRE_DEVICE=1 go test -tags cuda -count=1 -timeout 0 \
         -exec "compute-sanitizer --tool={{tool}} --error-exitcode 1 --report-api-errors no --target-processes application-only" \
@@ -130,6 +138,11 @@ sanitize-all: (sanitize "memcheck") (sanitize "racecheck") (sanitize "initcheck"
 setup-deps:
     #!/usr/bin/env bash
     set -euo pipefail
+
+    # Kept beside CI's own pin in .github/workflows/ci.yml; if the two drift,
+    # the workflow is right and this file is stale, as the head of this file
+    # says of everything else here.
+    PRETTIER=3.8.1
 
     # golangci-lint has to be built with this module's own Go: the version
     # check compares the toolchain that built the linter against go.mod, and a
@@ -152,10 +165,16 @@ setup-deps:
 
     # prettier formats the Markdown, YAML and JSON. Pinned for the same reason
     # CI pins it: a formatter's idea of correct output changes between releases.
-    command -v prettier >/dev/null 2>&1 || {
-        echo "Installing prettier..."
-        npm install --global prettier@3.8.1 || echo "prettier needs npm; install Node.js first."
-    }
+    #
+    # The version is checked and not merely the presence, because `command -v`
+    # alone let an older or newer global prettier win the pin silently -- and
+    # that is not hypothetical. A machine with 3.9.6 installed formatted a
+    # bare *Context in Markdown as-is where CI's 3.8.1 escapes it to \*, so
+    # `just check` was green and the format job was red over one byte.
+    if [ "$(prettier --version 2>/dev/null || true)" != "$PRETTIER" ]; then
+        echo "Installing prettier@$PRETTIER (found: $(prettier --version 2>/dev/null || echo none))..."
+        npm install --global "prettier@$PRETTIER" || echo "prettier needs npm; install Node.js first."
+    fi
 
     echo "Done. $(go env GOPATH)/bin must be on PATH."
 
