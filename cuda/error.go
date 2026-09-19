@@ -271,3 +271,34 @@ func (e *ContextPoisonedError) Error() string {
 }
 
 func (e *ContextPoisonedError) Unwrap() error { return e.Code }
+
+// LengthError reports a copy whose two ends are different sizes, or a
+// negative allocation.
+//
+// It lives here rather than being a plain fmt.Errorf because the copies it
+// guards are the ones a caller reaches for when a kernel produced the wrong
+// number of elements, and "want 1024, got 1023" is the sentence that finds
+// that bug. The driver would not have caught it: a short copy into a longer
+// buffer is a perfectly legal cuMemcpy.
+type LengthError struct {
+	// Op is the operation that refused.
+	Op string
+	// Want is the length the operation required, Got the one it was given.
+	Want, Got int
+}
+
+func (e *LengthError) Error() string {
+	return fmt.Sprintf("cuda: %s: length mismatch: want %d elements, got %d", e.Op, e.Want, e.Got)
+}
+
+// BusyStreamError reports an operation refused because a cancelled Wait left
+// work outstanding on the stream.
+type BusyStreamError struct {
+	// Op is the operation that refused.
+	Op string
+}
+
+func (e *BusyStreamError) Error() string {
+	return fmt.Sprintf("cuda: %s: a cancelled Wait left work on this stream and the device is still running it; "+
+		"Sync to let it finish, or CloseAbandoned to say the outstanding work is accepted", e.Op)
+}

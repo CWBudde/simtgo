@@ -33,11 +33,9 @@ func Upload[T any](c *Context, xs []T) (*Slice[T], error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(xs) > 0 {
-		if err := c.copyHtoD(s.ptr, unsafe.Pointer(&xs[0]), len(xs)*sizeOf[T]()); err != nil {
-			s.Free()
-			return nil, err
-		}
+	if err := s.CopyFrom(xs); err != nil {
+		s.Free()
+		return nil, err
 	}
 	return s, nil
 }
@@ -45,13 +43,44 @@ func Upload[T any](c *Context, xs []T) (*Slice[T], error) {
 // Download copies the buffer back to a fresh host slice.
 func (s *Slice[T]) Download() ([]T, error) {
 	out := make([]T, s.n)
-	if s.n == 0 {
-		return out, nil
-	}
-	if err := s.ctx.copyDtoH(unsafe.Pointer(&out[0]), s.ptr, s.n*sizeOf[T]()); err != nil {
+	if err := s.CopyTo(out); err != nil {
 		return nil, err
 	}
 	return out, nil
+}
+
+// CopyFrom fills this buffer from a host slice of the same length.
+//
+// It is what Upload does without the allocation, and the reason to have it
+// separately is reuse: a program that uploads new data into one buffer every
+// iteration should not allocate and free device memory every iteration. It is
+// also the synchronous counterpart of UploadAsync, and takes a plain []T
+// because a synchronous copy finishes before it returns -- pinning the
+// source for the duration of the call is enough, which is exactly what the
+// asynchronous version cannot say.
+//
+// The lengths must match. A shorter source would be a legal cuMemcpy leaving
+// the tail of the buffer holding whatever was there before.
+func (s *Slice[T]) CopyFrom(xs []T) error {
+	if len(xs) != s.n {
+		return &LengthError{Op: "CopyFrom", Want: s.n, Got: len(xs)}
+	}
+	if s.n == 0 {
+		return nil
+	}
+	return s.ctx.copyHtoD(s.ptr, unsafe.Pointer(&xs[0]), s.n*sizeOf[T]())
+}
+
+// CopyTo reads this buffer into a host slice of the same length. It is
+// Download without the allocation; see CopyFrom.
+func (s *Slice[T]) CopyTo(xs []T) error {
+	if len(xs) != s.n {
+		return &LengthError{Op: "CopyTo", Want: s.n, Got: len(xs)}
+	}
+	if s.n == 0 {
+		return nil
+	}
+	return s.ctx.copyDtoH(unsafe.Pointer(&xs[0]), s.ptr, s.n*sizeOf[T]())
 }
 
 // Len reports the number of elements.

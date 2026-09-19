@@ -9,19 +9,28 @@
 // ErrNoCUDA, so the rest of the module -- notably the Go-to-CUDA transpiler in
 // package simt -- builds and tests on machines with no CUDA at all.
 //
+// # Synchronous by default, asynchronous on a Stream
+//
+// Alloc, Upload, Download, LaunchSync and the rest are synchronous: each has
+// finished when it returns. That is the whole API for a program that does not
+// care, and it is still what LaunchSync means.
+//
+// A Stream is the other half. Work queued on one is ordered against the rest
+// of that stream and against nothing else, and the host carries on
+// immediately, which is what lets a copy run while a kernel runs. Asynchronous
+// copies take page-locked host memory -- a HostSlice -- and not a []T, for
+// reasons that are not only about speed; see Slice.UploadAsync.
+//
 // # On context.Context
 //
-// Nothing here takes one, deliberately. Every call in this package is
-// synchronous and uncancellable: cuCtxSynchronize, cuMemcpyHtoD and
-// cuLaunchKernel cannot be interrupted once issued, so a deadline passed in
-// could only be ignored, and accepting one would advertise a guarantee that
-// does not exist.
+// One entry point takes one: Stream.Wait. It is meaningful there and nowhere
+// else, because cuStreamQuery can be polled against a cancelled context while
+// cuCtxSynchronize and cuMemcpyHtoD cannot be interrupted at all.
 //
-// It becomes meaningful once streams and events exist, because cuStreamQuery
-// can genuinely be polled against a cancelled context. When it arrives the
-// convention is a context.Context first, named ctx, and the CUDA context
-// second, named dev -- which is why the parameters are already spelled that
-// way.
+// Cancelling that wait stops the waiting and not the device. What follows
+// from that -- and what the Stream does about it -- is set out at Stream.Wait.
+// The convention is a context.Context first, named ctx, and the CUDA context
+// second, named dev, which is why the parameters elsewhere are spelled dev.
 package cuda
 
 import (

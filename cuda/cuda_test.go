@@ -23,7 +23,10 @@ import (
 // that kernels executed -- a compute-sanitizer sweep, say. There a silent skip
 // is the worst outcome available: the job goes green having launched nothing.
 // See .github/workflows/sanitizer.yml.
-func requireDevice(t *testing.T) {
+// It takes a testing.TB rather than a *testing.T so that the benchmarks can
+// use it too: a benchmark that silently measured nothing is the same failure
+// as a test that silently checked nothing.
+func requireDevice(t testing.TB) {
 	t.Helper()
 	if cuda.Available() {
 		return

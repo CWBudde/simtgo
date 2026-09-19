@@ -544,6 +544,22 @@ func (m *Module) Function(name string) (*Function, error) {
 // cost -- two C allocations become two Go ones -- and is done this way because
 // there is no C allocator left to call, not because it is faster.
 func (f *Function) LaunchSync(grid, block Dim3, sharedBytes int, args ...Arg) error {
+	// The null stream, which is what "synchronous" has always meant here.
+	if err := f.launch(0, grid, block, sharedBytes, args); err != nil {
+		return err
+	}
+	// A kernel fault is asynchronous: measured on a T550, cuLaunchKernel
+	// returns success and the trap surfaces here. Sync records it. It locks a
+	// thread of its own, which need not be this one -- cuCtxSynchronize waits
+	// on the context, not on the thread that issued the launch.
+	return f.x.Sync()
+}
+
+// launch marshals the parameters and issues cuLaunchKernel on one stream.
+//
+// LaunchSync and Function.Launch differ in the stream and in whether anything
+// waits afterwards; everything above that is this, once.
+func (f *Function) launch(stream uintptr, grid, block Dim3, sharedBytes int, args []Arg) error {
 	// Each parameter gets its own width, rounded up to 8, rather than a fixed
 	// 8-byte slot: a struct passed by value is as wide as the struct, and
 	// copying it into an 8-byte slot would overwrite the parameters after it.
@@ -577,19 +593,20 @@ func (f *Function) LaunchSync(grid, block Dim3, sharedBytes int, args ...Arg) er
 	}
 	// Marshalling and pinning happen above, off the locked thread: only the
 	// driver call itself has to stay on one.
-	if err := f.x.call("cuLaunchKernel", func() Result {
+	//
+	// The pin is released when this returns, which is correct even for an
+	// asynchronous launch and is worth saying because it looks wrong. The
+	// driver copies the parameter block out during cuLaunchKernel itself --
+	// it has to, since the caller is free to reuse those variables on the
+	// next line and CUDA promises that works. What outlives the call is the
+	// *device* memory the parameters point at, which is not Go memory and is
+	// the caller's to keep alive. TestLaunchAsyncSurvivesGC is the check.
+	return f.x.call("cuLaunchKernel", func() Result {
 		return cuLaunchKernel(f.f,
 			grid.X, grid.Y, grid.Z,
 			block.X, block.Y, block.Z,
-			uint32(sharedBytes), 0, params, nil)
-	}); err != nil {
-		return err
-	}
-	// A kernel fault is asynchronous: measured on a T550, cuLaunchKernel
-	// returns success and the trap surfaces here. Sync records it. It locks a
-	// thread of its own, which need not be this one -- cuCtxSynchronize waits
-	// on the context, not on the thread that issued the launch.
-	return f.x.Sync()
+			uint32(sharedBytes), stream, params, nil)
+	})
 }
 
 // Compile JIT-compiles CUDA C source to PTX with NVRTC.
