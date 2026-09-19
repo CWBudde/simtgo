@@ -64,7 +64,9 @@ type buildOptions struct {
 }
 
 // lowerOptions is what of a build's options the lowering is allowed to see.
-// Two of the three concern loading and are simply not consulted there.
+// Only WithBoundsChecks changes the generated C; WithCacheDir, WithoutPrebuilt
+// and WithoutDiskCache all concern the loading that comes after it and are
+// simply not consulted here.
 func (o buildOptions) lowerOptions() []lower.Option {
 	if o.boundsChecks {
 		return []lower.Option{lower.WithBoundsChecks()}

@@ -136,12 +136,69 @@ func TestWithoutDiskCacheIsANegativeControl(t *testing.T) {
 	}
 }
 
+// TestWithoutDiskCacheOnAWarmContext is the negative control's other half,
+// and the one a fresh context cannot see.
+//
+// The module cache on *cuda.Context answers before jit.Load's build callback
+// runs, so a context that has already loaded this kernel by way of the disk
+// used to satisfy a later WithoutDiskCache() from that same module -- the
+// option doing nothing, silently, which is the one thing a control must never
+// do. This is TestWithoutPrebuiltOnAWarmContext's twin, one option later, and
+// the cache key carries the mode for the same reason it carries the origin.
+func TestWithoutDiskCacheOnAWarmContext(t *testing.T) {
+	swapRegistry(t)
+	dir := t.TempDir()
+	t.Setenv("GOCUDA_PTX_CACHE", dir)
+
+	// Populate the disk cache, in a context that is then dropped.
+	populate := freshDevice(t)
+	if _, err := Build(populate, kernelSources, "FIR", WithoutPrebuilt(), WithCacheDir("")); err != nil {
+		t.Fatalf("Build (to populate the cache): %v", err)
+	}
+	entries := cacheEntries(t, dir)
+	if len(entries) != 1 {
+		t.Fatalf("the cache holds %d entries, want 1: %v", len(entries), entries)
+	}
+	stored, err := os.ReadFile(entries[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	const marker = "\n// served from the on-disk cache\n"
+	if err := os.WriteFile(entries[0], append(stored, marker...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// One context, warmed from the disk and then asked for the other path.
+	dev := freshDevice(t)
+	warm, err := Build(dev, kernelSources, "FIR", WithoutPrebuilt(), WithCacheDir(""))
+	if err != nil {
+		t.Fatalf("Build (warming): %v", err)
+	}
+	if !bytes.Contains(warm.PTX, []byte(marker)) {
+		t.Fatal("setup: the warming build did not come from the disk cache")
+	}
+
+	cold, err := Build(dev, kernelSources, "FIR",
+		WithoutPrebuilt(), WithoutDiskCache(), WithCacheDir(""))
+	if err != nil {
+		t.Fatalf("Build with WithoutDiskCache on a warm context: %v", err)
+	}
+	if bytes.Contains(cold.PTX, []byte(marker)) {
+		t.Error("WithoutDiskCache was answered from the module already loaded off the disk")
+	}
+}
+
 // TestDiskCacheRecoversFromAnUnloadableEntry covers the one way a
-// content-addressed cache can still be wrong: the bytes were right when they
-// were written and the driver will not take them now. A downgrade of the
-// driver under a cache written by a newer NVRTC is the real case; garbage
-// stands in for it here, because what is being tested is the recovery and not
-// the driver's opinion of a .version directive.
+// content-addressed cache can still be wrong: the file is not what NVRTC
+// wrote. Truncation, tampering, an interrupted write by something else --
+// garbage stands in for all of them.
+//
+// Not the driver-downgrade case, which this recovery does not mend: there the
+// cached .version is the one the local NVRTC emits, so the recompile emits it
+// again. The planted bytes below happen to come back as
+// CUDA_ERROR_UNSUPPORTED_PTX_VERSION all the same, measured, which is exactly
+// why the retry is not narrowed by result code -- see Load in
+// internal/jit/jit.go.
 //
 // Both halves matter. The build must succeed, and the bad entry must be gone
 // -- otherwise every process afterwards pays the failed load and the

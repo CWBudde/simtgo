@@ -103,17 +103,39 @@ var (
 // the one place that can end it: the context, which unloads what it owns on
 // Close.
 func Load(ctx *cuda.Context, req Request) (*Result, error) {
-	res, err := load(ctx, cacheKey(ctx, req), req)
+	key := cacheKey(ctx, req)
+	res, err := load(ctx, key, req)
 
-	// Cached PTX the driver will not accept. The file was written by this
-	// machine's own NVRTC, so the usual cause is that the driver changed
-	// under it -- a downgrade leaves an ISA version it no longer reads.
-	// Dropping the entry matters as much as the retry: without it every
-	// process pays the failed load and the recompile again.
+	// Cached PTX the driver will not accept. What the recompile recovers is a
+	// file that is not what NVRTC produced -- truncated, tampered with, a
+	// write some other program interrupted -- and that is the likely case,
+	// because the key pins the source, the architecture and the NVRTC
+	// version, so a hit means the local compiler would have produced these
+	// bytes.
+	//
+	// It does *not* recover a driver downgraded under an unchanged toolkit.
+	// There the cached .version is the one this NVRTC emits, so recompiling
+	// emits it again and the second load fails with the driver's own error,
+	// which is the right thing for a machine that genuinely needs a different
+	// toolkit.
+	//
+	// The result code cannot tell the two apart, and that is measured rather
+	// than assumed: corrupt bytes behind a bogus .version come back as
+	// CUDA_ERROR_UNSUPPORTED_PTX_VERSION, the same code a real downgrade
+	// gives (see cuda.TestLoadPTXError for the codes). Narrowing the retry to
+	// the codes only corruption produces would therefore drop the recovery
+	// for the likelier cause, to save one compile in the rarer one.
+	//
+	// Dropping the entry matters either way: a file the driver refuses is
+	// worthless whichever reason it refused it for.
+	//
+	// The retry keeps the original key, so the module it loads is the one the
+	// caller's next Build asks for rather than a second copy under a key only
+	// this recovery uses.
 	if err != nil && req.PTX == nil && !req.NoDiskCache && rejectedPTX(err) {
 		forgetDisk(diskKey(req.Src, ctx.Arch(), nvrtcTag()))
 		req.NoDiskCache = true
-		return load(ctx, cacheKey(ctx, req), req)
+		return load(ctx, key, req)
 	}
 
 	if err != nil && req.PTX != nil && rejectedPTX(err) {
@@ -144,8 +166,20 @@ func Load(ctx *cuda.Context, req Request) (*Result, error) {
 // one compiled here are different modules, and a caller that asked for the
 // second must not be handed the first because the first happened to be loaded
 // already. Leaving the origin out is what made WithoutPrebuilt unreliable.
+//
+// NoDiskCache partitions it for the same reason, one option later. The bytes
+// a disk hit produces are the bytes NVRTC would have produced -- that is what
+// the disk key guarantees -- so the two modules agree whenever the file is
+// what it claims to be. But a caller who passed NoDiskCache is precisely the
+// one not taking that on trust, and an option answered from a module loaded
+// the other way is an option that quietly does nothing. The cost is one
+// duplicate module in a context that builds the same kernel both ways, which
+// is a test or a benchmark and nothing else.
 func cacheKey(ctx *cuda.Context, req Request) string {
 	origin := "nvrtc"
+	if req.NoDiskCache {
+		origin = "nvrtc-nodisk"
+	}
 	if req.PTX != nil {
 		origin = "prebuilt\x00" + req.PTXArch
 	}
@@ -194,7 +228,7 @@ func load(ctx *cuda.Context, key string, req Request) (*Result, error) {
 			disk = diskKey(req.Src, ctx.Arch(), nvrtcTag())
 			if ptx := readDisk(disk); ptx != nil {
 				dump(req.CacheDir, req.Name, short, req.Src, ptx)
-				remember(key, artifacts{ptx: ptx, arch: ctx.Arch()})
+				rememberKeepingLog(key, artifacts{ptx: ptx, arch: ctx.Arch()})
 				return ptx, nil
 			}
 		}
@@ -244,6 +278,24 @@ func load(ctx *cuda.Context, key string, req Request) (*Result, error) {
 func remember(key string, a artifacts) {
 	artifactMu.Lock()
 	defer artifactMu.Unlock()
+	artifactOf[key] = a
+}
+
+// rememberKeepingLog records a build that does not know the compiler log,
+// without discarding one an earlier build did know.
+//
+// A disk hit is that build: the log is not stored with the PTX, and this map
+// is keyed on the cache key rather than on the context, so a second context
+// reading the file would otherwise replace the first context's entry with a
+// blank -- and the first context, whose module cache answers before any of
+// this runs, would start reporting no log for a compile that had one. Under
+// the lock, because a read followed by a write is not one.
+func rememberKeepingLog(key string, a artifacts) {
+	artifactMu.Lock()
+	defer artifactMu.Unlock()
+	if old, ok := artifactOf[key]; ok && old.log != "" {
+		a.log = old.log
+	}
 	artifactOf[key] = a
 }
 

@@ -187,9 +187,10 @@ func writeDisk(key string, ptx []byte) {
 
 // forgetDisk drops an entry the driver refused.
 //
-// Called when cached PTX turns out not to load -- a driver downgrade after the
-// file was written is the case that does it. Without this, every process would
-// pay the failed load and the recompile for as long as the file survived.
+// A file the driver will not load is worthless whatever made it so, and
+// without this every process would pay the failed load as well as the
+// recompile for as long as the file survived. Which causes the recompile
+// after it can and cannot mend is set out at Load, in jit.go.
 func forgetDisk(key string) {
 	path := diskPath(key)
 	if path == "" {

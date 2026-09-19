@@ -192,3 +192,57 @@ func TestNvrtcTagIsStable(t *testing.T) {
 	// ever stored under it.
 	t.Logf("nvrtcTag = %q", first)
 }
+
+// TestRememberKeepingLogDoesNotBlankACompilersLog covers the one thing a disk
+// hit knows less about than the compile that filled the file.
+//
+// artifactOf is keyed on the cache key and not on the context, so a second
+// context reading the PTX off disk would otherwise replace the first
+// context's entry with a blank log -- and the first context, whose module
+// cache answers before any of this runs, would start reporting no log for a
+// compile that had one. That is the guarantee TestJITLoadAcrossContexts pins
+// within one context; this is the same guarantee across two.
+func TestRememberKeepingLogDoesNotBlankACompilersLog(t *testing.T) {
+	const key = "TestRememberKeepingLog"
+	t.Cleanup(func() {
+		artifactMu.Lock()
+		defer artifactMu.Unlock()
+		delete(artifactOf, key)
+	})
+
+	// A real compile: PTX, a warning, an architecture.
+	remember(key, artifacts{ptx: []byte("compiled"), log: "warning: something", arch: "compute_75"})
+
+	// A disk hit for the same key, from another context. Same bytes by
+	// construction -- the disk key pins source, architecture and compiler --
+	// and no log, because the file holds only the PTX.
+	rememberKeepingLog(key, artifacts{ptx: []byte("compiled"), arch: "compute_75"})
+
+	got, ok := recall(key)
+	if !ok {
+		t.Fatal("the entry disappeared")
+	}
+	if got.log != "warning: something" {
+		t.Errorf("log = %q, want the compile's own %q", got.log, "warning: something")
+	}
+	if string(got.ptx) != "compiled" {
+		t.Errorf("ptx = %q, want %q", got.ptx, "compiled")
+	}
+
+	// With nothing recorded, it is an ordinary write: no log to keep, and the
+	// entry must still appear rather than being skipped.
+	const fresh = "TestRememberKeepingLogFresh"
+	t.Cleanup(func() {
+		artifactMu.Lock()
+		defer artifactMu.Unlock()
+		delete(artifactOf, fresh)
+	})
+	rememberKeepingLog(fresh, artifacts{ptx: []byte("from disk"), arch: "compute_75"})
+	got, ok = recall(fresh)
+	if !ok {
+		t.Fatal("a disk hit with no earlier entry recorded nothing")
+	}
+	if got.log != "" || string(got.ptx) != "from disk" {
+		t.Errorf("got %+v, want the disk hit's own ptx and no log", got)
+	}
+}

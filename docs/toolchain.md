@@ -340,11 +340,29 @@ accepts or does not. Serving a 12.8 artifact to a process that loaded NVRTC
 The origin term that `cacheKey` carries has no counterpart, because this cache
 only ever holds what NVRTC compiled — the prebuilt path already has its bytes.
 
-An entry the driver refuses is dropped and recompiled, which is the driver
-having been downgraded under a cache a newer NVRTC wrote. Dropping it matters
-as much as the retry: otherwise every process pays the failed load and the
-recompile for as long as the file survives. Every other way the cache can fail
-is a miss, because a cache is an optimisation and no build may sink on one.
+An entry the driver refuses is dropped and recompiled. What that recovers is a
+file which is not what NVRTC produced — truncated, tampered with, a write
+something else interrupted — and it is the likely case, because the key pins
+the source, the architecture and the compiler, so a hit means the local NVRTC
+would have produced these bytes.
+
+It does **not** recover a driver downgraded under an unchanged toolkit. There
+the cached `.version` is the one this NVRTC emits, so recompiling emits it
+again and the second load fails with the driver's own error — which is right
+for a machine that genuinely needs a different toolkit.
+
+The result code cannot tell the two apart, and that is measured rather than
+assumed: corrupt bytes behind a bogus `.version` come back as
+`CUDA_ERROR_UNSUPPORTED_PTX_VERSION`, the same code a real downgrade gives.
+(The codes are pinned in `cuda.TestLoadPTXError`, and there is a second
+surprise in them already: text with no PTX header at all is
+`CUDA_ERROR_INVALID_IMAGE`, not `CUDA_ERROR_INVALID_PTX`.) Narrowing the retry
+to the codes only corruption produces would therefore drop the recovery for
+the likelier cause in order to save one compile in the rarer one.
+
+Dropping the entry is right either way: a file the driver refuses is worthless
+whichever reason it refused it for. Every other way the cache can fail is a
+miss, because a cache is an optimisation and no build may sink on one.
 
 ## Where these numbers come from
 

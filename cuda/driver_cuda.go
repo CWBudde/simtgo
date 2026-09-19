@@ -61,11 +61,16 @@ func Available() bool {
 //
 // # Goroutine safety
 //
-// A *Context is safe to share between goroutines. Every method makes the
-// context current and issues its driver call on one OS thread it holds for
-// the duration, so a goroutine that migrates cannot leave a call behind on a
-// thread the context was never made current on. See call, and
-// docs/decisions.md#a-driver-call-holds-its-os-thread.
+// A *Context is safe to share between goroutines. Every method that needs the
+// context current goes through call, which makes it current and issues its
+// driver call on one OS thread it holds for the duration, so a goroutine that
+// migrates cannot leave a call behind on a thread the context was never made
+// current on. See docs/decisions.md#a-driver-call-holds-its-os-thread.
+//
+// Name and Close are the two that do not, because they do not need to: both
+// address the device by ordinal -- cuDeviceGetName and
+// cuDevicePrimaryCtxRelease -- and neither reads the current context. (Close
+// unloads the modules first, and each of those unloads does go through call.)
 //
 // What is *not* promised is ordering. The calls are synchronous, so each one
 // has finished before it returns, but two goroutines allocating, copying and
