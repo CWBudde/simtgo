@@ -576,15 +576,39 @@ Honest limits, not papered over:
 
 ## What already exists in Go
 
-| Project                                                                            | What it does                                            | Relation to this                                                                                       |
-| ---------------------------------------------------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| [`gorgonia.org/cu`](https://pkg.go.dev/gorgonia.org/cu)                            | Idiomatic bindings to the CUDA driver API               | The host half, done properly. Kernels are still written in CUDA C                                      |
-| [mumax3's `cuda2go`](https://github.com/mumax/3)                                   | Generates Go _wrappers_ from hand-written `.cu` kernels | The opposite direction: CUDA is the source of truth                                                    |
-| [`gosl`](https://www.cogentcore.org/lab/gosl/) (Cogent Core, formerly `emer/gosl`) | Translates Go to WGSL compute shaders for WebGPU        | The closest existing work — Go as a shader language, portable across vendors rather than CUDA-specific |
-| TinyGo                                                                             | Go on LLVM                                              | Registers `nvptx64`, but its Go version support and host-oriented runtime rule it out today            |
+Two questions separate these projects: **who writes the kernel**, and **what
+has to be installed to build.** Sorted by the first.
 
-This repository's distinguishing bet is the **single source**: the kernel is a
-Go function that both backends run, so correctness is testable without a GPU.
+| Project                                                                            | What it does                                                                 | Relation to this                                                                                                                                  |
+| ---------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`cuda-ir.go`](https://github.com/mehdi-shokohi/cuda-ir.go)                        | Go → LLVM IR via `llgo`, rewritten for NVPTX, `llc` to PTX                   | The nearest thing to CUDA Rust's actual route. Real codegen rather than source translation — and it needs LLVM 22 and an `llgo` checkout to build |
+| [`gosl`](https://www.cogentcore.org/lab/gosl/) (Cogent Core, formerly `emer/gosl`) | Translates Go to WGSL compute shaders for WebGPU                             | The closest _source-level_ work — Go as a shader language, portable across vendors rather than CUDA-specific                                      |
+| TinyGo                                                                             | Go on LLVM                                                                   | Registers `nvptx64`, but its Go version support and host-oriented runtime rule it out today                                                       |
+| [`gocudrv`](https://github.com/eitamring/gocudrv)                                  | CUDA driver API in pure Go: `purego` loads `libcuda` at run time, no cgo     | The same host-side bet as `cuda/` here, arrived at independently and with more of the driver covered. PTX is an input to it, not an output        |
+| [`gorgonia.org/cu`](https://pkg.go.dev/gorgonia.org/cu)                            | Idiomatic bindings to the CUDA driver API, through cgo                       | The host half, done properly. Kernels are still written in CUDA C                                                                                 |
+| [`cudago`](https://github.com/InternatBlackhole/cudago)                            | Generates Go wrappers for hand-written `.cu` files; wraps the driver + NVRTC | The opposite direction, with cgo: CUDA is the source of truth                                                                                     |
+| [mumax3's `cuda2go`](https://github.com/mumax/3)                                   | Generates Go _wrappers_ from hand-written `.cu` kernels                      | The opposite direction, and the oldest of them: CUDA is the source of truth                                                                       |
+
+Nothing here is settled work that this replaces. `gocudrv` and `cuda-ir.go` are
+both from 2026 and both predate this repository by months and days
+respectively; the field is being explored from several directions at once, and
+`cuda-ir.go` builds on `gocudrv` for its host half, which is a reasonable
+division that this repository does not make.
+
+Two things distinguish what is here rather than one:
+
+- **A single source.** The kernel is a Go function that the CPU emulator and
+  the device both run, so correctness is testable without a GPU. The
+  IR-level and wrapper-generating projects have no CPU-side twin of the kernel
+  to compare against.
+- **A written subset.** [`SPEC.md`](SPEC.md) says what is accepted and what is
+  refused, and [a test fails in both directions](simt/spec_test.go) if the
+  implementation and the document disagree. A Go subset that is only defined by
+  what the emitter happens to accept is a different kind of promise.
+
+The cost of both is the ceiling stated above: source-level translation gets
+NVRTC's optimiser and no control below it. `cuda-ir.go`'s route is the one that
+can eventually go lower.
 
 ## Documentation
 
